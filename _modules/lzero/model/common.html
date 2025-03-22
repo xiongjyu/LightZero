@@ -528,23 +528,12 @@
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="c1"># Construct the attention mask to exclude padding tokens.</span>
         <span class="n">attention_mask</span> <span class="o">=</span> <span class="n">x</span> <span class="o">!=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tokenizer</span><span class="o">.</span><span class="n">pad_token_id</span>
-        <span class="c1"># print(f&#39;attention_mask={attention_mask}&#39;)</span>
+
         <span class="c1"># Use no_grad context if specified to disable gradient computation.</span>
         <span class="k">if</span> <span class="n">no_grad</span><span class="p">:</span>
-            <span class="c1"># with torch.no_grad():</span>
-            <span class="c1">#     x = x.long()  # Ensure the input tensor is of type long.</span>
-            <span class="c1">#     outputs = self.model(x, attention_mask=attention_mask)</span>
-            <span class="c1">#     # Get the hidden state from the last layer and select the output corresponding to the [CLS] token.</span>
-            <span class="c1">#     cls_embedding = outputs.last_hidden_state[:, 0, :]</span>
-
-            <span class="c1"># TODO xjy modified</span>
             <span class="k">with</span> <span class="n">torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">():</span>
-                <span class="n">obs</span> <span class="o">=</span> <span class="n">x</span><span class="p">[</span><span class="s1">&#39;observation&#39;</span><span class="p">]</span><span class="o">.</span><span class="n">long</span><span class="p">()</span>
-                <span class="n">obs_attn_mask</span> <span class="o">=</span> <span class="n">x</span><span class="p">[</span><span class="s1">&#39;obs_attn_mask&#39;</span><span class="p">][</span><span class="mi">0</span><span class="p">]</span>
-                <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">obs_attn_mask</span><span class="p">,</span> <span class="n">List</span><span class="p">):</span>
-                    <span class="n">obs_attn_mask</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">stack</span><span class="p">(</span><span class="n">obs_attn_mask</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
-    
-                <span class="n">outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">(</span><span class="n">obs</span><span class="p">,</span> <span class="n">attention_mask</span><span class="o">=</span><span class="n">obs_attn_mask</span><span class="p">)</span>
+                <span class="n">x</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">long</span><span class="p">()</span>  <span class="c1"># Ensure the input tensor is of type long.</span>
+                <span class="n">outputs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">model</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">attention_mask</span><span class="o">=</span><span class="n">attention_mask</span><span class="p">)</span>
                 <span class="c1"># Get the hidden state from the last layer and select the output corresponding to the [CLS] token.</span>
                 <span class="n">cls_embedding</span> <span class="o">=</span> <span class="n">outputs</span><span class="o">.</span><span class="n">last_hidden_state</span><span class="p">[:,</span> <span class="mi">0</span><span class="p">,</span> <span class="p">:]</span>
         <span class="k">else</span><span class="p">:</span>
