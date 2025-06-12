@@ -1116,9 +1116,9 @@
 <span class="sd">            Clear the caches and precompute positional embedding matrices in the model.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">for</span> <span class="n">model</span> <span class="ow">in</span> <span class="p">[</span><span class="bp">self</span><span class="o">.</span><span class="n">_collect_model</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_target_model</span><span class="p">]:</span>
-            <span class="c1"># if not self._cfg.model.world_model_cfg.rotary_emb:</span>
-            <span class="c1">#     # If rotary_emb is False, nn.Embedding is used for absolute position encoding.</span>
-            <span class="c1">#     model.world_model.precompute_pos_emb_diff_kv()</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">_cfg</span><span class="o">.</span><span class="n">model</span><span class="o">.</span><span class="n">world_model_cfg</span><span class="o">.</span><span class="n">rotary_emb</span><span class="p">:</span>
+                <span class="c1"># If rotary_emb is False, nn.Embedding is used for absolute position encoding.</span>
+                <span class="n">model</span><span class="o">.</span><span class="n">world_model</span><span class="o">.</span><span class="n">precompute_pos_emb_diff_kv</span><span class="p">()</span>
             <span class="n">model</span><span class="o">.</span><span class="n">world_model</span><span class="o">.</span><span class="n">clear_caches</span><span class="p">()</span>
         <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">empty_cache</span><span class="p">()</span></div></div>
 </pre></div>
