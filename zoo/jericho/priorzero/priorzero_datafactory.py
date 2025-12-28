@@ -31,6 +31,7 @@ class DataProcessor:
 
         self.use_cot = self.args.use_cot
         self.prompt_max_len = self.args.prompt_max_len
+        self.generate_max_len = self.args.generate_max_len
         self.temperature = self.args.temperature
         self.top_p = self.args.top_p
         self.vllm_enable_sleep = self.args.vllm_enable_sleep
@@ -221,7 +222,7 @@ class DataProcessor:
         cot_sampling_params = SamplingParams(
             temperature=1.0,
             top_p=1.0,
-            max_tokens=self.prompt_max_len,
+            max_tokens=self.generate_max_len,
             include_stop_str_in_output=True,
             logprobs=None,
             prompt_logprobs=None,
@@ -362,7 +363,7 @@ class DataProcessor:
         sampling_params = SamplingParams(
             temperature=1.0,
             top_p=1.0,
-            max_tokens=self.prompt_max_len,
+            max_tokens=self.generate_max_len,
             logprobs=None,
             prompt_logprobs=None,
         )

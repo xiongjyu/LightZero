@@ -20,7 +20,7 @@ class PriorZeroLLMConfig:
     history_length: int = 5
     use_cot: bool = False
     prompt_max_len = 8192
-    generate_max_len = 128
+    generate_max_len = 512
     bf16: bool = True
 
     # vLLM engines 
