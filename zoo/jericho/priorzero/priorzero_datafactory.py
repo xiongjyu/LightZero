@@ -17,7 +17,7 @@ class DataProcessor:
       - samples -> Dataset/Dataloader（collate_fn 做 pack）
     """
 
-    def __init__(self, rank, vllm_engine, strategy, model_path, exp_name=None, instance_name="vllm_output"):
+    def __init__(self, rank, world_size, vllm_engine, strategy, model_path, exp_name=None, instance_name="vllm_output"):
         self.vllm_engine = vllm_engine
         self.strategy = strategy
         self.args = getattr(strategy, "args", None)
@@ -36,6 +36,7 @@ class DataProcessor:
         self.vllm_enable_sleep = self.args.vllm_enable_sleep
         self.reduction = self.args.reduction
         self.rank = rank
+        self.world_size = world_size
         self.output_step = 0
         
         from collections import deque
@@ -145,30 +146,34 @@ class DataProcessor:
         return samples
 
     def make_llm_train_samples(self, priorzero_batch) -> List[Dict[str, Any]]:
-        current_batch, target_batch = priorzero_batch
-        obs_batch_ori, action_batch, target_action_batch, mask_batch, batch_index_tensor, weights, make_time, timestep_batch, raw_obs_list, history_obs_list, action_logprob_list = current_batch
-        target_reward, target_value, target_policy = target_batch
-
+        raw_obs_list, history_obs_list, action_logprob_list, target_value = priorzero_batch
+        assert len(raw_obs_list) == len(history_obs_list) == len(action_logprob_list) == len(target_value)
+        
         samples = self.build_llm_samples(raw_obs_list, history_obs_list, action_logprob_list, target_value)
-
+        per_rank = len(samples) // self.world_size
+        start = self.rank * per_rank
+        end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(samples) 
+        print(f"[Rank {self.rank}] process {start}: {end} samples, total {len(samples)} samples.")
+        real_samples = samples[start:end]
+        
         if self.use_cot:
             if self.vllm_enable_sleep:
                 self.vllm_engine.wake_up()
             
-            all_user_prompts = [s["instruction"] for s in samples]
+            all_user_prompts = [s["instruction"] for s in real_samples]
             prefix_list = self._build_cot_prefix_texts(all_user_prompts)
-            for s, p in zip(samples, prefix_list):
+            for s, p in zip(real_samples, prefix_list):
                 s["prefix_cot"] = p
             
             if self.vllm_enable_sleep:
                 self.vllm_engine.sleep()
 
         if self.use_cot:
-            prompts_only = [s["prompt"] + s["prefix_cot"] + " " for s in samples]
+            prompts_only = [s["prompt"] + s["prefix_cot"] + " " for s in real_samples]
         else:
-            prompts_only = [s["prompt"] for s in samples]
+            prompts_only = [s["prompt"] for s in real_samples]
 
-        targets_only = [s["target"] + self.tokenizer.eos_token for s in samples]
+        targets_only = [s["target"] + self.tokenizer.eos_token for s in real_samples]
 
         prompts_ids_list = self.tokenizer(prompts_only, add_special_tokens=False, truncation=True, max_length=self.prompt_max_len - 20)["input_ids"]
         tgt_ids_list = self.tokenizer(targets_only, add_special_tokens=False, truncation=True)["input_ids"]
@@ -188,14 +193,21 @@ class DataProcessor:
         max_tgt_len = max(len(t) for t in tgt_ids_list)
         action_mask = action_mask_full[:, -max_tgt_len:] 
 
-        gt = torch.tensor(
-            [s["target_value"] if s["target_value"] is not None else s["reward"] for s in samples],
-            dtype=torch.float32,
-        )
-        old_seq_max_len = max([len(s['old_logprob']) for s in samples])
-        old_logprob = torch.zeros(len(samples), old_seq_max_len, dtype=torch.float32)
-        for idx in range(len(samples)):
-            logprob_token_list = samples[idx]['old_logprob']
+        if self.args.advantage_type == "target_value":
+            gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
+        elif self.args.advantage_type == "target_reward":
+            gt = torch.tensor([s["reward"] for s in real_samples], dtype=torch.float32)
+        elif self.args.advantage_type == "target_value_batch_norm":
+            gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
+            gt = (gt - gt.mean()) / (gt.std() + 1e-8)
+        else:
+            raise ValueError("")
+        
+        
+        old_seq_max_len = max([len(s['old_logprob']) for s in real_samples])
+        old_logprob = torch.zeros(len(real_samples), old_seq_max_len, dtype=torch.float32)
+        for idx in range(len(real_samples)):
+            logprob_token_list = real_samples[idx]['old_logprob']
             old_logprob[idx, -len(logprob_token_list):] = torch.tensor(logprob_token_list, dtype=torch.float32)
 
         return inputs.input_ids, inputs.attention_mask, action_mask, gt, old_logprob
@@ -253,27 +265,38 @@ class DataProcessor:
         histories: Optional[List[List[Tuple[str, str, float]]]] = None,
     ) -> List[Any]:
 
+        self.vllm_output.append((states[0], histories[0]))
+
+        prompt_list = []
+        assert len(states) == len(histories) == len(valid_actions_list)
+        for state, history in zip(states, histories):
+            prompt = self.build_llm_prompt(current_obs=state, history=history)
+            prompt_list.append(prompt)
+
+        if self.use_cot:
+            prefix_cots = self._build_cot_prefix_texts(prompt_list)
+        else:
+            prefix_cots = [None] * len(prompt_list)
+
         all_prompts = []
         all_labels = []
-        self.vllm_output.append((states[0], histories[0]))
-        
-        for i, actions in enumerate(valid_actions_list):  
-            actions.append('go')   # 确保环境使用的动作都在valid actions里有对应的logprob
-            state = states[i]
-            history = histories[i]
-            prompt = self.build_llm_prompt(current_obs=state, history=history)
-            
-            for action in actions:
+        all_prefix_cots = []
+
+        for prompt, actions, prefix in zip(prompt_list, valid_actions_list, prefix_cots):
+            actions2 = actions if "go" in actions else (actions + ["go"])   # 确保环境使用的动作都在valid actions里有对应的logprob
+            for action in actions2:
                 all_prompts.append(prompt)
                 all_labels.append(action)
+                all_prefix_cots.append(prefix)
         
-        scores, old_action_logprob = self._score_labels_with_prompt_logprobs(all_prompts, all_labels)
+        scores, old_action_logprob = self._score_labels_with_prompt_logprobs(all_prompts, all_labels, all_prefix_cots)
         llm_prior_per_seq, llm_prior_per_tok, idx = [],[], 0
         
-        for env_id in range(len(states)):
+        for prompt, actions, prefix in zip(prompt_list, valid_actions_list, prefix_cots):
+            actions2 = actions if "go" in actions else (actions + ["go"])
             tmp_dict = {}
             tmp_dict2 = {}
-            for action in valid_actions_list[env_id]:
+            for action in actions2:
                 tmp_dict[action] = scores[idx]
                 tmp_dict2[action] = old_action_logprob[idx]
                 idx = idx + 1
@@ -282,12 +305,8 @@ class DataProcessor:
         return llm_prior_per_seq, llm_prior_per_tok
 
     @torch.no_grad()
-    def _score_labels_with_prompt_logprobs(self, all_prompts: List[str], all_labels: List[str]) -> List[float]:
-        assert len(all_prompts) == len(all_labels)
-        
-        if self.use_cot:
-            all_prefix_cot = self._build_cot_prefix_texts(all_prompts)
-
+    def _score_labels_with_prompt_logprobs(self, all_prompts: List[str], all_labels: List[str], all_prefix_cots: List[str]) -> List[float]:
+        assert len(all_prompts) == len(all_labels) == len(all_prefix_cots)
         sampling_params = SamplingParams(
             temperature=self.temperature,
             top_p=self.top_p,
@@ -299,7 +318,7 @@ class DataProcessor:
 
         all_context_texts = [self.build_chat_context(p) for p in all_prompts]
         if self.use_cot:
-            all_context_texts = [c + pc + " " for c, pc in zip(all_context_texts, all_prefix_cot)]
+            all_context_texts = [c + pc + " " for c, pc in zip(all_context_texts, all_prefix_cots)]
 
         context_ids = self.tokenizer(all_context_texts, add_special_tokens=False, max_length=self.prompt_max_len - 20, padding=False, truncation=True)["input_ids"]
 

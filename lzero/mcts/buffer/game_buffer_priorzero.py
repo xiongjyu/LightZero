@@ -47,10 +47,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         batch_target_policies = self._compute_target_policy_non_reanalyzed(
             policy_non_re_context, self.action_space_size
         )
-
-        target_batch = [batch_rewards, batch_target_values, batch_target_policies]
-
-        return [current_batch, target_batch]
+        return [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values]
     
     def sample(self, batch_size: int, policy) -> List[Any]:
         """Sample data with game_segments (optimized version)."""

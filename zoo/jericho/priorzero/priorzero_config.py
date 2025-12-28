@@ -30,7 +30,7 @@ class PriorZeroLLMConfig:
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
     vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
     vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行
-    gpu_memory_utilization: float = 0.6
+    gpu_memory_utilization: float = 0.3
     vllm_enable_sleep: bool = True # 是否可以休眠
     temperature: float = 1.0
     top_p: float = 1.0
@@ -58,6 +58,7 @@ class PriorZeroLLMConfig:
     adam_betas: Tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.01
     policy_loss_type: str = "ppo"   # 'ppo' / 'gspo'
+    advantage_type: str = "target_value_batch_norm" # "target_value", "target_reward", "target_value_batch_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k1"

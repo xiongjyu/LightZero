@@ -140,6 +140,7 @@ def train_priorzero(
     
     from priorzero_datafactory import DataProcessor
     data_processor = DataProcessor(rank=rank, 
+                                   world_size=world_size,
                                    vllm_engine=vllm_engine, 
                                    strategy=strategy, 
                                    model_path=llm_cfg.model_name_or_path,
@@ -170,7 +171,7 @@ def train_priorzero(
     
     while True:
         cmd = "noop"
-        train_samples = None
+        priorzero_batch = None
         if rank == 0:
             if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter):
                 logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
@@ -199,7 +200,7 @@ def train_priorzero(
                 
                 num_of_transitions = replay_buffer.get_num_of_transitions() 
                 new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
-                logger.info(f"[Rank {rank}] Data collected, num_of_transitions: {num_of_transitions} transitions")
+                logger.info(f"[Rank {rank}] Data collected, num_of_transitions: {num_of_transitions} transitions\tnew_num_of_transitions: {new_num_of_transitions}")
             
                 if not (num_of_transitions > batch_size):
                     logger.warning(
@@ -220,7 +221,6 @@ def train_priorzero(
                 
                 if  new_num_of_transitions >= llm_cfg.llm_learn_num_samples:
                     priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_cfg.llm_learn_num_samples, policy=policy)
-                    train_samples = data_processor.make_llm_train_samples(priorzero_batch)
                     cmd = "llm"
 
                 if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
@@ -231,9 +231,10 @@ def train_priorzero(
             break
         elif cmd == "llm":
             logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
-            train_samples = bcast_obj(world_size, train_samples, rank, src=0) 
-            logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(train_samples[0])}. Starting LLM training...")
-
+            priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0) 
+            logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0])}. Starting LLM training...")
+            
+            train_samples = data_processor.make_llm_train_samples(priorzero_batch)
             trainer.train_batch(train_samples)
             torch_dist_barrier_and_cuda_sync()
             

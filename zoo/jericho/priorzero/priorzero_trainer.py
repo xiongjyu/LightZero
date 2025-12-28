@@ -75,17 +75,12 @@ class PriorZeroLLMTrainer:
         input_ids, attention_mask, action_mask, gt, old_lp = data
         assert len(input_ids) == len(attention_mask) == len(action_mask) == len(gt) == len(old_lp)
         
-        bsz = input_ids.size(0)
-        per_rank = bsz // self.world_size
-        start = self.rank * per_rank
-        end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else bsz  
-
         batch = {
-            "input_ids": input_ids[start:end],
-            "attention_mask": attention_mask[start:end],
-            "action_mask": action_mask[start:end],
-            "advantages": gt[start:end],     
-            "old_action_logprob": old_lp[start:end],     
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "action_mask": action_mask,
+            "advantages": gt,     
+            "old_action_logprob": old_lp     
         }
         if self.reference_model is not None:
             base_action_log_probs = self.reference_model.forward(
