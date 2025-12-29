@@ -31,14 +31,21 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         self.last_pos_in_transition = 0
     
     def fetch_latest_batch(self, batch_size: int, policy) -> List[Any]:
+        """
+        Fetch latest batch for LLM training.
+
+        Returns:
+            [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values, cot_prefix_list]
+            CoT prefix list is added for CoT reuse optimization.
+        """
         policy._target_model.to(self._cfg.device)
         policy._target_model.eval()
-        
+
         reward_value_context, policy_re_context, policy_non_re_context, current_batch = self._make_batch(
             batch_size, self._cfg.reanalyze_ratio, fetch_latest=True
         )
 
-        obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, action_logprob_list = current_batch
+        obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, action_logprob_list, cot_prefix_list = current_batch
         # Standard processing
         batch_rewards, batch_target_values = self._compute_target_reward_value(
             reward_value_context, policy._target_model, current_batch[2], timestep_list
@@ -47,7 +54,8 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         batch_target_policies = self._compute_target_policy_non_reanalyzed(
             policy_non_re_context, self.action_space_size
         )
-        return [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values]
+        # CoT reuse optimization: return cot_prefix_list
+        return [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values, cot_prefix_list]
     
     def sample(self, batch_size: int, policy) -> List[Any]:
         """Sample data with game_segments (optimized version)."""
@@ -110,6 +118,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         obs_list, action_list, mask_list = [], [], []
         raw_obs_list, history_obs_list = [], []
         action_logprob_list = []
+        cot_prefix_list = []  # CoT reuse optimization
         timestep_list = []
         bootstrap_action_list = []
 
@@ -141,14 +150,18 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             )
             raw_obs_list.append(game_segment_list[i].get_unroll_raw_obs(
                 pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
-            ))  
+            ))
             history_obs_list.append(game_segment_list[i].get_unroll_histroy_obs(
                 pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
             ))
             action_logprob_list.append(game_segment_list[i].get_unroll_action_logprob(
                 pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
             ))
-            
+            # CoT reuse optimization: extract CoT prefixes
+            cot_prefix_list.append(game_segment_list[i].get_unroll_cot_prefix(
+                pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
+            ))
+
             action_list.append(actions_tmp)
             mask_list.append(mask_tmp)
             timestep_list.append(timestep_tmp)
@@ -168,10 +181,11 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         current_batch = [obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list]
         for i in range(len(current_batch)):
             current_batch[i] = np.asarray(current_batch[i])
-            
+
         current_batch.append(raw_obs_list)
         current_batch.append(history_obs_list)
         current_batch.append(action_logprob_list)
+        current_batch.append(cot_prefix_list)  # CoT reuse optimization
 
         total_transitions = self.get_num_of_transitions()
 

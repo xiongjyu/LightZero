@@ -135,11 +135,12 @@ class PriorZeroCollector(OriginalCollector):
     ) -> None:
         beg_index = self.policy_config.model.frame_stack_num
         end_index = beg_index + self.policy_config.num_unroll_steps + self.policy_config.td_steps
-        
+
         pad_obs_lst = game_segments[i].obs_segment[beg_index:end_index]
         pad_raw_obs_lst = game_segments[i].raw_obs_segment[beg_index:end_index]
         pad_history_obs_lst = game_segments[i].history_obs_segment[beg_index:end_index]
         pad_action_logprob_lst = game_segments[i].action_logprob_segment[beg_index:end_index]
+        pad_cot_prefix_lst = game_segments[i].cot_prefix_segment[beg_index:end_index]  # CoT reuse
 
         # NOTE: Specific padding logic for UniZero.
         pad_action_lst = game_segments[i].action_segment[:self.policy_config.num_unroll_steps + self.policy_config.td_steps]
@@ -163,20 +164,23 @@ class PriorZeroCollector(OriginalCollector):
         if self.policy_config.gumbel_algo:
             last_game_segments[i].pad_over(
                 pad_obs_lst, pad_reward_lst, pad_action_lst, pad_root_values_lst, pad_child_visits_lst,
-                next_segment_improved_policy=pad_improved_policy_prob
+                next_segment_improved_policy=pad_improved_policy_prob,
+                next_segment_cot_prefix=pad_cot_prefix_lst  # CoT reuse
             )
         else:
             if self.policy_config.use_ture_chance_label_in_chance_encoder:
                 last_game_segments[i].pad_over(
                     pad_obs_lst, pad_reward_lst, pad_action_lst, pad_root_values_lst, pad_child_visits_lst,
                     next_chances=chance_lst, next_segment_raw_obs=pad_raw_obs_lst,
-                    next_segment_history_obs=pad_history_obs_lst, next_segment_action_logprob=pad_action_logprob_lst
+                    next_segment_history_obs=pad_history_obs_lst, next_segment_action_logprob=pad_action_logprob_lst,
+                    next_segment_cot_prefix=pad_cot_prefix_lst  # CoT reuse
                 )
             else:
                 last_game_segments[i].pad_over(
-                    pad_obs_lst, pad_reward_lst, pad_action_lst, pad_root_values_lst, pad_child_visits_lst, 
+                    pad_obs_lst, pad_reward_lst, pad_action_lst, pad_root_values_lst, pad_child_visits_lst,
                     next_segment_raw_obs=pad_raw_obs_lst, next_segment_history_obs=pad_history_obs_lst,
-                    next_segment_action_logprob=pad_action_logprob_lst
+                    next_segment_action_logprob=pad_action_logprob_lst,
+                    next_segment_cot_prefix=pad_cot_prefix_lst  # CoT reuse
                 )
 
         last_game_segments[i].game_segment_to_array()
@@ -351,10 +355,12 @@ class PriorZeroCollector(OriginalCollector):
                         valid_actions_list.append(valid_actions)
 
                     with self._profile_block(name='collect_get_llm_prior_profile'):
-                        llm_prior_per_seq, llm_prior_per_tok = self.data_processor.get_llm_prior(
+                        # CoT reuse optimization: request CoT prefixes to store in game segments
+                        llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
                             states=raw_obs_list,
                             valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
-                            histories=histories_list
+                            histories=histories_list,
+                            return_cot=True  # Request CoT prefixes for reuse in training
                         )
 
                 policy_kwargs_forward = {
@@ -429,7 +435,7 @@ class PriorZeroCollector(OriginalCollector):
                         
                     self.history_buffers[env_id].append((raw_obs_text, action, float(reward)))
                     
-                    # Append transition to game segment
+                    # Append transition to game segment (including CoT prefix for reuse optimization)
                     game_segments[env_id].append(
                         actions[env_id],
                         to_ndarray(obs_new['observation']),
@@ -439,7 +445,8 @@ class PriorZeroCollector(OriginalCollector):
                         timestep=to_ndarray(obs_new.get('timestep', -1)),
                         raw_obs_text=extract_raw_obs_text(obs_new),
                         history_obs=list(self.history_buffers[env_id]),
-                        action_logprob=llm_prior_per_tok[env_id]
+                        action_logprob=llm_prior_per_tok[env_id],
+                        cot_prefix=cot_prefixes[env_id] if env_id < len(cot_prefixes) else None  # CoT reuse
                     )
 
                     # Update state

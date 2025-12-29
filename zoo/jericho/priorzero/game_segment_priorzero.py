@@ -13,6 +13,7 @@ class GameSegment(OriginalGameSegment):
         - raw_obs_segment: List of raw text observations (for LLM prompts)
         - llm_prior_segment: List of LLM generated text (for debugging)
         - search_value_segment: List of MCTS search values (for priority)
+        - cot_prefix_segment: List of CoT prefixes (for CoT reuse optimization)
     """
 
     def __init__(
@@ -36,23 +37,30 @@ class GameSegment(OriginalGameSegment):
         self.raw_obs_segment = []          # Raw text observations
         self.history_obs_segment = []
         self.action_logprob_segment = []   # Logprob of chosen action (for PPO/RFT)
+        self.cot_prefix_segment = []       # CoT prefixes for reuse (optimization)
 
-    def reset(self, init_observations: List[np.ndarray], init_raw_obs, init_history_obs, init_action_logprob) -> None:
+    def reset(self, init_observations: List[np.ndarray], init_raw_obs, init_history_obs, init_action_logprob, init_cot_prefix=None) -> None:
         """
         [PRIORZERO-MODIFIED]
         Reset the segment with initial observations.
 
         Args:
             init_observations: List of initial frame stack observations
+            init_raw_obs: Initial raw text observation
+            init_history_obs: Initial history observations
+            init_action_logprob: Initial action logprob
+            init_cot_prefix: Initial CoT prefix (optional, for CoT reuse)
         """
         super().reset(init_observations)
         self.raw_obs_segment.clear()
         self.history_obs_segment.clear()
         self.action_logprob_segment.clear()
-        
-        self.raw_obs_segment.append(init_raw_obs) 
+        self.cot_prefix_segment.clear()  # Clear CoT prefix segment
+
+        self.raw_obs_segment.append(init_raw_obs)
         self.history_obs_segment.append(init_history_obs)
-        self.action_logprob_segment.append(init_action_logprob)  
+        self.action_logprob_segment.append(init_action_logprob)
+        self.cot_prefix_segment.append(init_cot_prefix if init_cot_prefix is not None else "")  
 
     def append(
         self,
@@ -66,6 +74,7 @@ class GameSegment(OriginalGameSegment):
         raw_obs_text: Optional[str] = None,
         history_obs: Optional[List[str]] = None,
         action_logprob: Optional[float] = None,
+        cot_prefix: Optional[str] = None,
         **kwargs
     ) -> None:
         """
@@ -78,13 +87,20 @@ class GameSegment(OriginalGameSegment):
             reward: Reward received
             action_mask: Valid action mask
             to_play: Player ID (for multi-agent)
-            **kwargs: Additional arguments (timestep, chance, raw_obs_text, llm_prior_text)
+            timestep: Timestep in episode
+            chance: Chance node indicator
+            raw_obs_text: Raw text observation (for LLM)
+            history_obs: History observations (for LLM)
+            action_logprob: Action logprob (for PPO/RFT)
+            cot_prefix: CoT prefix for reuse (optimization)
+            **kwargs: Additional arguments
         """
         # Call parent append with remaining kwargs
         super().append(action, obs, reward, action_mask, to_play, timestep, chance)
         self.raw_obs_segment.append(raw_obs_text)
         self.history_obs_segment.append(history_obs)
         self.action_logprob_segment.append(action_logprob)
+        self.cot_prefix_segment.append(cot_prefix if cot_prefix is not None else "")
 
     def store_search_stats(self, visit_counts: List, root_value: List) -> None:
         """
@@ -118,9 +134,18 @@ class GameSegment(OriginalGameSegment):
     
     def pad_over(
             self, next_segment_observations: List, next_segment_rewards: List, next_segment_actions: List, next_segment_root_values: List,
-            next_segment_child_visits: List, next_segment_improved_policy: List = None, next_chances: List = None, 
-            next_segment_raw_obs: List = None, next_segment_history_obs: List = None, next_segment_action_logprob: List = None
+            next_segment_child_visits: List, next_segment_improved_policy: List = None, next_chances: List = None,
+            next_segment_raw_obs: List = None, next_segment_history_obs: List = None, next_segment_action_logprob: List = None,
+            next_segment_cot_prefix: List = None
     ) -> None:
+        """
+        [PRIORZERO-MODIFIED]
+        Pad the segment with data from the next segment for temporal continuity.
+
+        Args:
+            ... (existing args)
+            next_segment_cot_prefix: CoT prefixes from next segment (for CoT reuse)
+        """
         super().pad_over(
             next_segment_observations, next_segment_rewards, next_segment_actions, next_segment_root_values,
             next_segment_child_visits, next_segment_improved_policy, next_chances
@@ -128,6 +153,7 @@ class GameSegment(OriginalGameSegment):
         assert len(next_segment_raw_obs) <= self.num_unroll_steps + self.td_steps
         assert len(next_segment_history_obs) <= self.num_unroll_steps + self.td_steps
         assert len(next_segment_action_logprob) <= self.num_unroll_steps + self.td_steps
+
         import copy
         for raw_obs in next_segment_raw_obs:
             self.raw_obs_segment.append(copy.deepcopy(raw_obs))
@@ -135,6 +161,12 @@ class GameSegment(OriginalGameSegment):
             self.history_obs_segment.append(copy.deepcopy(history_obs))
         for lp in next_segment_action_logprob:
             self.action_logprob_segment.append(copy.deepcopy(lp))
+
+        # Handle CoT prefix padding (optimization for CoT reuse)
+        if next_segment_cot_prefix is not None:
+            assert len(next_segment_cot_prefix) <= self.num_unroll_steps + self.td_steps
+            for cot_prefix in next_segment_cot_prefix:
+                self.cot_prefix_segment.append(copy.deepcopy(cot_prefix) if cot_prefix is not None else "")
 
     def get_unroll_raw_obs(self, timestep: int, num_unroll_steps: int = 0, padding: bool = False) -> np.ndarray:
         """
@@ -181,6 +213,27 @@ class GameSegment(OriginalGameSegment):
                 pad_frames = [stacked_logprob[-1] for _ in range(pad_len)]
                 stacked_logprob = stacked_logprob + pad_frames
         return stacked_logprob
+
+    def get_unroll_cot_prefix(self, timestep: int, num_unroll_steps: int = 0, padding: bool = False) -> List[str]:
+        """
+        Return CoT prefixes aligned with observations for unroll window (CoT reuse optimization).
+
+        Args:
+            timestep: The time step
+            num_unroll_steps: The extra length of the CoT prefix frames
+            padding: If True, pad frames if outside of trajectory
+
+        Returns:
+            List of CoT prefix strings
+        """
+        stacked_cot_prefix = list(self.cot_prefix_segment[timestep:timestep + self.frame_stack_num + num_unroll_steps])
+        if padding:
+            pad_len = self.frame_stack_num + num_unroll_steps - len(stacked_cot_prefix)
+            if pad_len > 0:
+                # Pad with empty strings or last prefix
+                pad_frames = [stacked_cot_prefix[-1] if len(stacked_cot_prefix) > 0 else "" for _ in range(pad_len)]
+                stacked_cot_prefix = stacked_cot_prefix + pad_frames
+        return stacked_cot_prefix
 
 # ==============================================================================
 # Utility Functions
