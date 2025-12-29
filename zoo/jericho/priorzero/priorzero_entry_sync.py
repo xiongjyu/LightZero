@@ -1,3 +1,24 @@
+import sys
+import os
+from pathlib import Path
+
+# ==============================================================================
+# [FIX] 强制设置 Python 路径，确保加载的是本地修改过的源码，而不是系统安装包
+# ==============================================================================
+# 定位到 LightZero 的根目录: /mnt/shared-storage-user/puyuan/code/LightZero
+# 假设当前脚本在 .../zoo/jericho/priorzero/ 目录下
+current_file_path = Path(__file__).resolve()
+# 回退 4 层找到 LightZero 根目录 (priorzero -> jericho -> zoo -> LightZero)
+project_root = current_file_path.parents[3] 
+# 或者直接硬编码路径以确保万无一失：
+# project_root = Path("/mnt/shared-storage-user/puyuan/code/LightZero")
+
+if str(project_root) not in sys.path:
+    print(f"[SYSTEM] Inserting project root to sys.path: {project_root}")
+    sys.path.insert(0, str(project_root))
+# ==============================================================================
+
+
 import asyncio
 import os
 import sys
@@ -6,6 +27,7 @@ from pathlib import Path
 from typing import Tuple, Optional
 
 import torch
+import torch.distributed as dist
 import wandb
 
 from ding.config import compile_config
@@ -17,11 +39,22 @@ from tensorboardX import SummaryWriter
 from loguru import logger
 import deepspeed
 
-from priorzero_config import get_priorzero_config, get_priorzero_debug_config
+from priorzero_config import (
+    get_priorzero_config,
+    get_priorzero_debug_config,
+    print_available_models,
+    get_available_models,
+)
 from priorzero_collector import PriorZeroCollector
 from priorzero_evaluator import PriorZeroEvaluator
 from priorzero_policy import *
 from lzero.mcts.buffer.game_buffer_priorzero import PriorZeroGameBufferOptimized
+
+import inspect # 用于调试路径
+# [DEBUG] 打印 Buffer 类的实际加载路径，验证是否加载了正确的文件
+print(f"[SYSTEM-DEBUG] Loaded PriorZeroGameBufferOptimized from: {inspect.getfile(PriorZeroGameBufferOptimized)}")
+
+
 from lzero.entry.utils import calculate_update_per_collect
 
 def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed, data_processor=None):
@@ -220,7 +253,11 @@ def train_priorzero(
                 policy.recompute_pos_emb_diff_and_clear_cache()
                 
                 if  new_num_of_transitions >= llm_cfg.llm_learn_num_samples:
+                    print(f"[DEBUG-RANK0] replay_buffer.fetch_latest_batch begin")
                     priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_cfg.llm_learn_num_samples, policy=policy)
+                    print(f"[DEBUG-RANK0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
+                    assert isinstance(priorzero_batch, list) and len(priorzero_batch) == 5, \
+                        f"[CRITICAL-RANK0] priorzero_batch must be list with 5 elements, got {type(priorzero_batch)} with {len(priorzero_batch) if isinstance(priorzero_batch, list) else 'N/A'} elements"
                     cmd = "llm"
 
                 if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
@@ -230,10 +267,9 @@ def train_priorzero(
         if cmd == "stop":
             break
         elif cmd == "llm":
-            logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
-            priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0) 
-            logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0])}. Starting LLM training...")
-            
+            # logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
+            priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
+            logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
             train_samples = data_processor.make_llm_train_samples(priorzero_batch)
             trainer.train_batch(train_samples)
             torch_dist_barrier_and_cuda_sync()
@@ -245,23 +281,80 @@ def main():
     """
     import argparse
 
-    parser = argparse.ArgumentParser(description='PriorZero Training')
+    parser = argparse.ArgumentParser(
+        description='PriorZero Training with Auto Model Configuration',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Use default model (qwen2.5-1.5b)
+  torchrun --nproc_per_node 2 priorzero_entry_sync.py
+
+  # Use specific model
+  torchrun --nproc_per_node 2 priorzero_entry_sync.py --model qwen2.5-0.5b
+  torchrun --nproc_per_node 2 priorzero_entry_sync.py --model qwen2.5-7b
+
+  # List all available models
+  python priorzero_entry_sync.py --list-models
+
+  # Different environment
+  torchrun --nproc_per_node 2 priorzero_entry_sync.py --env_id zork1.z5 --model qwen2.5-1.5b
+        """
+    )
     parser.add_argument('--env_id', type=str, default='detective.z5', help='Jericho game ID')
     parser.add_argument('--seed', type=int, default=0, help='Random seed')
     parser.add_argument('--max_iter', type=int, default=int(1e6), help='Max training iterations')
-    parser.add_argument('--quick_test', action='store_true', help='Use quick test config')
+    parser.add_argument('--quick_test', action='store_true', default=False, help='Use quick test config')
     parser.add_argument('--no_save', action='store_true', help='Disable checkpoint saving')
     parser.add_argument('--debug', action='store_true', help='Enable detailed debug logging (obs, action, LLM output)')
 
+    # Model selection
+    parser.add_argument(
+        '--model',
+        type=str,
+        default="qwen2.5-3b",
+        choices=get_available_models(),
+        help='Model size to use. If not specified, uses default (qwen2.5-1.5b). '
+             'Automatically configures tensor_parallel_size and gpu_memory_utilization.'
+    )
+    parser.add_argument(
+        '--list-models',
+        action='store_true',
+        help='List all available model configurations and exit'
+    )
+
     args = parser.parse_args()
+
+    # Handle --list-models
+    if args.list_models:
+        print_available_models()
+        return
+
+    # Print selected model info
+    model_key = args.model if args.model else "qwen2.5-1.5b"
+    print(f"\n{'='*80}")
+    print(f"PriorZero Training Configuration")
+    print(f"{'='*80}")
+    print(f"Environment: {args.env_id}")
+    print(f"Model: {model_key}")
+    print(f"Seed: {args.seed}")
+    print(f"Quick Test: {args.quick_test}")
+    print(f"{'='*80}\n")
+
+    use_cot = True # TODO ============
     
-    args.quick_test = False
-    use_cot=True
     if args.quick_test:
         logger.info("Using quick test configuration")
-        main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(args.env_id, args.seed, use_cot=use_cot, exp_name=f'data_priorzero/priorzero_sync_debug_{args.env_id}_seed0')
+        main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(
+            args.env_id, args.seed, use_cot=use_cot,
+            exp_name=f'data_priorzero/priorzero_sync_debug_{args.env_id}_seed0',
+            model_key=model_key
+        )
     else:
-        main_cfg, create_cfg, llm_cfg = get_priorzero_config(args.env_id, args.seed, use_cot=use_cot, exp_name=f'data_priorzero/priorzero_ppo_{args.env_id}_seed0')
+        main_cfg, create_cfg, llm_cfg = get_priorzero_config(
+            args.env_id, args.seed, use_cot=use_cot,
+            exp_name=f'data_priorzero/priorzero_ppo_{args.env_id}_seed0',
+            model_key=model_key
+        )
 
     train_priorzero(
         main_cfg,

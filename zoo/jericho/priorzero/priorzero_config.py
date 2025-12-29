@@ -1,8 +1,71 @@
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 from easydict import EasyDict
 import torch.distributed as dist
 from dataclasses import dataclass
+
+# ============================================================================
+# Model Configuration Presets
+# ============================================================================
+MODEL_CONFIGS = {
+    "qwen2.5-0.5b": {
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-0.5B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.3,
+        "description": "Qwen2.5-0.5B-Instruct (smallest, fastest)",
+    },
+    "qwen2.5-1.5b": {
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-1.5B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.3,
+        "description": "Qwen2.5-1.5B-Instruct (balanced performance)",
+    },
+    "qwen2.5-3b": {
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-3B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.5,
+        "description": "Qwen2.5-3B-Instruct (better quality)",
+    },
+    "qwen2.5-7b": {
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct",
+        "vllm_tensor_parallel_size": 2,
+        "gpu_memory_utilization": 0.5,
+        "description": "Qwen2.5-7B-Instruct (high quality, needs 2+ GPUs)",
+    },
+    "qwen2.5-14b": {
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-14B-Instruct",
+        "vllm_tensor_parallel_size": 4,
+        "gpu_memory_utilization": 0.5,
+        "description": "Qwen2.5-14B-Instruct (best quality, needs 4+ GPUs)",
+    },
+}
+
+def get_available_models():
+    """Get list of available model configurations"""
+    return list(MODEL_CONFIGS.keys())
+
+def get_model_config(model_key: str) -> Dict:
+    """Get model configuration by key"""
+    if model_key not in MODEL_CONFIGS:
+        available = ", ".join(get_available_models())
+        raise ValueError(
+            f"Unknown model key: {model_key}\n"
+            f"Available models: {available}"
+        )
+    return MODEL_CONFIGS[model_key]
+
+def print_available_models():
+    """Print all available model configurations"""
+    print("\n" + "="*80)
+    print("Available Model Configurations:")
+    print("="*80)
+    for key, config in MODEL_CONFIGS.items():
+        print(f"\n  {key}:")
+        print(f"    Path: {config['model_name_or_path']}")
+        print(f"    Tensor Parallel Size: {config['vllm_tensor_parallel_size']}")
+        print(f"    GPU Memory Utilization: {config['gpu_memory_utilization']}")
+        print(f"    Description: {config['description']}")
+    print("="*80 + "\n")
 
 @dataclass
 class PriorZeroLLMConfig:
@@ -17,9 +80,9 @@ class PriorZeroLLMConfig:
     # 模型相关参数
     # model_name_or_path: str = "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-0.5B-Instruct"
     # model_name_or_path: str = "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-0.5B-Instruct"
-    # model_name_or_path: str = "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-1.5B-Instruct"
+    model_name_or_path: str = "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-1.5B-Instruct"
     # model_name_or_path: str = "/mnt/shared-storage-user/puyuan/model/Qwen2.5-VL-7B-Instruct" # TODO
-    model_name_or_path: str = "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct" # TODO
+    # model_name_or_path: str = "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct" # TODO
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 5
     use_cot: bool = False
@@ -35,7 +98,7 @@ class PriorZeroLLMConfig:
     vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
     # vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行
 
-    vllm_tensor_parallel_size: int = 8 # 每个vllm engine使用几张GPU张量并行 TODO
+    vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行 (Fixed: 1.5B model should use 1 GPU)
 
     gpu_memory_utilization: float = 0.3
     vllm_enable_sleep: bool = True # 是否可以休眠
@@ -60,10 +123,16 @@ class PriorZeroLLMConfig:
     ring_attn_size: int = 1
     
     llm_learn_num_samples: int = 256 # 每次取buffer中最新的256条轨迹训练
-    # train_batch_size: int = 64 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    train_batch_size: int = 64 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    # train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     micro_train_batch_size: int = 8
-    gradient_accumulation_steps: int = 8
+
+    # debug
+    # llm_learn_num_samples: int = 64 # 每次取buffer中最新的256条轨迹训练
+    # train_batch_size: int = 64 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    # micro_train_batch_size: int = 4
+    # gradient_accumulation_steps: int = 2
+
     learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.01
@@ -80,20 +149,23 @@ def get_priorzero_config(
     seed: int = 0,
     exp_name: str = None,
     use_cot: bool = False,
+    model_key: Optional[str] = None,
 ) -> Tuple[EasyDict, EasyDict]:
     """
-    Generate complete PriorZero configuration.
+    Generate complete PriorZero configuration with automatic model configuration.
 
     Args:
         env_id: Jericho game ID
         seed: Random seed
         exp_name: Experiment name (auto-generated if None)
-        enable_llm: Whether to enable LLM policy (if False, degrades to pure UniZero)
-        enable_rft: Whether to enable RFT training (if False, only use SFT)
+        use_cot: Whether to use Chain-of-Thought reasoning
+        model_key: Model configuration key (e.g., 'qwen2.5-0.5b', 'qwen2.5-1.5b', 'qwen2.5-7b')
+                  If None, uses default 'qwen2.5-1.5b'
 
     Returns:
         main_config: Main configuration dictionary
         create_config: Creation configuration for DI-engine components
+        llm_config: LLM configuration with auto-configured model parameters
     """
     env_configurations = {
         'detective.z5': (12, 100),
@@ -273,6 +345,24 @@ def get_priorzero_config(
     main_config = EasyDict(priorzero_config)
     create_config = EasyDict(create_config)
     llm_config = PriorZeroLLMConfig(use_cot=use_cot) # 需要修改 llm 相关的参数，修改以上类即可
+
+    # Auto-configure model settings based on model_key
+    if model_key is None:
+        model_key = "qwen2.5-1.5b"  # Default model
+        print(f"[Config] Using default model: {model_key}")
+
+    # Apply model configuration
+    model_config = get_model_config(model_key)
+    llm_config.model_name_or_path = model_config["model_name_or_path"]
+    llm_config.vllm_tensor_parallel_size = model_config["vllm_tensor_parallel_size"]
+    llm_config.gpu_memory_utilization = model_config["gpu_memory_utilization"]
+
+    print(f"[Config] Model configuration applied:")
+    print(f"  - Model: {model_key}")
+    print(f"  - Path: {llm_config.model_name_or_path}")
+    print(f"  - Tensor Parallel Size: {llm_config.vllm_tensor_parallel_size}")
+    print(f"  - GPU Memory Utilization: {llm_config.gpu_memory_utilization}")
+
     return main_config, create_config, llm_config
 
 
@@ -281,21 +371,31 @@ def get_priorzero_debug_config(
     seed: int = 0,
     exp_name: str = None,
     use_cot: bool = False,
+    model_key: Optional[str] = None,
 ) -> EasyDict:
-    
-    main_config, create_config, llm_config = get_priorzero_config(env_id=env_id, seed=seed, exp_name=exp_name, use_cot=use_cot)
+
+    main_config, create_config, llm_config = get_priorzero_config(
+        env_id=env_id, seed=seed, exp_name=exp_name, use_cot=use_cot, model_key=model_key
+    )
     collector_env_num = 4
     evaluator_env_num = 1
-    max_steps=10
+    max_steps = 10
     
-    num_unroll_steps = 5
+    num_unroll_steps = 4
     infer_context_length = 2
-    batch_size = 16
+    batch_size = 8
     collect_num_simulations=2
     eval_num_simulations=2
     num_layers=1
-    game_segment_length = 20
-    
+    game_segment_length = 10
+
+    llm_config.prompt_max_len = 512
+    llm_config.generate_max_len = 128
+    llm_config.llm_learn_num_samples = 16 # 每次取buffer中最新的256条轨迹训练
+    llm_config.train_batch_size = 16  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    llm_config.micro_train_batch_size = 2
+    llm_config.gradient_accumulation_steps: int = 1
+
     create_config.collector_env_num = collector_env_num
     create_config.evaluator_env_num = evaluator_env_num
     create_config.max_steps = max_steps
@@ -314,6 +414,5 @@ def get_priorzero_debug_config(
     main_config.policy.collector_env_num = collector_env_num
     main_config.policy.update_per_collect = 2
     main_config.policy.game_segment_length = game_segment_length
-    llm_config.llm_learn_num_samples = 32
     
     return main_config, create_config, llm_config

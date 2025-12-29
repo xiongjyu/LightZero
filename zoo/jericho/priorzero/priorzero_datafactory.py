@@ -80,23 +80,34 @@ class DataProcessor:
 
         if self.use_cot:
             prompt_parts.append(
-                "\n=== Task ===\n"
+                 "\n=== Task ===\n"
                 "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n\n"
                 "1) Reasoning:\n"
-                "- Keep it CONCISE (maximum 3 sentences, 50 words).\n"
-                "- Focus on: What do I observe? → What should I do? → Why?\n"
-                "- Do NOT list multiple possible actions or repeat the observation.\n"
-                "- Do NOT reveal which action will be chosen in the reasoning.\n"
-                "- Format: Reasoning: <brief reasoning>\n\n"
+                "- Perform a detailed reasoning process based ONLY on the current state and the recent interaction history.\n"
+                "- Analyze what environment or situation you are currently in.\n"
+                "- Identify what actions are available or valid at this step, and the relevant constraints.\n"
+                "- You may discuss observations, uncertainties, and implications of different possibilities.\n"
+                "- IMPORTANT: Do NOT state, imply, or reveal which action will be chosen, and the reasoning section MUST output exactly in the following format: Reasoning:<REASONING>.\n\n"
                 "2) Action:\n"
-                "- Output exactly ONE action.\n"
-                "- Format: Action: <the chosen action>\n\n"
-                "Example:\n"
-                "Reasoning: I'm in a dark room and need light to see. Should look for a light source nearby.\n"
-                "Action: look around\n\n"
-                "Your output MUST strictly follow this format:\n"
-                "Reasoning: <your concise reasoning>\n"
-                "Action: <the chosen action>"
+                "- After finishing the reasoning, output exactly ONE line in the following format:\nAction: <ACTION>\n"
+                "Your output MUST strictly follow this format: \nReasoning: <your reasoning content>\nAction: <the chosen action>"
+                # "\n=== Task ===\n"
+                # "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n\n"
+                # "1) Reasoning:\n"
+                # "- Keep it CONCISE (maximum 3 sentences, 50 words).\n"
+                # "- Focus on: What do I observe? → What should I do? → Why?\n"
+                # "- Do NOT list multiple possible actions or repeat the observation.\n"
+                # "- Do NOT reveal which action will be chosen in the reasoning.\n"
+                # "- Format: Reasoning: <brief reasoning>\n\n"
+                # "2) Action:\n"
+                # "- Output exactly ONE action.\n"
+                # "- Format: Action: <the chosen action>\n\n"
+                # "Example:\n"
+                # "Reasoning: I'm in a dark room and need light to see. Should look for a light source nearby.\n"
+                # "Action: look around\n\n"
+                # "Your output MUST strictly follow this format:\n"
+                # "Reasoning: <your concise reasoning>\n"
+                # "Action: <the chosen action>"
             )
         else:
             prompt_parts.append(
@@ -193,8 +204,23 @@ class DataProcessor:
             Tuple of (input_ids, attention_mask, action_mask, advantages, old_logprob)
         """
         # CoT reuse optimization: unpack cot_prefix_list
-        raw_obs_list, history_obs_list, action_logprob_list, target_value, cot_prefix_list = priorzero_batch
-        assert len(raw_obs_list) == len(history_obs_list) == len(action_logprob_list) == len(target_value) == len(cot_prefix_list)
+        # Robust unpacking with fallback for missing cot_prefix_list
+        try:
+            raw_obs_list, history_obs_list, action_logprob_list, target_value, cot_prefix_list = priorzero_batch
+        except ValueError as e:
+            print(f"[ERROR] Failed to unpack priorzero_batch. Expected 5 elements, got {len(priorzero_batch)}. Error: {e}")
+            if len(priorzero_batch) == 4:
+                # Fallback: missing cot_prefix_list, use empty strings
+                print("[WARNING] priorzero_batch missing cot_prefix_list, using empty strings as fallback")
+                raw_obs_list, history_obs_list, action_logprob_list, target_value = priorzero_batch
+                # Create empty cot_prefix_list with same length as other lists
+                cot_prefix_list = [[""] for _ in range(len(raw_obs_list))]
+            else:
+                print(f"[DEBUG] priorzero_batch structure: {[type(x).__name__ for x in priorzero_batch]}")
+                raise
+
+        assert len(raw_obs_list) == len(history_obs_list) == len(action_logprob_list) == len(target_value) == len(cot_prefix_list), \
+            f"Batch size mismatch: raw_obs={len(raw_obs_list)}, history_obs={len(history_obs_list)}, action_logprob={len(action_logprob_list)}, target_value={len(target_value)}, cot_prefix={len(cot_prefix_list)}"
 
         # Build samples with CoT prefixes
         samples = self.build_llm_samples(
