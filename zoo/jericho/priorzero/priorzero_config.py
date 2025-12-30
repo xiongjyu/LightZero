@@ -75,7 +75,6 @@ class PriorZeroLLMConfig:
     enable_rft: bool = True
     sft_loss_weight: float = 1   # Weight of SFT loss in total loss
     rft_loss_weight: float = 1 
-    prompt_log_interval: int = 1000 # 隔多久step输出模型的回答和valid action进行对比
     
     # 模型相关参数
     # model_name_or_path: str = "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-0.5B-Instruct"
@@ -96,14 +95,11 @@ class PriorZeroLLMConfig:
     use_cuda_ipc: bool = False
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
     vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
-    # vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行
 
     vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行 (Fixed: 1.5B model should use 1 GPU)
 
     gpu_memory_utilization: float = 0.3
     vllm_enable_sleep: bool = True # 是否可以休眠
-    # temperature: float = 1.0
-    # top_p: float = 1.0
     temperature: float = 1.0
     top_p: float = 1.0
     seed: int = 0
@@ -123,15 +119,8 @@ class PriorZeroLLMConfig:
     ring_attn_size: int = 1
     
     llm_learn_num_samples: int = 256 # 每次取buffer中最新的256条轨迹训练
-    train_batch_size: int = 64 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    # train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     micro_train_batch_size: int = 8
-
-    # debug
-    # llm_learn_num_samples: int = 64 # 每次取buffer中最新的256条轨迹训练
-    # train_batch_size: int = 64 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    # micro_train_batch_size: int = 4
-    # gradient_accumulation_steps: int = 2
 
     learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
@@ -198,8 +187,8 @@ def get_priorzero_config(
         max_steps=max_steps,
         observation_shape=512,  
         env_id=env_id,
-        # game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
-        game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        # game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
         for_unizero=True,
         tokenizer_path=wm_model_name,
         max_action_num=action_space_size,
@@ -394,7 +383,6 @@ def get_priorzero_debug_config(
     llm_config.llm_learn_num_samples = 16 # 每次取buffer中最新的256条轨迹训练
     llm_config.train_batch_size = 16  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     llm_config.micro_train_batch_size = 2
-    llm_config.gradient_accumulation_steps: int = 1
 
     create_config.collector_env_num = collector_env_num
     create_config.evaluator_env_num = evaluator_env_num

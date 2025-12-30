@@ -38,9 +38,6 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values, cot_prefix_list]
             CoT prefix list is added for CoT reuse optimization.
         """
-        import torch.distributed as dist
-        rank = dist.get_rank() if dist.is_initialized() else 0
-
         policy._target_model.to(self._cfg.device)
         policy._target_model.eval()
 
@@ -48,19 +45,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             batch_size, self._cfg.reanalyze_ratio, fetch_latest=True
         )
 
-        # Robust unpacking with validation
-        try:
-            obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, action_logprob_list, cot_prefix_list = current_batch
-        except ValueError as e:
-            print(f"[ERROR] Failed to unpack current_batch. Expected 12 elements, got {len(current_batch)}. Error: {e}")
-            print(f"[DEBUG] current_batch structure: {[type(x).__name__ for x in current_batch]}")
-            # Add missing cot_prefix_list if needed
-            if len(current_batch) == 11:
-                print("[WARNING] current_batch missing cot_prefix_list, adding empty list as fallback")
-                current_batch.append([[""] * (self._cfg.num_unroll_steps + self._cfg.frame_stack_num) for _ in range(batch_size)])
-                obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, action_logprob_list, cot_prefix_list = current_batch
-            else:
-                raise
+        obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, action_logprob_list, cot_prefix_list = current_batch
 
         # Standard processing
         batch_rewards, batch_target_values = self._compute_target_reward_value(
@@ -74,11 +59,6 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         # CoT reuse optimization: return cot_prefix_list
         # IMPORTANT: Validate return value before returning to ensure broadcast compatibility
         result = [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values, cot_prefix_list]
-
-        # Comprehensive validation
-        assert len(result) == 5, f"[CRITICAL] fetch_latest_batch must return EXACTLY 5 elements, got {len(result)}"
-        assert isinstance(result, list), f"[CRITICAL] result must be list, got {type(result)}"
-        assert isinstance(cot_prefix_list, list), f"[CRITICAL] cot_prefix_list must be list, got {type(cot_prefix_list)}"
 
         return result
     
@@ -183,16 +163,10 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             action_logprob_list.append(game_segment_list[i].get_unroll_action_logprob(
                 pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
             ))
-            # CoT reuse optimization: extract CoT prefixes
-            try:
-                cot_prefix = game_segment_list[i].get_unroll_cot_prefix(
-                    pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
-                )
-                cot_prefix_list.append(cot_prefix)
-            except (AttributeError, Exception) as e:
-                # Fallback: if game_segment doesn't have cot_prefix, use empty strings
-                print(f"[WARNING] GameSegment missing get_unroll_cot_prefix, using empty CoT prefixes. Error: {e}")
-                cot_prefix_list.append([""] * (self._cfg.num_unroll_steps + self._cfg.frame_stack_num))
+            cot_prefix = game_segment_list[i].get_unroll_cot_prefix(
+                pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
+            )
+            cot_prefix_list.append(cot_prefix)
 
             action_list.append(actions_tmp)
             mask_list.append(mask_tmp)

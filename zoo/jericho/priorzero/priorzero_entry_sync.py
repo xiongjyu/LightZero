@@ -3,15 +3,11 @@ import os
 from pathlib import Path
 
 # ==============================================================================
-# [FIX] 强制设置 Python 路径，确保加载的是本地修改过的源码，而不是系统安装包
 # ==============================================================================
-# 定位到 LightZero 的根目录: /mnt/shared-storage-user/puyuan/code/LightZero
 # 假设当前脚本在 .../zoo/jericho/priorzero/ 目录下
 current_file_path = Path(__file__).resolve()
 # 回退 4 层找到 LightZero 根目录 (priorzero -> jericho -> zoo -> LightZero)
 project_root = current_file_path.parents[3] 
-# 或者直接硬编码路径以确保万无一失：
-# project_root = Path("/mnt/shared-storage-user/puyuan/code/LightZero")
 
 if str(project_root) not in sys.path:
     print(f"[SYSTEM] Inserting project root to sys.path: {project_root}")
@@ -42,17 +38,12 @@ import deepspeed
 from priorzero_config import (
     get_priorzero_config,
     get_priorzero_debug_config,
-    print_available_models,
     get_available_models,
 )
 from priorzero_collector import PriorZeroCollector
 from priorzero_evaluator import PriorZeroEvaluator
 from priorzero_policy import *
 from lzero.mcts.buffer.game_buffer_priorzero import PriorZeroGameBufferOptimized
-
-import inspect # 用于调试路径
-# [DEBUG] 打印 Buffer 类的实际加载路径，验证是否加载了正确的文件
-print(f"[SYSTEM-DEBUG] Loaded PriorZeroGameBufferOptimized from: {inspect.getfile(PriorZeroGameBufferOptimized)}")
 
 
 from lzero.entry.utils import calculate_update_per_collect
@@ -253,11 +244,9 @@ def train_priorzero(
                 policy.recompute_pos_emb_diff_and_clear_cache()
                 
                 if  new_num_of_transitions >= llm_cfg.llm_learn_num_samples:
-                    print(f"[DEBUG-RANK0] replay_buffer.fetch_latest_batch begin")
+                    print(f"[Rank 0] replay_buffer.fetch_latest_batch begin")
                     priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_cfg.llm_learn_num_samples, policy=policy)
-                    print(f"[DEBUG-RANK0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
-                    assert isinstance(priorzero_batch, list) and len(priorzero_batch) == 5, \
-                        f"[CRITICAL-RANK0] priorzero_batch must be list with 5 elements, got {type(priorzero_batch)} with {len(priorzero_batch) if isinstance(priorzero_batch, list) else 'N/A'} elements"
+                    print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
                     cmd = "llm"
 
                 if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
@@ -267,7 +256,7 @@ def train_priorzero(
         if cmd == "stop":
             break
         elif cmd == "llm":
-            # logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
+            logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
             priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
             logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
             train_samples = data_processor.make_llm_train_samples(priorzero_batch)
@@ -304,32 +293,11 @@ Examples:
     parser.add_argument('--seed', type=int, default=0, help='Random seed')
     parser.add_argument('--max_iter', type=int, default=int(1e6), help='Max training iterations')
     parser.add_argument('--quick_test', action='store_true', default=False, help='Use quick test config')
-    parser.add_argument('--no_save', action='store_true', help='Disable checkpoint saving')
-    parser.add_argument('--debug', action='store_true', help='Enable detailed debug logging (obs, action, LLM output)')
-
     # Model selection
-    parser.add_argument(
-        '--model',
-        type=str,
-        default="qwen2.5-3b",
-        choices=get_available_models(),
-        help='Model size to use. If not specified, uses default (qwen2.5-1.5b). '
-             'Automatically configures tensor_parallel_size and gpu_memory_utilization.'
-    )
-    parser.add_argument(
-        '--list-models',
-        action='store_true',
-        help='List all available model configurations and exit'
-    )
+    parser.add_argument('--model', type=str, default="qwen2.5-3b", choices=get_available_models())
 
     args = parser.parse_args()
 
-    # Handle --list-models
-    if args.list_models:
-        print_available_models()
-        return
-
-    # Print selected model info
     model_key = args.model if args.model else "qwen2.5-1.5b"
     print(f"\n{'='*80}")
     print(f"PriorZero Training Configuration")
@@ -340,8 +308,7 @@ Examples:
     print(f"Quick Test: {args.quick_test}")
     print(f"{'='*80}\n")
 
-    use_cot = True # TODO ============
-    
+    use_cot = True 
     if args.quick_test:
         logger.info("Using quick test configuration")
         main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(

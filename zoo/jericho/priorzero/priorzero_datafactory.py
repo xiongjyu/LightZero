@@ -32,9 +32,6 @@ class DataProcessor:
         self.use_cot = self.args.use_cot
         self.prompt_max_len = self.args.prompt_max_len
         self.generate_max_len = self.args.generate_max_len
-        # Optimized: Use shorter length for CoT reasoning (typically 50-150 tokens)
-        # Full generate_max_len (512) is wasteful as we only use prefix before "Action:"
-        self.cot_max_tokens = 128  # Reduced from generate_max_len (512)
         self.temperature = self.args.temperature
         self.top_p = self.args.top_p
         self.vllm_enable_sleep = self.args.vllm_enable_sleep
@@ -80,7 +77,7 @@ class DataProcessor:
 
         if self.use_cot:
             prompt_parts.append(
-                 "\n=== Task ===\n"
+                "\n=== Task ===\n"
                 "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n\n"
                 "1) Reasoning:\n"
                 "- Perform a detailed reasoning process based ONLY on the current state and the recent interaction history.\n"
@@ -175,9 +172,8 @@ class DataProcessor:
 
                 # CoT reuse optimization: get CoT prefix from stored data
                 prefix_cot = ""
-                if cot_prefix_list is not None and self.use_cot:
-                    if b < len(cot_prefix_list) and t < len(cot_prefix_list[b]):
-                        prefix_cot = cot_prefix_list[b][t] or ""
+                if self.use_cot and cot_prefix_list is not None:
+                    prefix_cot = cot_prefix_list[b][t]
 
                 samples.append(
                     {
@@ -203,21 +199,7 @@ class DataProcessor:
         Returns:
             Tuple of (input_ids, attention_mask, action_mask, advantages, old_logprob)
         """
-        # CoT reuse optimization: unpack cot_prefix_list
-        # Robust unpacking with fallback for missing cot_prefix_list
-        try:
-            raw_obs_list, history_obs_list, action_logprob_list, target_value, cot_prefix_list = priorzero_batch
-        except ValueError as e:
-            print(f"[ERROR] Failed to unpack priorzero_batch. Expected 5 elements, got {len(priorzero_batch)}. Error: {e}")
-            if len(priorzero_batch) == 4:
-                # Fallback: missing cot_prefix_list, use empty strings
-                print("[WARNING] priorzero_batch missing cot_prefix_list, using empty strings as fallback")
-                raw_obs_list, history_obs_list, action_logprob_list, target_value = priorzero_batch
-                # Create empty cot_prefix_list with same length as other lists
-                cot_prefix_list = [[""] for _ in range(len(raw_obs_list))]
-            else:
-                print(f"[DEBUG] priorzero_batch structure: {[type(x).__name__ for x in priorzero_batch]}")
-                raise
+        raw_obs_list, history_obs_list, action_logprob_list, target_value, cot_prefix_list = priorzero_batch
 
         assert len(raw_obs_list) == len(history_obs_list) == len(action_logprob_list) == len(target_value) == len(cot_prefix_list), \
             f"Batch size mismatch: raw_obs={len(raw_obs_list)}, history_obs={len(history_obs_list)}, action_logprob={len(action_logprob_list)}, target_value={len(target_value)}, cot_prefix={len(cot_prefix_list)}"
@@ -232,8 +214,6 @@ class DataProcessor:
         print(f"[Rank {self.rank}] process {start}: {end} samples, total {len(samples)} samples.")
         real_samples = samples[start:end]
 
-        # CoT reuse optimization: CoT prefixes are already in samples, no need to regenerate!
-        # The following CoT generation code is REMOVED to avoid redundant computation:
         # if self.use_cot:
         #     if self.vllm_enable_sleep:
         #         self.vllm_engine.wake_up()
@@ -245,7 +225,6 @@ class DataProcessor:
         #
         #     if self.vllm_enable_sleep:
         #         self.vllm_engine.sleep()
-        # This saves ~12-15% of total training time!
 
         if self.use_cot:
             prompts_only = [s["prompt"] + s["prefix_cot"] + " " for s in real_samples]
@@ -291,9 +270,7 @@ class DataProcessor:
             batch_mean = gt.mean().item()
             batch_std = gt.std().item()
 
-            # Update running statistics using exponential moving average
             if self.value_count == 0:
-                # First batch: initialize with batch statistics
                 self.value_running_mean = batch_mean
                 self.value_running_std = max(batch_std, 1e-8)  # Avoid zero std
             else:
@@ -342,7 +319,7 @@ class DataProcessor:
         cot_sampling_params = SamplingParams(
             temperature=1.0,
             top_p=1.0,
-            max_tokens=self.cot_max_tokens,  # Optimized: 128 instead of 512
+            max_tokens=self.generate_max_len, 
             stop=["Action:", "\n\n"],  # Stop early when Action is generated or double newline
             include_stop_str_in_output=True,
             logprobs=None,

@@ -106,7 +106,6 @@ class PriorZeroCollector(OriginalCollector):
         self.history_buffers = defaultdict(
             lambda: deque(maxlen=self.llm_cfg.history_length)
         )
-        self.prompt_log_interval = getattr(self.llm_cfg, 'prompt_log_interval', 0)
 
         self.profile_cfg = getattr(self.policy_config, 'profile_cfg', {})
         self._profile_enabled = bool(self.profile_cfg.get('enable_cprofile', False))
@@ -446,7 +445,7 @@ class PriorZeroCollector(OriginalCollector):
                         raw_obs_text=extract_raw_obs_text(obs_new),
                         history_obs=list(self.history_buffers[env_id]),
                         action_logprob=llm_prior_per_tok[env_id],
-                        cot_prefix=cot_prefixes[env_id] if env_id < len(cot_prefixes) else None  # CoT reuse
+                        cot_prefix=cot_prefixes[env_id]
                     )
 
                     # Update state

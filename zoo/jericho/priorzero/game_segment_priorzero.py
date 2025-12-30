@@ -164,7 +164,6 @@ class GameSegment(OriginalGameSegment):
 
         # Handle CoT prefix padding (optimization for CoT reuse)
         if next_segment_cot_prefix is not None:
-            assert len(next_segment_cot_prefix) <= self.num_unroll_steps + self.td_steps
             for cot_prefix in next_segment_cot_prefix:
                 self.cot_prefix_segment.append(copy.deepcopy(cot_prefix) if cot_prefix is not None else "")
 
