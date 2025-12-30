@@ -357,13 +357,11 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         for env_id in range(active_collect_env_num):
             actions = valid_actions_list[env_id]
             prior = []
-            if len(actions) == 1:
-                assert actions[0] == 'go', "When only one valid action, it must be 'go'"
+            if len(actions) == 0:
+                print("When valid actions is None, the action must be 'go'")
                 prior.append(llm_prior_logprob[env_id]['go'])
             else:
                 for action in actions:
-                    if action == 'go':
-                        continue
                     prior.append(llm_prior_logprob[env_id][action])
             policy_priors.append(prior)
         policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
