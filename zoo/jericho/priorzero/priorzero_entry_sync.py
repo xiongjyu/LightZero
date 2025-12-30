@@ -120,15 +120,22 @@ def train_priorzero(
 ):
     rank = int(os.environ.get("RANK", "0"))
     print(f"rank={rank}")
+
+    # ============================================================================
+    # REVERT: Only rank 0 creates World Model components (original design)
+    # ============================================================================
     if rank == 0:
-        cfg, replay_buffer, tb_logger, policy, collector, evaluator, learner = prepare_unizero( 
-                                                                            rank=rank,
-                                                                            cfg=cfg,
-                                                                            create_cfg=create_cfg, 
-                                                                            llm_cfg=llm_cfg, 
-                                                                            seed=seed, 
-                                                                            data_processor=None)
+        cfg, replay_buffer, tb_logger, policy, collector, evaluator, learner = prepare_unizero(
+            rank=rank,
+            cfg=cfg,
+            create_cfg=create_cfg,
+            llm_cfg=llm_cfg,
+            seed=seed,
+            data_processor=None
+        )
         batch_size = cfg.policy.batch_size
+        logger.info(f"[Rank {rank}] World Model components initialized")
+    # ============================================================================
 
     from strategy.deepspeed import get_strategy, torch_dist_barrier_and_cuda_sync
     strategy = get_strategy(llm_cfg)
@@ -237,7 +244,7 @@ def train_priorzero(
     # ============================================================================
 
     torch_dist_barrier_and_cuda_sync()
-    
+
     while True:
         cmd = "noop"
         priorzero_batch = None
@@ -251,32 +258,34 @@ def train_priorzero(
                 )
                 if stop:
                     cmd = "stop"
-                    
+
             if cmd != "stop":
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.wake_up()
-                    
+
                 new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
                 data_processor.get_llm_output_log()
-                
+
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.sleep()
-                
-                update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=1)                
-                
+
+                update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=1)
+
                 replay_buffer.push_game_segments(new_data)
                 replay_buffer.remove_oldest_data_to_fit()
-                
-                num_of_transitions = replay_buffer.get_num_of_transitions() 
+
+                num_of_transitions = replay_buffer.get_num_of_transitions()
                 new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
                 logger.info(f"[Rank {rank}] Data collected, num_of_transitions: {num_of_transitions} transitions\tnew_num_of_transitions: {new_num_of_transitions}")
-            
+
                 if not (num_of_transitions > batch_size):
                     logger.warning(
                         f'  ⚠ Data in replay_buffer is not sufficient: '
                         f'batch_size: {batch_size}, replay_buffer: {replay_buffer}. Continue to collect...'
                     )
                     cmd = "noop"
+                    # IMPORTANT FIX: Broadcast cmd before continue to prevent deadlock
+                    cmd = bcast_obj(world_size, cmd, rank, src=0)
                     continue
 
                 # ============================================================================
@@ -286,14 +295,9 @@ def train_priorzero(
                 wm_update_count = update_per_collect
 
                 if stability_optimizer is not None:
-                    # should_train_wm, wm_update_count = stability_optimizer.should_train_world_model(
-                    #     new_data_collected=True
-                    # )
-                    # wm_update_count = int(update_per_collect * wm_update_count)
                     should_train_wm, _ = stability_optimizer.should_train_world_model(
                         new_data_collected=True
-                    ) # 目前world-model训练的upc还是按照原来的逻辑
-
+                    )
 
                 if should_train_wm:
                     logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {wm_update_count} updates...")
@@ -323,7 +327,6 @@ def train_priorzero(
                         avg_wm_loss = np.mean(wm_losses)
                         avg_wm_grad_norm = np.mean(wm_grad_norms)
 
-                        # Optionally compute value prediction error (if available in log_vars)
                         value_pred_error = None
                         if 'wm_target_value' in log_vars[0] and 'predicted_value' in log_vars[0]:
                             target_val = log_vars[0]['wm_target_value']
@@ -346,7 +349,6 @@ def train_priorzero(
                 llm_decision_info = None
 
                 if stability_optimizer is not None:
-                    # Compute value prediction error if available
                     value_pred_error = None
                     if len(wm_losses) > 0 and 'wm_target_value' in log_vars[0]:
                         target_val = log_vars[0]['wm_target_value']
@@ -364,19 +366,17 @@ def train_priorzero(
                     else:
                         logger.info(f"[Rank {rank}: LLM Training] Proceeding - {llm_decision_info.get('reason', 'Conditions met')}")
                 else:
-                    # Original logic
                     should_train_llm = should_train_llm_orig
 
                 if should_train_llm:
-                    print(f"[Rank 0] replay_buffer.fetch_latest_batch begin")
+                    logger.info(f"[Rank {rank}] Fetching latest batch for LLM training...")
                     priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_cfg.llm_learn_num_samples, policy=policy)
-                    print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
                     cmd = "llm"
                 # ============================================================================
 
                 if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
                     cmd = "stop"
-        
+
         cmd = bcast_obj(world_size, cmd, rank, src=0)
         if cmd == "stop":
             break

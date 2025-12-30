@@ -857,15 +857,22 @@ class PriorZeroStabilityOptimizer:
             value_prediction_accuracy=accuracy,
         )
 
-        # DDP Sync TODO
-        if dist.is_initialized():
-            decision = torch.tensor([float(should_train)], device='cuda')
-            dist.all_reduce(decision, op=dist.ReduceOp.MAX) # 只要有一个 Rank 想练，大家就一起练? 或者 MIN
-            # 建议使用广播：以 Rank 0 为准
-            # dist.broadcast(decision, src=0)
-            should_train = bool(decision.item() > 0.5)
-            # 注意：如果强制同步，info 中的 reason 可能会在不同 rank 不一致，仅供参考
-    
+        # ============================================================================
+        # FIX: Removed dist.all_reduce() - causes NCCL deadlock!
+        #
+        # Problem: Only rank 0 creates stability_optimizer, so only rank 0 calls
+        # this method. But dist.all_reduce() requires ALL ranks to participate.
+        # Result: rank 1,2,3 never call this → NCCL timeout after 10 minutes.
+        #
+        # Since only rank 0 uses stability_optimizer for World Model training
+        # decisions, no distributed sync is needed here.
+        # ============================================================================
+        # REMOVED:
+        # if dist.is_initialized():
+        #     decision = torch.tensor([float(should_train)], device='cuda')
+        #     dist.all_reduce(decision, op=dist.ReduceOp.MAX)
+        #     should_train = bool(decision.item() > 0.5)
+        # ============================================================================
 
         return should_train, info
 
