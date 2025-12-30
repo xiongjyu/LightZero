@@ -76,12 +76,6 @@ class PriorZeroLLMConfig:
     sft_loss_weight: float = 1   # Weight of SFT loss in total loss
     rft_loss_weight: float = 1 
     
-    # 模型相关参数
-    # model_name_or_path: str = "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-0.5B-Instruct"
-    # model_name_or_path: str = "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-0.5B-Instruct"
-    model_name_or_path: str = "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-1.5B-Instruct"
-    # model_name_or_path: str = "/mnt/shared-storage-user/puyuan/model/Qwen2.5-VL-7B-Instruct" # TODO
-    # model_name_or_path: str = "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct" # TODO
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 5
     use_cot: bool = False
