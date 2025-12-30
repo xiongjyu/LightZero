@@ -283,13 +283,17 @@ def train_priorzero(
                 # World Model Training with Stability Optimizer
                 # ============================================================================
                 should_train_wm = True
-                # wm_update_count = update_per_collect
+                wm_update_count = update_per_collect
 
                 if stability_optimizer is not None:
-                    should_train_wm, wm_update_count = stability_optimizer.should_train_world_model(
+                    # should_train_wm, wm_update_count = stability_optimizer.should_train_world_model(
+                    #     new_data_collected=True
+                    # )
+                    # wm_update_count = int(update_per_collect * wm_update_count)
+                    should_train_wm, _ = stability_optimizer.should_train_world_model(
                         new_data_collected=True
-                    )
-                    wm_update_count = int(update_per_collect * self.wm_warmup_update_ratio)
+                    ) # 目前world-model训练的upc还是按照原来的逻辑
+
 
                 if should_train_wm:
                     logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {wm_update_count} updates...")
