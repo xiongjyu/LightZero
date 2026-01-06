@@ -53,7 +53,7 @@ def main(env_id, seed):
             # eval_max_episode_steps=int(50),
         ),
         policy=dict(
-            learn=dict(learner=dict(hook=dict(save_ckpt_after_iter=1000000, ), ), ),  # default is 10000
+            learn=dict(learner=dict(hook=dict(save_ckpt_after_iter=10000, ), ), ),  # default is 10000
             model=dict(
                 observation_shape=(3, 96, 96),
                 action_space_size=action_space_size,

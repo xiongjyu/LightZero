@@ -100,6 +100,13 @@ class JerichoEnv(BaseEnv):
             self.cache_size = self.cfg['cache_size']
             self.cache_buffer = OrderedDict()
             print(f'[jericho]: use_cache: {self.use_cache}, cache_size={self.cache_size}')
+
+        
+        self.use_cache = self.cfg['use_cache']
+        if self.use_cache:
+            self.cache_size = self.cfg['cache_size']
+            self.cache_buffer = OrderedDict()
+            print(f'[jericho]: use_cache: {self.use_cache}, cache_size={self.cache_size}')
         
         # Initialize the tokenizer once (only in rank 0 process if distributed)
         if JerichoEnv.tokenizer is None:
