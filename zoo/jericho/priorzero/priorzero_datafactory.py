@@ -63,30 +63,26 @@ class DataProcessor:
         )
         if history is not None and len(history) > 0:
             history = list(history)
-            prompt_parts.append("\n=== Recent History ===")
+            prompt_parts.append("=== Recent History ===")
 
             for i, (obs, action, reward) in enumerate(history, start=1):  
                 obs_str = obs
                 prompt_parts.append(f"Step {i}:")
-                prompt_parts.append(f"  Observation: {obs_str}")
-                prompt_parts.append(f"  Action: {action}")
+                prompt_parts.append(f"  Observation: {obs_str.strip()}")
+                prompt_parts.append(f"  Action: {action.strip()}")
                 prompt_parts.append(f"  Reward: {reward}")
 
-        prompt_parts.append("\n=== Current Situation ===")
-        prompt_parts.append(current_obs)
+        prompt_parts.append("=== Current Situation ===")
+        prompt_parts.append(current_obs.strip())
 
         if self.use_cot:
             prompt_parts.append(
-                "\n=== Task ===\n"
-                "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n\n"
+                "=== Task ==="
+                "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n"
                 "1) Reasoning:\n"
-                "- Perform a detailed reasoning process based ONLY on the current state and the recent interaction history.\n"
-                "- Analyze what environment or situation you are currently in.\n"
-                "- Identify what actions are available or valid at this step, and the relevant constraints.\n"
-                "- You may discuss observations, uncertainties, and implications of different possibilities.\n"
-                "- IMPORTANT: Do NOT state, imply, or reveal which action will be chosen, and the reasoning section MUST output exactly in the following format: Reasoning:<REASONING>.\n\n"
+                "Perform a detailed reasoning process based ONLY on the current state and the recent interaction history; first analyze what environment or situation you are currently in, then identify what actions are available at this step along with the relevant constraints, and you may also discuss key observations, uncertainties, and implications of different possibilities; however, do NOT state, imply, or reveal which action will be chosen, and the reasoning section MUST be output exactly in the format: Reasoning: <your reasoning content>.\n"
                 "2) Action:\n"
-                "- After finishing the reasoning, output exactly ONE line in the following format:\nAction: <ACTION>\n"
+                "After finishing the reasoning, output exactly ONE line in the following format: Action: <the chosen action>." 
                 "Your output MUST strictly follow this format: \nReasoning: <your reasoning content>\nAction: <the chosen action>"
                 # "\n=== Task ===\n"
                 # "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n\n"
@@ -110,7 +106,7 @@ class DataProcessor:
             prompt_parts.append(
                 "\n=== Task ===\n"
                 "Analyze the recent history and the current situation, and decide on the SINGLE best next action."
-                "Please keep the output concise, avoiding any other content.\n\n"
+                "Please keep the output concise, avoiding any other content.\n"
             )
         return "\n".join(prompt_parts)
 
