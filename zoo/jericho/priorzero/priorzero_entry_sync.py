@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 # ==============================================================================
-# ==============================================================================
 # 假设当前脚本在 .../zoo/jericho/priorzero/ 目录下
 current_file_path = Path(__file__).resolve()
 # 回退 4 层找到 LightZero 根目录 (priorzero -> jericho -> zoo -> LightZero)
@@ -121,15 +120,22 @@ def train_priorzero(
 ):
     rank = int(os.environ.get("RANK", "0"))
     print(f"rank={rank}")
+
+    # ============================================================================
+    # REVERT: Only rank 0 creates World Model components (original design)
+    # ============================================================================
     if rank == 0:
-        cfg, replay_buffer, tb_logger, policy, collector, evaluator, learner = prepare_unizero( 
-                                                                            rank=rank,
-                                                                            cfg=cfg,
-                                                                            create_cfg=create_cfg, 
-                                                                            llm_cfg=llm_cfg, 
-                                                                            seed=seed, 
-                                                                            data_processor=None)
+        cfg, replay_buffer, tb_logger, policy, collector, evaluator, learner = prepare_unizero(
+            rank=rank,
+            cfg=cfg,
+            create_cfg=create_cfg,
+            llm_cfg=llm_cfg,
+            seed=seed,
+            data_processor=None
+        )
         batch_size = cfg.policy.batch_size
+        logger.info(f"[Rank {rank}] World Model components initialized")
+    # ============================================================================
 
     from strategy.deepspeed import get_strategy, torch_dist_barrier_and_cuda_sync
     strategy = get_strategy(llm_cfg)
@@ -190,9 +196,55 @@ def train_priorzero(
         exp_name=cfg.exp_name if rank == 0 else None,
         tb_logger=tb_logger if rank == 0 else None,
     )
-        
+
+    # ============================================================================
+    # Stability Optimizer Integration
+    # ============================================================================
+    stability_optimizer = None
+    enable_stability_opt = getattr(llm_cfg, 'enable_stability_optimizer', False)
+
+    if rank == 0 and enable_stability_opt:
+        try:
+            # from priorzero_stability_optimizer import PriorZeroStabilityOptimizer
+            from priorzero_stability_optimizer_enhanced import PriorZeroStabilityOptimizer
+
+            stability_optimizer = PriorZeroStabilityOptimizer(
+                # Value normalization
+                value_norm_init_momentum=getattr(llm_cfg, 'value_norm_init_momentum', 0.9),
+                value_norm_final_momentum=getattr(llm_cfg, 'value_norm_final_momentum', 0.99),
+                value_norm_warmup_steps=getattr(llm_cfg, 'value_norm_warmup_steps', 100),
+                value_norm_clip_percentile=getattr(llm_cfg, 'value_norm_clip_percentile', 0.95),
+
+                # Curriculum training
+                wm_warmup_steps=getattr(llm_cfg, 'wm_warmup_steps', 500),
+                wm_warmup_update_ratio=getattr(llm_cfg, 'wm_warmup_update_ratio', 5),
+                llm_start_threshold=getattr(llm_cfg, 'llm_start_threshold', 0.3),
+                min_llm_update_interval=getattr(llm_cfg, 'min_llm_update_interval', 1),
+                max_llm_update_interval=getattr(llm_cfg, 'max_llm_update_interval', 10),
+
+                # Stability monitoring
+                grad_norm_threshold=getattr(llm_cfg, 'grad_norm_threshold', 100.0),
+                loss_spike_threshold=getattr(llm_cfg, 'loss_spike_threshold', 3.0),
+                value_shift_threshold=getattr(llm_cfg, 'value_shift_threshold', 2.0),
+
+                # Logging
+                log_interval=getattr(llm_cfg, 'stability_log_interval', 10),
+                rank=rank,
+            )
+            logger.info("="*80)
+            logger.info("✓ PriorZero Stability Optimizer initialized")
+            logger.info(f"  - WM warmup steps: {llm_cfg.wm_warmup_steps}")
+            logger.info(f"  - LLM start threshold: {llm_cfg.llm_start_threshold}")
+            logger.info(f"  - Value norm warmup: {llm_cfg.value_norm_warmup_steps}")
+            logger.info("="*80)
+        except ImportError as e:
+            logger.warning(f"⚠ Failed to import PriorZeroStabilityOptimizer: {e}")
+            logger.warning("  Falling back to original training logic")
+            stability_optimizer = None
+    # ============================================================================
+
     torch_dist_barrier_and_cuda_sync()
-    
+
     while True:
         cmd = "noop"
         priorzero_batch = None
@@ -206,52 +258,125 @@ def train_priorzero(
                 )
                 if stop:
                     cmd = "stop"
-                    
+
             if cmd != "stop":
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.wake_up()
-                    
+
                 new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
                 data_processor.get_llm_output_log()
-                
+
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.sleep()
-                
-                update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=1)                
-                
+
+                update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=1)
+
                 replay_buffer.push_game_segments(new_data)
                 replay_buffer.remove_oldest_data_to_fit()
-                
-                num_of_transitions = replay_buffer.get_num_of_transitions() 
+
+                num_of_transitions = replay_buffer.get_num_of_transitions()
                 new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
                 logger.info(f"[Rank {rank}] Data collected, num_of_transitions: {num_of_transitions} transitions\tnew_num_of_transitions: {new_num_of_transitions}")
-            
+
                 if not (num_of_transitions > batch_size):
                     logger.warning(
                         f'  ⚠ Data in replay_buffer is not sufficient: '
                         f'batch_size: {batch_size}, replay_buffer: {replay_buffer}. Continue to collect...'
                     )
-                    cmd = "noop" 
+                    cmd = "noop"
+                    # IMPORTANT FIX: Broadcast cmd before continue to prevent deadlock
+                    cmd = bcast_obj(world_size, cmd, rank, src=0)
+                    continue
 
-                logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training...")
-                for i in range(update_per_collect):
-                    train_data = replay_buffer.sample(batch_size, policy)
-                    train_data.append(learner.train_iter)
+                # ============================================================================
+                # World Model Training with Stability Optimizer
+                # ============================================================================
+                should_train_wm = True
+                wm_update_count = update_per_collect
 
-                    log_vars = learner.train(train_data, collector.envstep)
-                    if cfg.policy.use_priority:
-                        replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
-                policy.recompute_pos_emb_diff_and_clear_cache()
-                
-                if  new_num_of_transitions >= llm_cfg.llm_learn_num_samples:
-                    print(f"[Rank 0] replay_buffer.fetch_latest_batch begin")
+                if stability_optimizer is not None:
+                    should_train_wm, _ = stability_optimizer.should_train_world_model(
+                        new_data_collected=True
+                    )
+
+                if should_train_wm:
+                    logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {wm_update_count} updates...")
+
+                    # Track WM training metrics
+                    wm_losses = []
+                    wm_grad_norms = []
+
+                    for i in range(wm_update_count):
+                        train_data = replay_buffer.sample(batch_size, policy)
+                        train_data.append(learner.train_iter)
+
+                        log_vars = learner.train(train_data, collector.envstep)
+
+                        # Collect metrics
+                        wm_losses.append(log_vars[0].get('wm_total_loss', 0.0))
+                        wm_grad_norms.append(log_vars[0].get('wm_grad_norm', 0.0))
+
+                        if cfg.policy.use_priority:
+                            replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
+
+                    policy.recompute_pos_emb_diff_and_clear_cache()
+
+                    # Record WM metrics to stability optimizer
+                    if stability_optimizer is not None and len(wm_losses) > 0:
+                        import numpy as np
+                        avg_wm_loss = np.mean(wm_losses)
+                        avg_wm_grad_norm = np.mean(wm_grad_norms)
+
+                        value_pred_error = None
+                        if 'wm_target_value' in log_vars[0] and 'predicted_value' in log_vars[0]:
+                            target_val = log_vars[0]['wm_target_value']
+                            pred_val = log_vars[0].get('predicted_value', target_val)
+                            if abs(target_val) > 1e-6:
+                                value_pred_error = abs(pred_val - target_val) / (abs(target_val) + 1e-8)
+
+                        stability_optimizer.record_training_metrics(
+                            wm_loss=avg_wm_loss,
+                            wm_grad_norm=avg_wm_grad_norm,
+                        )
+                else:
+                    logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Skipped (stability optimizer decision)")
+
+                # ============================================================================
+                # LLM Training Decision with Stability Optimizer
+                # ============================================================================
+                should_train_llm_orig = new_num_of_transitions >= llm_cfg.llm_learn_num_samples
+                should_train_llm = should_train_llm_orig
+                llm_decision_info = None
+
+                if stability_optimizer is not None:
+                    value_pred_error = None
+                    if len(wm_losses) > 0 and 'wm_target_value' in log_vars[0]:
+                        target_val = log_vars[0]['wm_target_value']
+                        pred_val = log_vars[0].get('predicted_value', target_val)
+                        if abs(target_val) > 1e-6:
+                            value_pred_error = abs(pred_val - target_val) / (abs(target_val) + 1e-8)
+
+                    should_train_llm, llm_decision_info = stability_optimizer.should_train_llm(
+                        new_samples=new_num_of_transitions,
+                        value_prediction_error=value_pred_error,
+                    )
+
+                    if not should_train_llm:
+                        logger.info(f"[Rank {rank}: LLM Training] Skipped - {llm_decision_info.get('reason', 'Unknown')}")
+                    else:
+                        logger.info(f"[Rank {rank}: LLM Training] Proceeding - {llm_decision_info.get('reason', 'Conditions met')}")
+                else:
+                    should_train_llm = should_train_llm_orig
+
+                if should_train_llm:
+                    logger.info(f"[Rank {rank}] Fetching latest batch for LLM training...")
                     priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_cfg.llm_learn_num_samples, policy=policy)
-                    print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
                     cmd = "llm"
+                # ============================================================================
 
                 if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
                     cmd = "stop"
-        
+
         cmd = bcast_obj(world_size, cmd, rank, src=0)
         if cmd == "stop":
             break
@@ -260,8 +385,31 @@ def train_priorzero(
             priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
             logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
             train_samples = data_processor.make_llm_train_samples(priorzero_batch)
-            trainer.train_batch(train_samples)
+
+            # Train LLM and get status
+            llm_status = trainer.train_batch(train_samples)
+
+            # Record LLM metrics to stability optimizer (rank 0 only)
+            if rank == 0 and stability_optimizer is not None and llm_status:
+                stability_optimizer.record_training_metrics(
+                    llm_loss=llm_status.get('policy_loss', None),
+                    llm_grad_norm=llm_status.get('grad_norm', None),  # If available
+                )
+
             torch_dist_barrier_and_cuda_sync()
+
+        # ============================================================================
+        # Stability Optimizer Step and TensorBoard Logging
+        # ============================================================================
+        if rank == 0 and stability_optimizer is not None:
+            stability_optimizer.step()
+
+            # Record stability metrics to TensorBoard periodically
+            if learner.train_iter % 10 == 0 and tb_logger is not None:
+                tb_metrics = stability_optimizer.get_tb_metrics()
+                for metric_name, metric_value in tb_metrics.items():
+                    tb_logger.add_scalar(metric_name, metric_value, learner.train_iter)
+        # ============================================================================
             
 
 def main():

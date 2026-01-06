@@ -78,7 +78,8 @@ class PriorZeroLLMConfig:
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 5
-    use_cot: bool = False
+    # use_cot: bool = False
+    use_cot: bool = True # TODO
     prompt_max_len = 8192
     generate_max_len = 512
     bf16: bool = True
@@ -126,6 +127,35 @@ class PriorZeroLLMConfig:
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"
 
+    # ============================================================================
+    # Stability Optimization Parameters
+    # ============================================================================
+    # Value Normalization
+    enable_stability_optimizer: bool = True
+    value_norm_init_momentum: float = 0.9        # Fast adaptation in early training
+    value_norm_final_momentum: float = 0.99      # Slow, stable updates in later training
+    value_norm_warmup_steps: int = 100           # Steps to transition from init to final momentum
+    value_norm_clip_percentile: float = 0.95     # Clip outliers beyond this percentile
+    value_norm_use_welford: bool = True          # Use numerically stable Welford's algorithm
+
+    # Curriculum Training Schedule
+    wm_warmup_steps: int = 10                   # WM warm-up before LLM training starts 多少次collect后再开始llm的训练
+    wm_warmup_update_ratio: int = 1              # Train WM more frequently during warm-up
+    llm_start_threshold: float = 0.3             # Min value prediction accuracy to start LLM training
+    min_llm_update_interval: int = 1             # Min steps between LLM updates (when stable)
+    max_llm_update_interval: int = 3            # Max steps between LLM updates (when unstable)
+
+    # Stability Monitoring
+    grad_norm_threshold: float = 100.0           # Gradient explosion threshold
+    loss_spike_threshold: float = 3.0            # Loss spike detection threshold (multiple of mean)
+    value_shift_threshold: float = 2.0           # Value distribution shift threshold
+    stability_log_interval: int = 10             # Steps between stability status logs
+
+    # use defalut
+    value_norm_clip_method: str = 'soft'             # 软性裁剪，保留稀疏奖励
+    llm_start_hysteresis: float = 0.05               # 防止震荡
+    max_warmup_steps_hard_limit: int = 100          # 防止死锁
+    min_llm_update_interval_hard: int = 1            # 防止数据过时
 
 def get_priorzero_config(
     env_id: str = 'detective.z5',
@@ -181,8 +211,8 @@ def get_priorzero_config(
         max_steps=max_steps,
         observation_shape=512,  
         env_id=env_id,
-        game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
-        # game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        # game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
         for_unizero=True,
         tokenizer_path=wm_model_name,
         max_action_num=action_space_size,

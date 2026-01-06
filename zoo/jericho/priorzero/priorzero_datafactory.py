@@ -43,11 +43,43 @@ class DataProcessor:
         from collections import deque
         self.vllm_output = deque(maxlen=10)
 
-        # Running statistics for advantage normalization
+        # ============================================================================
+        # Stability Optimizer Integration
+        # ============================================================================
+        # Check if stability optimizer is enabled
+        enable_stability_opt = getattr(self.args, 'enable_stability_optimizer', False)
+
+        if enable_stability_opt:
+            # Use new AdaptiveValueNormalizer
+            try:
+                from priorzero_stability_optimizer import AdaptiveValueNormalizer
+                self.value_normalizer = AdaptiveValueNormalizer(
+                    init_momentum=getattr(self.args, 'value_norm_init_momentum', 0.9),
+                    final_momentum=getattr(self.args, 'value_norm_final_momentum', 0.99),
+                    warmup_steps=getattr(self.args, 'value_norm_warmup_steps', 100),
+                    clip_percentile=getattr(self.args, 'value_norm_clip_percentile', 0.95),
+                    min_std=1e-6,
+                    use_welford=getattr(self.args, 'value_norm_use_welford', True),
+                )
+                if self.rank == 0:
+                    print(f"[DataProcessor] ✓ Using AdaptiveValueNormalizer")
+            except ImportError as e:
+                if self.rank == 0:
+                    print(f"[DataProcessor] ⚠ Failed to import AdaptiveValueNormalizer: {e}")
+                    print(f"[DataProcessor] Falling back to legacy running normalization")
+                self.value_normalizer = None
+        else:
+            # Legacy: use original running normalization
+            self.value_normalizer = None
+            if self.rank == 0:
+                print(f"[DataProcessor] Using legacy running normalization (stability_optimizer disabled)")
+
+        # Legacy running statistics (used as fallback)
         self.value_running_mean = 0.0
         self.value_running_std = 1.0
         self.value_count = 0
         self.running_momentum = 0.99  # EMA momentum for running statistics
+        # ============================================================================
 
         if self.rank == 0:
             self._logger, _ = build_logger(
@@ -253,38 +285,55 @@ class DataProcessor:
             gt = (gt - gt.mean()) / (gt.std() + 1e-8)
 
         elif self.args.advantage_type == "target_value_running_norm":
-            # New implementation: running normalization for consistent training signals
+            # Optimized implementation with AdaptiveValueNormalizer
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
 
-            # Compute current batch statistics
-            batch_mean = gt.mean().item()
-            batch_std = gt.std().item()
+            if self.value_normalizer is not None:
+                # Use new AdaptiveValueNormalizer
+                gt, norm_stats = self.value_normalizer.normalize(
+                    gt,
+                    clip_values=True,
+                    return_stats=True
+                )
 
-            if self.value_count == 0:
-                self.value_running_mean = batch_mean
-                self.value_running_std = max(batch_std, 1e-8)  # Avoid zero std
+                # Log statistics periodically for monitoring
+                if self.rank == 0 and self.value_normalizer.count % 10 == 0:
+                    print(f"[Adaptive Value Norm] step={self.value_normalizer.count}, "
+                          f"running_mean={norm_stats['running_mean']:.3f}, "
+                          f"running_std={norm_stats['running_std']:.3f}, "
+                          f"batch_mean={norm_stats['batch_mean']:.3f}, "
+                          f"batch_std={norm_stats['batch_std']:.3f}, "
+                          f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']}")
             else:
-                # Update with EMA
-                self.value_running_mean = (
-                    self.running_momentum * self.value_running_mean +
-                    (1 - self.running_momentum) * batch_mean
-                )
-                self.value_running_std = (
-                    self.running_momentum * self.value_running_std +
-                    (1 - self.running_momentum) * max(batch_std, 1e-8)
-                )
+                # Legacy running normalization (fallback)
+                batch_mean = gt.mean().item()
+                batch_std = gt.std().item()
 
-            self.value_count += 1
+                if self.value_count == 0:
+                    self.value_running_mean = batch_mean
+                    self.value_running_std = max(batch_std, 1e-8)  # Avoid zero std
+                else:
+                    # Update with EMA
+                    self.value_running_mean = (
+                        self.running_momentum * self.value_running_mean +
+                        (1 - self.running_momentum) * batch_mean
+                    )
+                    self.value_running_std = (
+                        self.running_momentum * self.value_running_std +
+                        (1 - self.running_momentum) * max(batch_std, 1e-8)
+                    )
 
-            # Normalize using running statistics
-            gt = (gt - self.value_running_mean) / (self.value_running_std + 1e-8)
+                self.value_count += 1
 
-            # Log statistics periodically for monitoring
-            if self.rank == 0 and self.value_count % 10 == 0:
-                print(f"[Advantage Running Stats] count={self.value_count}, "
-                      f"running_mean={self.value_running_mean:.3f}, "
-                      f"running_std={self.value_running_std:.3f}, "
-                      f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
+                # Normalize using running statistics
+                gt = (gt - self.value_running_mean) / (self.value_running_std + 1e-8)
+
+                # Log statistics periodically for monitoring
+                if self.rank == 0 and self.value_count % 10 == 0:
+                    print(f"[Legacy Value Norm] count={self.value_count}, "
+                          f"running_mean={self.value_running_mean:.3f}, "
+                          f"running_std={self.value_running_std:.3f}, "
+                          f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
 
         else:
             raise ValueError(f"Unknown advantage_type: {self.args.advantage_type}")
