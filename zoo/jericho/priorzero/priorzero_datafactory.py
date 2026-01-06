@@ -171,9 +171,11 @@ class DataProcessor:
                     target_value = float(target_values[b][t].item())
 
                 # CoT reuse optimization: get CoT prefix from stored data
-                prefix_cot = ""
+                # 需要注意的是：game_segment在reset的时候，obs是第一个obs,而cot_prefix是None; 每次append的时候都是next_obs, 和当前obs的cot_prefix
+                # 所有cot_prefix应该错位
+                prefix_cot = None
                 if self.use_cot and cot_prefix_list is not None:
-                    prefix_cot = cot_prefix_list[b][t]
+                    prefix_cot = cot_prefix_list[b][t+1]
 
                 samples.append(
                     {
@@ -213,18 +215,6 @@ class DataProcessor:
         end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(samples)
         print(f"[Rank {self.rank}] process {start}: {end} samples, total {len(samples)} samples.")
         real_samples = samples[start:end]
-
-        # if self.use_cot:
-        #     if self.vllm_enable_sleep:
-        #         self.vllm_engine.wake_up()
-        #
-        #     all_user_prompts = [s["instruction"] for s in real_samples]
-        #     prefix_list = self._build_cot_prefix_texts(all_user_prompts)  # REMOVED!
-        #     for s, p in zip(real_samples, prefix_list):
-        #         s["prefix_cot"] = p
-        #
-        #     if self.vllm_enable_sleep:
-        #         self.vllm_engine.sleep()
 
         if self.use_cot:
             prompts_only = [s["prompt"] + s["prefix_cot"] + " " for s in real_samples]

@@ -60,7 +60,7 @@ class GameSegment(OriginalGameSegment):
         self.raw_obs_segment.append(init_raw_obs)
         self.history_obs_segment.append(init_history_obs)
         self.action_logprob_segment.append(init_action_logprob)
-        self.cot_prefix_segment.append(init_cot_prefix if init_cot_prefix is not None else "")  
+        self.cot_prefix_segment.append(init_cot_prefix)  
 
     def append(
         self,
@@ -100,7 +100,7 @@ class GameSegment(OriginalGameSegment):
         self.raw_obs_segment.append(raw_obs_text)
         self.history_obs_segment.append(history_obs)
         self.action_logprob_segment.append(action_logprob)
-        self.cot_prefix_segment.append(cot_prefix if cot_prefix is not None else "")
+        self.cot_prefix_segment.append(cot_prefix)
 
     def store_search_stats(self, visit_counts: List, root_value: List) -> None:
         """
@@ -153,6 +153,7 @@ class GameSegment(OriginalGameSegment):
         assert len(next_segment_raw_obs) <= self.num_unroll_steps + self.td_steps
         assert len(next_segment_history_obs) <= self.num_unroll_steps + self.td_steps
         assert len(next_segment_action_logprob) <= self.num_unroll_steps + self.td_steps
+        assert len(next_segment_cot_prefix) <= self.num_unroll_steps + self.td_steps
 
         import copy
         for raw_obs in next_segment_raw_obs:
@@ -165,7 +166,7 @@ class GameSegment(OriginalGameSegment):
         # Handle CoT prefix padding (optimization for CoT reuse)
         if next_segment_cot_prefix is not None:
             for cot_prefix in next_segment_cot_prefix:
-                self.cot_prefix_segment.append(copy.deepcopy(cot_prefix) if cot_prefix is not None else "")
+                self.cot_prefix_segment.append(copy.deepcopy(cot_prefix))
 
     def get_unroll_raw_obs(self, timestep: int, num_unroll_steps: int = 0, padding: bool = False) -> np.ndarray:
         """
@@ -230,7 +231,7 @@ class GameSegment(OriginalGameSegment):
             pad_len = self.frame_stack_num + num_unroll_steps - len(stacked_cot_prefix)
             if pad_len > 0:
                 # Pad with empty strings or last prefix
-                pad_frames = [stacked_cot_prefix[-1] if len(stacked_cot_prefix) > 0 else "" for _ in range(pad_len)]
+                pad_frames = [stacked_cot_prefix[-1] for _ in range(pad_len)]
                 stacked_cot_prefix = stacked_cot_prefix + pad_frames
         return stacked_cot_prefix
 

@@ -299,7 +299,7 @@ class PriorZeroCollector(OriginalCollector):
             ]
             observation_window_stack[env_id].extend(initial_frames)
             game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(init_obs[env_id]), 
-                                        init_history_obs=list(self.history_buffers[env_id]), init_action_logprob=None)
+                                        init_history_obs=list(self.history_buffers[env_id]), init_action_logprob=None, init_cot_prefix=None)
 
         search_values_lst = [[] for _ in range(env_nums)]
         pred_values_lst = [[] for _ in range(env_nums)]

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 # ============================================================================
 MODEL_CONFIGS = {
     "qwen2.5-0.5b": {
-        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-0.5B-Instruct",
+        "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-0.5B-Instruct",
         "vllm_tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.3,
         "description": "Qwen2.5-0.5B-Instruct (smallest, fastest)",
@@ -21,7 +21,7 @@ MODEL_CONFIGS = {
         "description": "Qwen2.5-1.5B-Instruct (balanced performance)",
     },
     "qwen2.5-3b": {
-        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-3B-Instruct",
+        "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-3B-Instruct",
         "vllm_tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.5,
         "description": "Qwen2.5-3B-Instruct (better quality)",
@@ -159,7 +159,7 @@ def get_priorzero_config(
     action_space_size, max_steps = env_configurations.get(env_id, (20, 100))
     wm_encoder_option = 'legacy' 
     # wm_model_name = 'BAAI/bge-base-en-v1.5'  
-    wm_model_name = '/mnt/shared-storage-user/puyuan/xiongjyu/models/bge-base-en-v1.5'  
+    wm_model_name = '/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/bge-base-en-v1.5'  
     
     collector_env_num = 4
     evaluator_env_num = 2
