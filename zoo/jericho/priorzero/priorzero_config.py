@@ -119,7 +119,12 @@ class PriorZeroLLMConfig:
     learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.01
+    lr_scheduler: str = "cosine_with_min_lr"
+    lr_warmup_ratio: float = 0.03
+    max_steps: int = int(1e4)
     policy_loss_type: str = "ppo"   # 'ppo' / 'gspo'
+    
+    
     # Optimization: Use running normalization instead of batch normalization for consistent training signals
     advantage_type: str = "target_value_running_norm"  # "target_value", "target_reward", "target_value_batch_norm", "target_value_running_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)

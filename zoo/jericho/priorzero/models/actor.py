@@ -173,7 +173,7 @@ class BatchPPOTrainer:
         strategy,
         actor,
         actor_optim,
-        actor_scheduler=None,               
+        actor_scheduler,               
         micro_train_batch_size: int = 8,
         vllm_engine = None
     ):
@@ -250,8 +250,7 @@ class BatchPPOTrainer:
 
             status = {
                 "policy_loss": actor_loss.detach().float().mean().item(),
-                # "actor_lr": self.actor_scheduler.get_last_lr()[0],
-                "actor_lr": self.args.learning_rate,
+                "actor_lr": self.actor_scheduler.get_last_lr()[0],
                 "ppo_clip_ratio": clip_ratio.detach().float().mean().item(),
                 "ppo_kl": ppo_kl.detach().float().mean().item(),
             }
@@ -406,13 +405,13 @@ class PolicyModel:
         if max_steps is None:
             max_steps = int(getattr(args, "max_steps", 1_000_000))
 
-        # actor_scheduler = get_scheduler(
-        #     args.lr_scheduler,
-        #     actor_optim,
-        #     num_warmup_steps=math.ceil(max_steps * args.lr_warmup_ratio),
-        #     num_training_steps=max_steps,
-        #     scheduler_specific_kwargs={"min_lr": args.actor_learning_rate * 0.1},
-        # )
+        actor_scheduler = get_scheduler(
+            args.lr_scheduler,
+            actor_optim,
+            num_warmup_steps=math.ceil(max_steps * args.lr_warmup_ratio),
+            num_training_steps=max_steps,
+            scheduler_specific_kwargs={"min_lr": args.learning_rate * 0.1},
+        )
         
         if args.gradient_checkpointing:
             actor.gradient_checkpointing_enable(
@@ -420,7 +419,7 @@ class PolicyModel:
             )
 
         self.actor, self.actor_optim, self.actor_scheduler = strategy.prepare(
-            (actor, actor_optim, None),
+            (actor, actor_optim, actor_scheduler),
             is_rlhf=True,
         )
 

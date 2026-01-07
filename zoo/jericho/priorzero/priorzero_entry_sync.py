@@ -176,7 +176,8 @@ def train_priorzero(
     policy_model = PolicyModel(
         strategy=strategy,
         pretrain=llm_cfg.model_name_or_path,
-        vllm_engine=vllm_engine
+        vllm_engine=vllm_engine,
+        max_steps=llm_cfg.max_steps
     )
     from priorzero_trainer import PriorZeroLLMTrainer
     trainer = PriorZeroLLMTrainer(
