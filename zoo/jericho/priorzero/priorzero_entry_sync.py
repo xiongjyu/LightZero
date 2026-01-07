@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 # ==============================================================================
-# ==============================================================================
 # 假设当前脚本在 .../zoo/jericho/priorzero/ 目录下
 current_file_path = Path(__file__).resolve()
 # 回退 4 层找到 LightZero 根目录 (priorzero -> jericho -> zoo -> LightZero)
@@ -130,6 +129,7 @@ def train_priorzero(
                                                                             seed=seed, 
                                                                             data_processor=None)
         batch_size = cfg.policy.batch_size
+        logger.info(f"[Rank {rank}] World Model components initialized")
 
     from strategy.deepspeed import get_strategy, torch_dist_barrier_and_cuda_sync
     strategy = get_strategy(llm_cfg)
@@ -161,6 +161,7 @@ def train_priorzero(
     )
 
     print(f'[Rank {rank}] Vllm engine successfully created!')
+    
     
     from priorzero_datafactory import DataProcessor
     data_processor = DataProcessor(rank=rank, 
@@ -233,8 +234,10 @@ def train_priorzero(
                         f'batch_size: {batch_size}, replay_buffer: {replay_buffer}. Continue to collect...'
                     )
                     cmd = "noop" 
-
-                logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training...")
+                    cmd = bcast_obj(world_size, cmd, rank, src=0)
+                    continue
+                
+                logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
                 for i in range(update_per_collect):
                     train_data = replay_buffer.sample(batch_size, policy)
                     train_data.append(learner.train_iter)
@@ -244,8 +247,8 @@ def train_priorzero(
                         replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
                 policy.recompute_pos_emb_diff_and_clear_cache()
                 
-                if  new_num_of_transitions >= llm_cfg.llm_learn_num_samples:
-                    print(f"[Rank 0] replay_buffer.fetch_latest_batch begin")
+                if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_cfg.llm_learn_num_samples:
+                    print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin")
                     priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_cfg.llm_learn_num_samples, policy=policy)
                     print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
                     cmd = "llm"

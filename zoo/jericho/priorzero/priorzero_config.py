@@ -123,13 +123,21 @@ class PriorZeroLLMConfig:
     lr_warmup_ratio: float = 0.03
     max_steps: int = int(1e4)
     policy_loss_type: str = "ppo"   # 'ppo' / 'gspo'
-    
-    
-    # Optimization: Use running normalization instead of batch normalization for consistent training signals
     advantage_type: str = "target_value_running_norm"  # "target_value", "target_reward", "target_value_batch_norm", "target_value_running_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"
+    
+    train_llm_after_wm_warm_step: int = int(1e3)
+    value_norm_cfg = EasyDict({
+        'enable_stability_optimizer': True,
+        'value_norm_init_momentum': 0.9,        # Fast adaptation in early training
+        'value_norm_final_momentum': 0.99,     # Slow, stable updates in later training
+        'value_norm_warmup_steps': 100,           # Steps to transition from init to final momentum
+        'value_norm_clip_percentile': 0.95,     # Clip outliers beyond this percentile
+        'value_norm_clip_method': "soft",
+        "value_norm_history_size": 1000,
+    })
 
 
 def get_priorzero_config(
@@ -382,6 +390,7 @@ def get_priorzero_debug_config(
     llm_config.llm_learn_num_samples = 16 # 每次取buffer中最新的256条轨迹训练
     llm_config.train_batch_size = 16  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     llm_config.micro_train_batch_size = 2
+    llm_config.train_llm_after_wm_warm_step = 0
 
     create_config.collector_env_num = collector_env_num
     create_config.evaluator_env_num = evaluator_env_num

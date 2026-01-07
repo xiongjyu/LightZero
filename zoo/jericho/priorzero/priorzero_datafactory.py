@@ -53,6 +53,20 @@ class DataProcessor:
             self._logger, _ = build_logger(
                 path=f'./{exp_name}/log/{instance_name}', name=instance_name, need_tb=False
             )
+        
+        if self.args.value_norm_cfg.enable_stability_optimizer:
+            from models.stability_optimizer import AdaptiveValueNormalizer
+            self.value_normalizer = AdaptiveValueNormalizer(
+                init_momentum=self.args.value_norm_cfg.value_norm_init_momentum,
+                final_momentum=self.args.value_norm_cfg.value_norm_final_momentum,
+                warmup_steps=self.args.value_norm_cfg.value_norm_warmup_steps,
+                clip_method=self.args.value_norm_cfg.value_norm_clip_method,
+                clip_percentile=self.args.value_norm_cfg.value_norm_clip_percentile,
+                min_std=1e-6,
+                history_size=self.args.value_norm_cfg.value_norm_history_size,
+            )
+        else:
+            self.value_normalizer = None
 
     def build_llm_prompt(self, current_obs: str, history: Optional[List[Tuple[str, str, float]]] = None) -> str:
         prompt_parts = []
@@ -84,23 +98,6 @@ class DataProcessor:
                 "2) Action:\n"
                 "After finishing the reasoning, output exactly ONE line in the following format: Action: <the chosen action>." 
                 "Your output MUST strictly follow this format: \nReasoning: <your reasoning content>\nAction: <the chosen action>"
-                # "\n=== Task ===\n"
-                # "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n\n"
-                # "1) Reasoning:\n"
-                # "- Keep it CONCISE (maximum 3 sentences, 50 words).\n"
-                # "- Focus on: What do I observe? → What should I do? → Why?\n"
-                # "- Do NOT list multiple possible actions or repeat the observation.\n"
-                # "- Do NOT reveal which action will be chosen in the reasoning.\n"
-                # "- Format: Reasoning: <brief reasoning>\n\n"
-                # "2) Action:\n"
-                # "- Output exactly ONE action.\n"
-                # "- Format: Action: <the chosen action>\n\n"
-                # "Example:\n"
-                # "Reasoning: I'm in a dark room and need light to see. Should look for a light source nearby.\n"
-                # "Action: look around\n\n"
-                # "Your output MUST strictly follow this format:\n"
-                # "Reasoning: <your concise reasoning>\n"
-                # "Action: <the chosen action>"
             )
         else:
             prompt_parts.append(
@@ -252,35 +249,44 @@ class DataProcessor:
             # New implementation: running normalization for consistent training signals
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
 
-            # Compute current batch statistics
-            batch_mean = gt.mean().item()
-            batch_std = gt.std().item()
-
-            if self.value_count == 0:
-                self.value_running_mean = batch_mean
-                self.value_running_std = max(batch_std, 1e-8)  # Avoid zero std
+            if self.value_normalizer is not None:
+                gt, norm_stats = self.value_normalizer.normalize(
+                    gt,
+                    clip_values=True,
+                    return_stats=True
+                )
+                if self.rank == 0 and self.value_normalizer.update_count % 10 == 0:
+                    print(f"[Adaptive Value Norm] step={self.value_normalizer.count}, "
+                          f"running_mean={norm_stats['running_mean']:.3f}, "
+                          f"running_std={norm_stats['running_std']:.3f}, "
+                          f"batch_mean={norm_stats['batch_mean']:.3f}, "
+                          f"batch_std={norm_stats['batch_std']:.3f}, "
+                          f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']}")
             else:
-                # Update with EMA
-                self.value_running_mean = (
-                    self.running_momentum * self.value_running_mean +
-                    (1 - self.running_momentum) * batch_mean
-                )
-                self.value_running_std = (
-                    self.running_momentum * self.value_running_std +
-                    (1 - self.running_momentum) * max(batch_std, 1e-8)
-                )
+                batch_mean = gt.mean().item()
+                batch_std = gt.std().item()
 
-            self.value_count += 1
+                if self.value_count == 0:
+                    self.value_running_mean = batch_mean
+                    self.value_running_std = max(batch_std, 1e-8)  # Avoid zero std
+                else:
+                    self.value_running_mean = (
+                        self.running_momentum * self.value_running_mean +
+                        (1 - self.running_momentum) * batch_mean
+                    )
+                    self.value_running_std = (
+                        self.running_momentum * self.value_running_std +
+                        (1 - self.running_momentum) * max(batch_std, 1e-8)
+                    )
 
-            # Normalize using running statistics
-            gt = (gt - self.value_running_mean) / (self.value_running_std + 1e-8)
+                self.value_count += 1
+                gt = (gt - self.value_running_mean) / (self.value_running_std + 1e-8)
 
-            # Log statistics periodically for monitoring
-            if self.rank == 0 and self.value_count % 10 == 0:
-                print(f"[Advantage Running Stats] count={self.value_count}, "
-                      f"running_mean={self.value_running_mean:.3f}, "
-                      f"running_std={self.value_running_std:.3f}, "
-                      f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
+                if self.rank == 0 and self.value_count % 10 == 0:
+                    print(f"[Advantage Running Stats] count={self.value_count}, "
+                        f"running_mean={self.value_running_mean:.3f}, "
+                        f"running_std={self.value_running_std:.3f}, "
+                        f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
 
         else:
             raise ValueError(f"Unknown advantage_type: {self.args.advantage_type}")
