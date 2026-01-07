@@ -117,6 +117,7 @@ def train_priorzero(
     seed: int = 0,
     max_train_iter: int = int(1e6),
     max_env_step: Optional[int] = int(1e10),
+    enable_profile: bool = False
 ):
     rank = int(os.environ.get("RANK", "0"))
     print(f"rank={rank}")
@@ -130,6 +131,9 @@ def train_priorzero(
                                                                             data_processor=None)
         batch_size = cfg.policy.batch_size
         logger.info(f"[Rank {rank}] World Model components initialized")
+
+    from utils import Profiler
+    prof = Profiler(log_interval=1, stats_file=f'./{cfg.exp_name}/log/profiler.txt')
 
     from strategy.deepspeed import get_strategy, torch_dist_barrier_and_cuda_sync
     strategy = get_strategy(llm_cfg)
@@ -161,7 +165,6 @@ def train_priorzero(
     )
 
     print(f'[Rank {rank}] Vllm engine successfully created!')
-    
     
     from priorzero_datafactory import DataProcessor
     data_processor = DataProcessor(rank=rank, 
@@ -210,14 +213,15 @@ def train_priorzero(
                     cmd = "stop"
                     
             if cmd != "stop":
-                if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
-                    vllm_engine.wake_up()
+                with prof.block("collect", enable_profile=enable_profile, rank=0):
+                    if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
+                        vllm_engine.wake_up()
+                        
+                    new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
+                    data_processor.get_llm_output_log()
                     
-                new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
-                data_processor.get_llm_output_log()
-                
-                if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
-                    vllm_engine.sleep()
+                    if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
+                        vllm_engine.sleep()
                 
                 update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=1)                
                 
@@ -238,20 +242,23 @@ def train_priorzero(
                     continue
                 
                 logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
+                
                 for i in range(update_per_collect):
-                    train_data = replay_buffer.sample(batch_size, policy)
-                    train_data.append(learner.train_iter)
+                    with prof.block("train_world_model", enable_profile=enable_profile, rank=0):
+                        train_data = replay_buffer.sample(batch_size, policy)
+                        train_data.append(learner.train_iter)
 
-                    log_vars = learner.train(train_data, collector.envstep)
-                    if cfg.policy.use_priority:
-                        replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
+                        log_vars = learner.train(train_data, collector.envstep)
+                        if cfg.policy.use_priority:
+                            replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
                 policy.recompute_pos_emb_diff_and_clear_cache()
                 
                 if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_cfg.llm_learn_num_samples:
-                    print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin")
-                    priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_cfg.llm_learn_num_samples, policy=policy)
-                    print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
-                    cmd = "llm"
+                    with prof.block("fetch_latest_batch", enable_profile=enable_profile, rank=0):
+                        print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin")
+                        priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_cfg.llm_learn_num_samples, policy=policy)
+                        print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
+                        cmd = "llm"
 
                 if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
                     cmd = "stop"
@@ -260,12 +267,13 @@ def train_priorzero(
         if cmd == "stop":
             break
         elif cmd == "llm":
-            logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
-            priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
-            logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
-            train_samples = data_processor.make_llm_train_samples(priorzero_batch)
-            trainer.train_batch(train_samples)
-            torch_dist_barrier_and_cuda_sync()
+            with prof.block("train_llm", enable_profile=enable_profile, rank=rank):
+                logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
+                priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
+                logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
+                train_samples = data_processor.make_llm_train_samples(priorzero_batch)
+                trainer.train_batch(train_samples)
+                torch_dist_barrier_and_cuda_sync()
             
 
 def main():
@@ -299,7 +307,7 @@ Examples:
     parser.add_argument('--quick_test', action='store_true', default=False, help='Use quick test config')
     # Model selection
     parser.add_argument('--model', type=str, default="qwen2.5-3b", choices=get_available_models())
-
+    parser.add_argument('--enable_profile', action='store_true', default=False)
     args = parser.parse_args()
 
     model_key = args.model if args.model else "qwen2.5-1.5b"
@@ -318,13 +326,13 @@ Examples:
         main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(
             args.env_id, args.seed, use_cot=use_cot,
             exp_name=f'data_priorzero/priorzero_sync_debug_{args.env_id}_seed0',
-            model_key=model_key
+            model_key=model_key,
         )
     else:
         main_cfg, create_cfg, llm_cfg = get_priorzero_config(
             args.env_id, args.seed, use_cot=use_cot,
             exp_name=f'data_priorzero/priorzero_ppo_{args.env_id}_seed0',
-            model_key=model_key
+            model_key=model_key,
         )
 
     train_priorzero(
@@ -333,6 +341,7 @@ Examples:
         llm_cfg,
         seed=args.seed,
         max_train_iter=args.max_iter,
+        enable_profile=args.enable_profile,    # 是否要对各个耗时部分进行 profile
     )
 
 

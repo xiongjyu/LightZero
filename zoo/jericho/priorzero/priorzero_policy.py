@@ -3,10 +3,7 @@ import copy
 import inspect
 import re
 import sys
-import time
-import cProfile
 import logging
-from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Union, Optional
 
@@ -29,49 +26,12 @@ import lzero.model.unizero_model
 
 @POLICY_REGISTRY.register('priorzero', force_overwrite=True)
 class PriorZeroPolicy(OriginalUniZeroPolicy):
-    def __init__(self, cfg: Dict, model: torch.nn.Module = None, enable_field: List[str] = None, **kwargs): 
-        self.profile_cfg = getattr(cfg, 'profile_cfg', {})
-        self._profile_enabled = bool(self.profile_cfg.get('enable_cprofile', False))
-        self._profile_dir = f"./{kwargs['exp_name']}/log/profile"
-        self._profile_log_interval = int(self.profile_cfg.get('log_interval', 50))
-        self._profile_stats = { 'train_world_model': {'count': 0, 'total': 0.0, 'max': 0.0}}
-        self._profile_stats_file = f'{self._profile_dir}/train_time.log'
-        if self._profile_enabled:
-            os.makedirs(self._profile_dir, exist_ok=True)   
+    def __init__(self, cfg: Dict, model: torch.nn.Module = None, enable_field: List[str] = None, **kwargs):   
         super().__init__(cfg, model, enable_field)
 
     def _init_learn(self) -> None:
         super()._init_learn()
         logging.info("✓ UniZero World Model and optimizer initialized")
-
-    @contextmanager
-    def _profile_block(self, name: str):
-        if not self._profile_enabled:
-            yield None
-            return
-        profiler = cProfile.Profile()
-        start_time = time.perf_counter()
-        profiler.enable()
-        try:
-            yield profiler
-        finally:
-            profiler.disable()
-            elapsed = time.perf_counter() - start_time
-            self._record_profile_time(name, elapsed)
-
-    def _record_profile_time(self, name: str, elapsed: float) -> None:
-        log_every = max(1, self._profile_log_interval)
-        self._profile_stats[name]['count'] += 1
-        self._profile_stats[name]['total'] += elapsed
-        self._profile_stats[name]['max'] = max(self._profile_stats[name]['max'], elapsed)
-        if self._profile_stats[name]['count'] % log_every == 0:
-            avg = self._profile_stats[name]['total'] / self._profile_stats[name]['count']
-            with open(self._profile_stats_file, mode='a', encoding='utf-8') as f:
-                f.write(
-                    f"{time.time():.3f}\tname={name}\tcount={self._profile_stats[name]['count']}\t"
-                    f"total_s={self._profile_stats[name]['total']:.4f}\tavg_s={avg:.4f}\tmax_s={self._profile_stats[name]['max']:.4f}\n"
-                )
-
 
     def _forward_learn(self, data: Tuple[torch.Tensor]) -> Dict[str, Union[float, int]]:
         self._learn_model.train()
@@ -123,14 +83,13 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         batch_for_gpt['ends'] = torch.zeros(batch_for_gpt['mask_padding'].shape, dtype=torch.long, device=self._cfg.device)
         batch_for_gpt['scalar_target_value'] = target_value
 
-        with self._profile_block(name="train_world_model"):
-            wm_losses, pred_values = self._learn_model.world_model.compute_loss(
-                batch_for_gpt,
-                self._target_model.world_model.tokenizer,
-                self.value_inverse_scalar_transform_handle,
-            )
+        wm_losses, pred_values = self._learn_model.world_model.compute_loss(
+            batch_for_gpt,
+            self._target_model.world_model.tokenizer,
+            self.value_inverse_scalar_transform_handle,
+        )
 
-            wm_total_loss = (weights * wm_losses.loss_total).mean()
+        wm_total_loss = (weights * wm_losses.loss_total).mean()
         
         self._optimizer_world_model.zero_grad()
         wm_total_loss.backward()

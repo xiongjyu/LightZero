@@ -72,3 +72,43 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = N
     if mask is None:
         return tensor.mean(dim=dim)
     return (tensor * mask).sum(dim=dim) / mask.sum(dim=dim)
+
+import time
+from contextlib import contextmanager
+from collections import defaultdict
+
+class Profiler:
+    def __init__(self, log_interval: int = 10, stats_file: str = None):
+        self.log_interval = max(1, int(log_interval))
+        self.stats_file = stats_file
+        self.stats = defaultdict(lambda: {"count": 0, "total": 0.0, "max": 0.0})
+        self._inited = False
+
+    def _init_once(self):
+        if self._inited:
+            return
+        with open(self.stats_file, "a", encoding="utf-8") as f:
+            f.write("ts\tname\tcount\ttotal_s\tavg_s\tmax_s\n")
+        self._inited = True
+
+    def _record(self, name: str, elapsed: float):
+        s = self.stats[name]
+        s["count"] += 1
+        s["total"] += elapsed
+        s["max"] = max(s["max"], elapsed)
+        if s["count"] % self.log_interval == 0:
+            avg = s["total"] / s["count"]
+            with open(self.stats_file, "a", encoding="utf-8") as f:
+                f.write(f"{time.time():.3f}\t{name}\t{s['count']}\t{s['total']:.6f}\t{avg:.6f}\t{s['max']:.6f}\n")
+
+    @contextmanager
+    def block(self, name: str, enable_profile: bool = True, rank: int = 0):
+        if not enable_profile or rank != 0:
+            yield None
+            return
+        self._init_once()
+        t0 = time.perf_counter()
+        try:
+            yield None
+        finally:
+            self._record(name, time.perf_counter() - t0)

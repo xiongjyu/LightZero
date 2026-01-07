@@ -2,8 +2,7 @@ import asyncio
 import logging
 import sys
 import time
-import cProfile
-from contextlib import contextmanager
+
 from collections import deque, defaultdict
 from pathlib import Path
 from typing import Optional, Any, List, Dict, Tuple
@@ -107,18 +106,6 @@ class PriorZeroCollector(OriginalCollector):
             lambda: deque(maxlen=self.llm_cfg.history_length)
         )
 
-        self.profile_cfg = getattr(self.policy_config, 'profile_cfg', {})
-        self._profile_enabled = bool(self.profile_cfg.get('enable_cprofile', False))
-        self._profile_log_interval = int(self.profile_cfg.get('log_interval', 50))
-        self._profile_dir = f"./{self._exp_name}/log/profile"
-        self._profile_stats = { 'collect_get_llm_prior_profile': {'count': 0, 'total': 0.0, 'max': 0.0}, 
-                                'collect_step_profile': {'count': 0, 'total': 0.0, 'max': 0.0},
-                                'collect_forward_profile': {'count': 0, 'total': 0.0, 'max': 0.0}
-                            }
-        self._profile_stats_file = f'{self._profile_dir}/collector_time.log'
-        if self._profile_enabled:
-            os.makedirs(self._profile_dir, exist_ok=True)
-
         # Where to persist sampled LLM outputs during collect
         self._llm_output_log_path = f"./{self._exp_name}/log/collector/llm_output.log"
         self._llm_call_count = 0
@@ -190,34 +177,6 @@ class PriorZeroCollector(OriginalCollector):
         # Reset placeholders for the next collection cycle.
         last_game_segments[i] = None
         last_game_priorities[i] = None
-
-    @contextmanager
-    def _profile_block(self, name: str):
-        if not self._profile_enabled:
-            yield None
-            return
-        profiler = cProfile.Profile()
-        start_time = time.perf_counter()
-        profiler.enable()
-        try:
-            yield profiler
-        finally:
-            profiler.disable()
-            elapsed = time.perf_counter() - start_time
-            self._record_profile_time(name, elapsed)
-
-    def _record_profile_time(self, name: str, elapsed: float) -> None:
-        log_every = max(1, self._profile_log_interval)
-        self._profile_stats[name]['count'] += 1
-        self._profile_stats[name]['total'] += elapsed
-        self._profile_stats[name]['max'] = max(self._profile_stats[name]['max'], elapsed)
-        if self._profile_stats[name]['count'] % log_every == 0:
-            avg = self._profile_stats[name]['total'] / self._profile_stats[name]['count']
-            with open(self._profile_stats_file, mode='a', encoding='utf-8') as f:
-                f.write(
-                    f"{time.time():.3f}\tname={name}\tcount={self._profile_stats[name]['count']}\t"
-                    f"total_s={self._profile_stats[name]['total']:.4f}\tavg_s={avg:.4f}\tmax_s={self._profile_stats[name]['max']:.4f}\n"
-                )
                 
     def collect(
         self,
@@ -353,14 +312,13 @@ class PriorZeroCollector(OriginalCollector):
                         valid_actions = obs[env_id].get('valid_actions', [])
                         valid_actions_list.append(valid_actions)
 
-                    with self._profile_block(name='collect_get_llm_prior_profile'):
-                        # CoT reuse optimization: request CoT prefixes to store in game segments
-                        llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
-                            states=raw_obs_list,
-                            valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
-                            histories=histories_list,
-                            return_cot=True  # Request CoT prefixes for reuse in training
-                        )
+                    # CoT reuse optimization: request CoT prefixes to store in game segments
+                    llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
+                        states=raw_obs_list,
+                        valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
+                        histories=histories_list,
+                        return_cot=True  # Request CoT prefixes for reuse in training
+                    )
 
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
@@ -369,11 +327,10 @@ class PriorZeroCollector(OriginalCollector):
 
                 if self.task_id is not None:
                     policy_kwargs_forward['task_id'] = self.task_id
-                with self._profile_block(name='collect_forward_profile'):
-                    policy_output = self._policy.forward(data=stack_obs_tensor, action_mask=action_mask,
-                                                        temperature=temperature, to_play=to_play, epsilon=epsilon,
-                                                        ready_env_id=sorted(list(ready_env_id)), timestep=timestep,
-                                                        **policy_kwargs_forward)
+                policy_output = self._policy.forward(data=stack_obs_tensor, action_mask=action_mask,
+                                                    temperature=temperature, to_play=to_play, epsilon=epsilon,
+                                                    ready_env_id=sorted(list(ready_env_id)), timestep=timestep,
+                                                    **policy_kwargs_forward)
 
                 # Extract outputs
                 actions_with_env_id = {k: v['action'] for k, v in policy_output.items()}
@@ -393,17 +350,10 @@ class PriorZeroCollector(OriginalCollector):
                     for env_id in ready_env_id
                 }
 
-                # ==============================================================
-                # Step Environments
-                # ==============================================================
-                with self._profile_block(name='collect_step_profile'):
-                    timesteps = self._env.step(actions)
+                timesteps = self._env.step(actions)
 
             interaction_duration = self._timer.value / len(timesteps)
 
-            # ==================================================================
-            # Process Environment Responses
-            # ==================================================================
             for env_id, episode_timestep in timesteps.items():
                 with self._timer:
                     # Handle abnormal timesteps

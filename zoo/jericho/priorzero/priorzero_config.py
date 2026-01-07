@@ -213,10 +213,6 @@ def get_priorzero_config(
         type='priorzero',
         multi_gpu=False,  
         use_wandb=False,
-        profile_cfg=dict(
-            enable_cprofile=False,  # Enable cProfile for collect/train hot paths
-            log_interval=100,        # Aggregate wall-time stats every N profiled sections
-        ),
         learn=dict(
                 learner=dict(
                     hook=dict(
