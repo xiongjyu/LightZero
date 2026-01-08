@@ -8,6 +8,37 @@ import torch.distributed as dist
 from vllm import SamplingParams
 from ding.utils import build_logger
 
+_FMT_RE = re.compile(
+    r'^\s*Reasoning:\s*(?P<reason>[\s\S]*?)\nAction:\s*(?P<action>[^\n\r]+)\s*$',
+    flags=re.IGNORECASE
+)
+def _format_reward(text: str) -> int:
+    """
+    Return 1 if the output strictly matches:
+      Reasoning: <any, may contain newlines>
+      Action: <one line>
+    Otherwise 0.
+    """
+    if not isinstance(text, str):
+        return 0
+
+    t = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    m = _FMT_RE.match(t)
+    if m is None:
+        return 0
+
+    if len(re.findall(r'Reasoning:', t, flags=re.IGNORECASE)) != 1:
+        return 0
+    if len(re.findall(r'Action:', t, flags=re.IGNORECASE)) != 1:
+        return 0
+
+    # Action 必须非空（regex 已经用 + 保证非空，这里再保险）
+    if m.group("action").strip() == "":
+        return 0
+
+    return 1
+
 class DataProcessor:
     """
       - build_llm_prompt / build_chat_context
@@ -39,6 +70,7 @@ class DataProcessor:
         self.rank = rank
         self.world_size = world_size
         self.output_step = 0
+        self.llm_prior_with_cot = False
         
         from collections import deque
         self.vllm_output = deque(maxlen=10)
@@ -208,15 +240,20 @@ class DataProcessor:
         end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(samples)
         print(f"[Rank {self.rank}] process {start}: {end} samples, total {len(samples)} samples.")
         real_samples = samples[start:end]
+        
+        prompts_only = [s["prompt"] for s in real_samples]
 
         if self.use_cot:
-            prompts_only = [s["prompt"] + s["prefix_cot"] + " " for s in real_samples]
+            targets_only = [s["prefix_cot"] + " " + s["target"] + self.tokenizer.eos_token for s in real_samples]
+            if self.args.reward_func.format_reward:
+                fmt_rewards = torch.tensor([_format_reward(t) for t in targets_only])
+            else:
+                fmt_rewards = None
         else:
-            prompts_only = [s["prompt"] for s in real_samples]
+            targets_only = [s["target"] + self.tokenizer.eos_token for s in real_samples]
+            fmt_rewards = None
 
-        targets_only = [s["target"] + self.tokenizer.eos_token for s in real_samples]
-
-        prompts_ids_list = self.tokenizer(prompts_only, add_special_tokens=False, truncation=True, max_length=self.prompt_max_len - 20)["input_ids"]
+        prompts_ids_list = self.tokenizer(prompts_only, add_special_tokens=False, truncation=True, max_length=self.prompt_max_len - self.generate_max_len - 20)["input_ids"]
         tgt_ids_list = self.tokenizer(targets_only, add_special_tokens=False, truncation=True)["input_ids"]
 
         full_ids_list = [p + t for p, t in zip(prompts_ids_list, tgt_ids_list)]
@@ -236,18 +273,26 @@ class DataProcessor:
 
         if self.args.advantage_type == "target_value":
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
+            if fmt_rewards is not None:
+                gt = gt + fmt_rewards
 
         elif self.args.advantage_type == "target_reward":
             gt = torch.tensor([s["reward"] for s in real_samples], dtype=torch.float32)
+            if fmt_rewards is not None:
+                gt = gt + fmt_rewards
 
         elif self.args.advantage_type == "target_value_batch_norm":
             # Legacy implementation: batch normalization (not recommended)
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
+            if fmt_rewards is not None:
+                gt = gt + fmt_rewards
             gt = (gt - gt.mean()) / (gt.std() + 1e-8)
 
         elif self.args.advantage_type == "target_value_running_norm":
             # New implementation: running normalization for consistent training signals
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
+            if fmt_rewards is not None:
+                gt = gt + fmt_rewards
 
             if self.value_normalizer is not None:
                 gt, norm_stats = self.value_normalizer.normalize(
@@ -426,24 +471,29 @@ class DataProcessor:
         )
 
         all_context_texts = [self.build_chat_context(p) for p in all_prompts]
+        context_ids = self.tokenizer(all_context_texts, add_special_tokens=False, max_length=self.prompt_max_len - self.generate_max_len - 20, padding=False, truncation=True)["input_ids"]
+
         if self.use_cot:
-            all_context_texts = [c + pc + " " for c, pc in zip(all_context_texts, all_prefix_cots)]
-
-        context_ids = self.tokenizer(all_context_texts, add_special_tokens=False, max_length=self.prompt_max_len - 20, padding=False, truncation=True)["input_ids"]
-
-        label_texts = [l + self.tokenizer.eos_token for l in all_labels]
+            label_texts = [pc + " " + l + self.tokenizer.eos_token for pc, l in zip(all_prefix_cots, all_labels)]
+            label_texts_no_cots =  [" " + l + self.tokenizer.eos_token for l in all_labels]
+        else:
+            label_texts = [l + self.tokenizer.eos_token for l in all_labels]
+            label_texts_no_cots = label_texts
+            
         label_ids = self.tokenizer(label_texts, add_special_tokens=False, padding=False, truncation=False)["input_ids"]
+        label_ids_no_cots = self.tokenizer(label_texts_no_cots, add_special_tokens=False, padding=False, truncation=False)["input_ids"]
 
         full_ids = [c + l for c, l in zip(context_ids, label_ids)]
         p_lens = [len(x) for x in context_ids]
         l_lens = [len(x) for x in label_ids]
+        l_no_cots_lens = [len(x) for x in label_ids_no_cots]
 
         self.vllm_engine.add_requests(sampling_params=sampling_params, prompt_token_ids=full_ids)
         outs = self.vllm_engine.get_responses()
 
         scores = []
         old_action_logprob = []
-        for out, ids, p_len, l_len in zip(outs, full_ids, p_lens, l_lens):
+        for out, ids, p_len, l_len, l_no_cots_len in zip(outs, full_ids, p_lens, l_lens, l_no_cots_lens):
             prompt_logprobs = getattr(out, "prompt_logprobs", None)
 
             token_lps = []
@@ -459,7 +509,11 @@ class DataProcessor:
                 scores.append(float("-inf"))
                 old_action_logprob.append([])
             else:
-                scores.append(sum(token_lps) if self.reduction == "sum" else sum(token_lps) / len(token_lps))
+                assert l_no_cots_len <= l_len
+                if self.llm_prior_with_cot:
+                    scores.append(sum(token_lps) if self.reduction == "sum" else sum(token_lps) / l_len)
+                else:
+                    scores.append(sum(token_lps[-l_no_cots_len:]) if self.reduction == "sum" else sum(token_lps[-l_no_cots_len:]) / l_no_cots_len)
                 old_action_logprob.append(token_lps)
             
         return scores, old_action_logprob

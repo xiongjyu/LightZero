@@ -123,6 +123,9 @@ class PriorZeroLLMConfig:
     lr_warmup_ratio: float = 0.03
     max_steps: int = int(1e4)
     policy_loss_type: str = "ppo"   # 'ppo' / 'gspo'
+    reward_func = EasyDict({
+        'format_reward': False
+    })
     advantage_type: str = "target_value_running_norm"  # "target_value", "target_reward", "target_value_batch_norm", "target_value_running_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
