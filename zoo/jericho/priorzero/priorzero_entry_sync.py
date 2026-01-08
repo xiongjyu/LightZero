@@ -133,7 +133,7 @@ def train_priorzero(
         logger.info(f"[Rank {rank}] World Model components initialized")
 
     from utils import Profiler
-    prof = Profiler(log_interval=1, stats_file=f'./{cfg.exp_name}/log/profiler.txt')
+    prof = Profiler(log_interval=5, stats_file=f'./{cfg.exp_name}/log/profiler.txt')
 
     from strategy.deepspeed import get_strategy, torch_dist_barrier_and_cuda_sync
     strategy = get_strategy(llm_cfg)

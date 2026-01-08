@@ -256,7 +256,7 @@ class DataProcessor:
                     return_stats=True
                 )
                 if self.rank == 0 and self.value_normalizer.update_count % 10 == 0:
-                    print(f"[Adaptive Value Norm] step={self.value_normalizer.count}, "
+                    print(f"[Adaptive Value Norm] step={self.value_normalizer.update_count}, "
                           f"running_mean={norm_stats['running_mean']:.3f}, "
                           f"running_std={norm_stats['running_std']:.3f}, "
                           f"batch_mean={norm_stats['batch_mean']:.3f}, "
