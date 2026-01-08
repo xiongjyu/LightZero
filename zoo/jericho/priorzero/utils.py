@@ -78,12 +78,13 @@ from contextlib import contextmanager
 from collections import defaultdict
 
 class Profiler:
-    def __init__(self, log_interval: int = 10, stats_file: str = None):
+    def __init__(self, log_interval: int = 10, stats_file: str = None, enable_profile: bool = False):
         self.log_interval = max(1, int(log_interval))
         self.stats_file = stats_file
         self.stats = defaultdict(lambda: {"count": 0, "total": 0.0, "max": 0.0})
         self._inited = False
-
+        self.enable_profile = enable_profile
+        
     def _init_once(self):
         if self._inited:
             return
@@ -102,8 +103,8 @@ class Profiler:
                 f.write(f"{time.time():.3f}\t{name}\t{s['count']}\t{s['total']:.6f}\t{avg:.6f}\t{s['max']:.6f}\n")
 
     @contextmanager
-    def block(self, name: str, enable_profile: bool = True, rank: int = 0):
-        if not enable_profile or rank != 0:
+    def block(self, name: str, rank: int = 0):
+        if not self.enable_profile or rank != 0:
             yield None
             return
         self._init_once()

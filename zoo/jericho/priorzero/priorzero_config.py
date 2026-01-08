@@ -112,7 +112,7 @@ class PriorZeroLLMConfig:
     ds_tensor_parallel_size: int = 1
     ring_attn_size: int = 1
     
-    llm_learn_num_samples: int = 512 # 每次取buffer中最新的256条轨迹训练
+    llm_learn_num_samples: int = 256 # 每次取buffer中最新的256条轨迹训练
     train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     micro_train_batch_size: int = 8
 

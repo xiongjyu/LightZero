@@ -81,9 +81,10 @@ class PriorZeroCollector(OriginalCollector):
 
     def __init__(
         self,
-        data_processor: None,
         policy_config: Dict,
         llm_config: Dict,
+        data_processor = None,
+        prof = None,
         **kwargs
     ):
         """
@@ -100,6 +101,7 @@ class PriorZeroCollector(OriginalCollector):
         super().__init__(**kwargs)
 
         self.data_processor = data_processor
+        self.prof = prof
         self.llm_cfg = llm_config
 
         self.history_buffers = defaultdict(
@@ -311,14 +313,14 @@ class PriorZeroCollector(OriginalCollector):
 
                         valid_actions = obs[env_id].get('valid_actions', [])
                         valid_actions_list.append(valid_actions)
-
-                    # CoT reuse optimization: request CoT prefixes to store in game segments
-                    llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
-                        states=raw_obs_list,
-                        valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
-                        histories=histories_list,
-                        return_cot=True  # Request CoT prefixes for reuse in training
-                    )
+                    with self.prof.block("collect_step_get_llm_prior", rank=self._rank):
+                        # CoT reuse optimization: request CoT prefixes to store in game segments
+                        llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
+                            states=raw_obs_list,
+                            valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
+                            histories=histories_list,
+                            return_cot=True  # Request CoT prefixes for reuse in training
+                        )
 
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
@@ -327,10 +329,11 @@ class PriorZeroCollector(OriginalCollector):
 
                 if self.task_id is not None:
                     policy_kwargs_forward['task_id'] = self.task_id
-                policy_output = self._policy.forward(data=stack_obs_tensor, action_mask=action_mask,
-                                                    temperature=temperature, to_play=to_play, epsilon=epsilon,
-                                                    ready_env_id=sorted(list(ready_env_id)), timestep=timestep,
-                                                    **policy_kwargs_forward)
+                with self.prof.block("collect_step_forward", rank=self._rank):
+                    policy_output = self._policy.forward(data=stack_obs_tensor, action_mask=action_mask,
+                                                        temperature=temperature, to_play=to_play, epsilon=epsilon,
+                                                        ready_env_id=sorted(list(ready_env_id)), timestep=timestep,
+                                                        **policy_kwargs_forward)
 
                 # Extract outputs
                 actions_with_env_id = {k: v['action'] for k, v in policy_output.items()}
@@ -349,8 +352,8 @@ class PriorZeroCollector(OriginalCollector):
                     env_id: actions_with_env_id.pop(env_id)
                     for env_id in ready_env_id
                 }
-
-                timesteps = self._env.step(actions)
+                with self.prof.block("collect_step", rank=self._rank):
+                    timesteps = self._env.step(actions)
 
             interaction_duration = self._timer.value / len(timesteps)
 
