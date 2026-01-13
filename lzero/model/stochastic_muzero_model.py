@@ -7,7 +7,7 @@ from ding.torch_utils import MLP, ResBlock
 from ding.utils import MODEL_REGISTRY, SequenceType
 
 from .common import MZNetworkOutput, RepresentationNetwork, PredictionNetwork
-from .utils import renormalize, get_params_mean, get_dynamic_mean, get_reward_mean
+from .utils import renormalize, get_params_mean
 
 
 # use ModelRegistry to register the model, for more details about ModelRegistry, please refer to DI-engine's document.
@@ -27,8 +27,8 @@ class StochasticMuZeroModel(nn.Module):
             reward_head_hidden_channels: SequenceType = [32],
             value_head_hidden_channels: SequenceType = [32],
             policy_head_hidden_channels: SequenceType = [32],
-            reward_support_size: int = 601,
-            value_support_size: int = 601,
+            reward_support_range: SequenceType =(-300., 301., 1.),
+            value_support_range: SequenceType =(-300., 301., 1.),
             proj_hid: int = 1024,
             proj_out: int = 1024,
             pred_hid: int = 512,
@@ -61,8 +61,8 @@ class StochasticMuZeroModel(nn.Module):
             - reward_head_hidden_channels (:obj:`SequenceType`): The number of hidden layers of the reward head (MLP head).
             - value_head_hidden_channels (:obj:`SequenceType`): The number of hidden layers used in value head (MLP head).
             - policy_head_hidden_channels (:obj:`SequenceType`): The number of hidden layers used in policy head (MLP head).
-            - reward_support_size (:obj:`int`): The size of categorical reward output
-            - value_support_size (:obj:`int`): The size of categorical value output.
+            - reward_support_range (:obj:`SequenceType`): The range of categorical reward output
+            - value_support_range (:obj:`SequenceType`): The range of categorical value output.
             - proj_hid (:obj:`int`): The size of projection hidden layer.
             - proj_out (:obj:`int`): The size of projection output layer.
             - pred_hid (:obj:`int`): The size of prediction hidden layer.
@@ -83,8 +83,8 @@ class StochasticMuZeroModel(nn.Module):
         super(StochasticMuZeroModel, self).__init__()
         self.categorical_distribution = categorical_distribution
         if self.categorical_distribution:
-            self.reward_support_size = reward_support_size
-            self.value_support_size = value_support_size
+            self.reward_support_size = len(torch.arange(*reward_support_range))
+            self.value_support_size = len(torch.arange(*value_support_range))
         else:
             self.reward_support_size = 1
             self.value_support_size = 1
@@ -571,12 +571,6 @@ class DynamicsNetwork(nn.Module):
         reward = self.fc_reward_head(x)
 
         return next_latent_state, reward
-
-    def get_dynamic_mean(self) -> float:
-        return get_dynamic_mean(self)
-
-    def get_reward_mean(self) -> float:
-        return get_reward_mean(self)
 
 
 # TODO(pu): customize different afterstate dynamics network

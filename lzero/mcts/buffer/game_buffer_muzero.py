@@ -3,12 +3,11 @@ from typing import Any, List, Tuple, Union, TYPE_CHECKING, Optional
 import numpy as np
 import torch
 from ding.utils import BUFFER_REGISTRY, EasyTimer
-# from line_profiler import line_profiler
 
 from lzero.mcts.tree_search.mcts_ctree import MuZeroMCTSCtree as MCTSCtree
 from lzero.mcts.tree_search.mcts_ptree import MuZeroMCTSPtree as MCTSPtree
 from lzero.mcts.utils import prepare_observation
-from lzero.policy import to_detach_cpu_numpy, concat_output, concat_output_value, inverse_scalar_transform
+from lzero.policy import DiscreteSupport, to_detach_cpu_numpy, concat_output, concat_output_value, inverse_scalar_transform
 from .game_buffer import GameBuffer
 
 if TYPE_CHECKING:
@@ -73,6 +72,8 @@ class MuZeroGameBuffer(GameBuffer):
             self.task_id = None
             print("No task_id found in configuration. Task ID is set to None.")
             self.action_space_size = self._cfg.model.action_space_size
+        self.value_support = DiscreteSupport(*self._cfg.model.value_support_range)
+        self.reward_support = DiscreteSupport(*self._cfg.model.reward_support_range)
 
     def reset_runtime_metrics(self):
         """
@@ -433,6 +434,24 @@ class MuZeroGameBuffer(GameBuffer):
         ]
         return policy_re_context
 
+    def _scalar_reward(self, r: Any) -> float:
+        """
+        Overview:
+            Convert a reward input of various types into a scalar float value.
+        Arguments:
+            - r (Any): The reward input, which can be a numpy array, list, tuple, or a scalar.
+                    If it is a numpy array, list, or tuple, the function uses the first element.
+        Returns:
+            - float: The scalar representation of the input reward.
+        """
+        # If the reward is in the form of a list, tuple, or numpy array,
+        # convert it to a numpy array, reshape it into a flat array, and take the first element.
+        if isinstance(r, (list, tuple, np.ndarray)):
+            r = np.asarray(r).reshape(-1)[0]
+        
+        # Return the float value of the reward.
+        return float(r)
+
     def _compute_target_reward_value(self, reward_value_context: List[Any], model: Any) -> Tuple[Any, Any]:
         """
         Overview:
@@ -467,12 +486,11 @@ class MuZeroGameBuffer(GameBuffer):
                     m_output = model.initial_inference(m_obs)
                 
 
-                # if not model.training:
                 # if not in training, obtain the scalars of the value/reward
                 [m_output.latent_state, m_output.value, m_output.policy_logits] = to_detach_cpu_numpy(
                     [
                         m_output.latent_state,
-                        inverse_scalar_transform(m_output.value, self._cfg.model.support_scale),
+                        inverse_scalar_transform(m_output.value, self.value_support),
                         m_output.policy_logits
                     ]
                 )
@@ -528,11 +546,11 @@ class MuZeroGameBuffer(GameBuffer):
                             value_list[value_index] += reward * self._cfg.discount_factor ** i
 
                     # TODO: check the boundary condition
-                    target_values.append(value_list[value_index])
+                    target_values.append(self._scalar_reward(value_list[value_index]))
                     if current_index < len(reward_list):
-                        target_rewards.append(reward_list[current_index])
+                        target_rewards.append(self._scalar_reward(reward_list[current_index]))
                     else:
-                        target_rewards.append(np.array(0.))
+                        target_rewards.append(0.)
 
                     value_index += 1
 
@@ -595,12 +613,11 @@ class MuZeroGameBuffer(GameBuffer):
                 else:
                     m_output = model.initial_inference(m_obs)
 
-                # if not model.training:
                 # if not in training, obtain the scalars of the value/reward
                 [m_output.latent_state, m_output.value, m_output.policy_logits] = to_detach_cpu_numpy(
                     [
                         m_output.latent_state,
-                        inverse_scalar_transform(m_output.value, self._cfg.model.support_scale),
+                        inverse_scalar_transform(m_output.value, self.value_support),
                         m_output.policy_logits
                     ]
                 )

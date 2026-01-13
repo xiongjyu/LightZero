@@ -1,3 +1,4 @@
+from ditk import logging
 import os
 from functools import partial
 from typing import Optional, Tuple
@@ -13,7 +14,6 @@ from ding.policy import create_policy
 from ding.utils import set_pkg_seed
 from ding.worker import BaseLearner
 from lzero.worker import MuZeroEvaluator
-from lzero.entry.utils import initialize_zeros_batch
 
 
 def eval_muzero(
@@ -51,7 +51,7 @@ def eval_muzero(
     # Create main components: env, policy
     env_fn, collector_env_cfg, evaluator_env_cfg = get_vec_env_setting(cfg.env)
     evaluator_env = create_env_manager(cfg.env.manager, [partial(env_fn, cfg=c) for c in evaluator_env_cfg])
-
+    # print(f"cfg.seed:{cfg.seed}")
     evaluator_env.seed(cfg.seed, dynamic_seed=False)
     set_pkg_seed(cfg.seed, use_cuda=cfg.policy.cuda)
 

@@ -4,6 +4,7 @@ import os
 import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
+from collections import OrderedDict
 
 import gym
 import numpy as np
@@ -45,7 +46,7 @@ class JerichoEnv(BaseEnv):
     DEFAULT_CONFIG: Dict[str, Any] = {
         'max_steps': 400,
         'max_action_num': 10,
-        'tokenizer_path': "google-bert/bert-base-uncased",
+        'tokenizer_path': "BAAI/bge-base-en-v1.5",
         'max_seq_len': 512,
         'remove_stuck_actions': False,
         'add_location_and_inventory': False,
@@ -53,7 +54,9 @@ class JerichoEnv(BaseEnv):
         'save_replay': False,
         'save_replay_path': None,
         'env_type': "zork1",
-        'collect_policy_mode': "random"
+        'collect_policy_mode': "agent",
+        'use_cache': True,
+        'cache_size': 100000,
     }
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
@@ -70,12 +73,13 @@ class JerichoEnv(BaseEnv):
 
         self.max_steps: int = self.cfg['max_steps']
         self.game_path: str = self.cfg['game_path']
+        self.env_type: str = self.cfg['env_type']
+
         self.max_action_num: int = self.cfg['max_action_num']
         self.max_seq_len: int = self.cfg['max_seq_len']
         self.save_replay: bool = self.cfg['save_replay']
         self.save_replay_path: str = self.cfg['save_replay_path']
         self.collect_policy_mode: str = self.cfg['collect_policy_mode']
-        self.env_type: str = self.cfg['env_type']
 
         # Record the last observation and action for detecting stuck actions.
         self.last_observation: Optional[str] = None
@@ -90,6 +94,13 @@ class JerichoEnv(BaseEnv):
         self.remove_stuck_actions: bool = self.cfg['remove_stuck_actions']
         self.add_location_and_inventory: bool = self.cfg['add_location_and_inventory']
         self.for_unizero: bool = self.cfg['for_unizero']
+        
+        self.use_cache = self.cfg['use_cache']
+        if self.use_cache:
+            self.cache_size = self.cfg['cache_size']
+            self.cache_buffer = OrderedDict()
+            print(f'[jericho]: use_cache: {self.use_cache}, cache_size={self.cache_size}')
+
         
         # Initialize the tokenizer once (only in rank 0 process if distributed)
         if JerichoEnv.tokenizer is None:
@@ -133,7 +144,18 @@ class JerichoEnv(BaseEnv):
               and action mask. For unizero, an additional "to_play" key is provided.
         """
         if self._action_list is None:
-            self._action_list = self._env.get_valid_actions()
+            if self.use_cache:
+                cache_key = self._env.get_world_state_hash()
+                if cache_key in self.cache_buffer:
+                    self.cache_buffer.move_to_end(cache_key)
+                    self._action_list = self.cache_buffer[cache_key]
+                else:
+                    self._action_list = self._env.get_valid_actions()
+                    self.cache_buffer[cache_key] = self._action_list
+                    if len(self.cache_buffer) > self.cache_size:
+                        self.cache_buffer.popitem(last=False)
+            else:
+                self._action_list = self._env.get_valid_actions()
 
         # Filter available actions based on whether stuck actions are removed.
         if self.remove_stuck_actions:
@@ -152,7 +174,9 @@ class JerichoEnv(BaseEnv):
             full_obs: str = f"Location: {player_location}\nInventory: {inventory}{obs}\nValid actions: {available_actions}"
         else:
             full_obs = f"{obs}\nValid actions: {available_actions}"
-
+        
+        full_obs_str = copy.deepcopy(full_obs)
+        
         # Tokenize observation if required.
         if not return_str:
             tokenized_output = JerichoEnv.tokenizer(
@@ -175,11 +199,15 @@ class JerichoEnv(BaseEnv):
         if return_str:
             if self.for_unizero:
                 return {'observation': full_obs, 'action_mask': action_mask, 'to_play': -1, 'timestep': self._timestep}
+
             else:
                 return {'observation': full_obs, 'action_mask': action_mask}
         else:
             if self.for_unizero:
-                return {'observation': full_obs, 'obs_attn_mask': obs_attn_mask, 'action_mask': action_mask, 'to_play': -1, 'timestep': self._timestep}
+                if self.save_replay:
+                    return {'observation': full_obs, 'observation_str': full_obs_str,'obs_attn_mask': obs_attn_mask, 'action_mask': action_mask, 'to_play': -1, 'timestep': self._timestep}
+                else:
+                    return {'observation': full_obs, 'obs_attn_mask': obs_attn_mask, 'action_mask': action_mask, 'to_play': -1, 'timestep': self._timestep}
             else:
                 return {'observation': full_obs, 'obs_attn_mask': obs_attn_mask, 'action_mask': action_mask}
 
@@ -199,10 +227,10 @@ class JerichoEnv(BaseEnv):
         self._init_flag = True
         self._action_list = None
         self.episode_return = 0.0
-        self.env_step = 0
         self._timestep = 0
         self.episode_history = []
-        self.walkthrough_actions = self._env.get_walkthrough()
+        if self.collect_policy_mode == 'expert':
+            self.walkthrough_actions = self._env.get_walkthrough()
 
         if self.remove_stuck_actions:
             self.last_observation = initial_observation
@@ -214,13 +242,15 @@ class JerichoEnv(BaseEnv):
 
         processed_obs = self.prepare_obs(initial_observation, return_str)
 
-        self.episode_history.append({
-            'timestep': 0,
-            'obs': processed_obs['observation'],
-            'act': None,
-            'done': False,
-            'info': info
-        })
+        if self.save_replay:
+            self.episode_history.append({
+                'timestep': 0,
+                'obs': processed_obs['observation'] if return_str else processed_obs['observation_str'] ,
+                'act': None,
+                'done': False,
+                'info': info
+            })
+
        
         return processed_obs
 
@@ -299,7 +329,6 @@ class JerichoEnv(BaseEnv):
         self._timestep += 1
         if not self.for_unizero:
             reward = np.array([float(reward)])
-        self.env_step += 1
         self.episode_return += reward
         self._action_list = None
 
@@ -314,13 +343,13 @@ class JerichoEnv(BaseEnv):
 
         processed_obs = self.prepare_obs(observation, return_str)
 
-        if self.env_step >= self.max_steps:
+        if self._timestep >= self.max_steps:
             done = True
 
         if self.save_replay:
             self.episode_history.append({
                 'timestep': self._timestep,
-                'obs': processed_obs['observation'],
+                'obs': processed_obs['observation'] if return_str else processed_obs['observation_str'],
                 'act': action_str,
                 'reward': reward.item() if isinstance(reward, np.ndarray) else reward,
                 'done': done,
@@ -329,7 +358,7 @@ class JerichoEnv(BaseEnv):
 
         if done:
             print('=' * 20)
-            print(f'rank {self.rank} one episode done!')
+            print(f'rank {self.rank} one episode done! episode_return:{self.episode_return}')
             self.finished = True
             info['eval_episode_return'] = self.episode_return
 

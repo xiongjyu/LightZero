@@ -6,10 +6,10 @@ from easydict import EasyDict
 env_id = 'detective.z5'
 # Define environment configurations
 env_configurations = {
-    'detective.z5': (10, 50),
-    'omniquest.z5': (10, 100),
-    'acorncourt.z5': (10, 50),
-    'zork1.z5': (10, 400),
+    'detective.z5': (12, 100),
+    'omniquest.z5': (25, 100),
+    'acorncourt.z5': (45, 50),
+    'zork1.z5': (55, 500),
 }
 # Set action_space_size and max_steps based on env_id
 action_space_size, max_steps = env_configurations.get(env_id, (10, 50))  # Default values if env_id not found
@@ -37,7 +37,9 @@ jericho_ppo_config = dict(
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
-        manager=dict(shared_memory=False, )
+        manager=dict(shared_memory=False, ),
+        use_cache=True,
+        cache_size=100000,
     ),
     policy=dict(
         cuda=True,

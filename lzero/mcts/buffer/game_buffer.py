@@ -153,15 +153,92 @@ class GameBuffer(ABC, object):
             # Indices exceeding `game_segment_length` are padded with the next segment and are not updated
             # in the current implementation. Therefore, we need to sample `pos_in_game_segment` within
             # [0, game_segment_length - num_unroll_steps] to avoid padded data.
-            # TODO: Consider increasing `self._cfg.game_segment_length` to ensure sampling efficiency.
-            # NOTE: Sample the init position from the whole segment, but not from the padded part
-            if pos_in_game_segment >= self._cfg.game_segment_length - self._cfg.num_unroll_steps:
-                pos_in_game_segment = np.random.choice(self._cfg.game_segment_length - self._cfg.num_unroll_steps, 1).item()
+            
+            if self._cfg.action_type == 'varied_action_space':
+                # For varied action space environments (e.g., board games with short game length like TicTacToe)
+                # We need to handle cases where game_segment_length might be smaller than num_unroll_steps + td_steps
+                # Strategy: progressively relax sampling constraints to accommodate short games
+
+                # Step 1: Calculate ideal sampling upper bound
+                # Ideally, reserve space for both num_unroll_steps and td_steps to ensure complete trajectories
+                ideal_bound = self._cfg.game_segment_length - self._cfg.num_unroll_steps - self._cfg.td_steps
+
+                # Step 2: Handle different game length scenarios with graceful degradation
+                if ideal_bound > 0:
+                    # Case A: Normal/long games - enough space for full unroll + td steps
+                    # This is the standard case for most Atari games
+                    sampling_upper_bound = ideal_bound
+                else:
+                    # Case B: Short games - need to relax constraints
+                    # Try to at least reserve space for unroll steps (most critical for training)
+                    fallback_bound = self._cfg.game_segment_length - self._cfg.num_unroll_steps
+
+                    if fallback_bound > 0:
+                        # Can still accommodate unroll steps, though td_steps might need padding
+                        sampling_upper_bound = fallback_bound
+                    else:
+                        # Case C: Very short games (e.g., TicTacToe with 5-9 moves)
+                        # Allow sampling from entire segment length, padding will be applied during unrolling
+                        # This allows sampling from position 0 (beginning of game) when necessary
+                        sampling_upper_bound = self._cfg.game_segment_length
+
+                        # Ensure at least 1 to avoid np.random.choice errors
+                        if sampling_upper_bound <= 0:
+                            sampling_upper_bound = 1
+
+                # Step 3: Resample position if it exceeds calculated bound
+                if pos_in_game_segment >= sampling_upper_bound:
+                    pos_in_game_segment = np.random.choice(sampling_upper_bound, 1).item()
+
+                # Step 4: Further adjust based on actual segment length (runtime check)
+                segment_len = len(game_segment.action_segment)
+                if pos_in_game_segment >= segment_len - 1:
+                    # Position exceeds actual segment, resample within valid range
+                    if segment_len > 1:
+                        # Sample from [0, segment_len-1] to allow at least 1 step forward
+                        pos_in_game_segment = np.random.choice(segment_len - 1, 1).item()
+                    else:
+                        # Segment has 0 or 1 actions, can only use position 0
+                        pos_in_game_segment = 0
+
+            else:
+                # For environments with a fixed action space (e.g., Atari),
+                # we can safely sample from the entire game segment range.
+                if pos_in_game_segment >= self._cfg.game_segment_length:
+                    pos_in_game_segment = np.random.choice(self._cfg.game_segment_length, 1).item()
+
+                # Compatibility handling for both GameSegment objects and list data (for unittests)
+                try:
+                    segment_len = len(game_segment.action_segment)
+                except (AttributeError, TypeError):
+                    # For unittest compatibility: when game_segment is a list instead of GameSegment object
+                    segment_len = len(game_segment)
+
+                if pos_in_game_segment >= segment_len - 1:
+                    # If the segment is very short (length 0 or 1), we can't randomly sample a position
+                    # before the last one. The only safe position is 0.
+                    if segment_len > 1:
+                        # If the segment has at least 2 actions, we can safely sample from [0, len-2].
+                        # The upper bound for np.random.choice is exclusive, so (segment_len - 1) is correct.
+                        pos_in_game_segment = np.random.choice(segment_len - 1, 1).item()
+                    else:
+                        # If segment length is 0 or 1, the only valid/safe position is 0.
+                        pos_in_game_segment = 0
 
             pos_in_game_segment_list.append(pos_in_game_segment)
             
 
-        make_time = [time.time() for _ in range(len(batch_index_list))]
+        # make_time = [time.time() for _ in range(len(batch_index_list))]
+
+                # The sampling position should be 0, 0 + num_unroll_steps, ... (integer multiples of num_unroll_steps)
+                for i in range(samples_per_segment):
+                    game_segment_list.append(game_segment)
+                    pos_in_game_segment = i * self._cfg.num_unroll_steps
+                    if pos_in_game_segment >= len(game_segment):
+                        pos_in_game_segment = np.random.choice(len(game_segment), 1).item()
+                    pos_in_game_segment_list.append(pos_in_game_segment)
+                    # NOTE: We should append the physical index here, as it corresponds to the sampled segment.
+                    batch_index_list.append(game_segment_idx)
 
         orig_data = (game_segment_list, pos_in_game_segment_list, batch_index_list, weights_list, make_time)
         
