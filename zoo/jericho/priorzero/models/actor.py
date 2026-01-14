@@ -12,9 +12,7 @@ from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from transformers.trainer import get_scheduler
 
-from utils import compute_approx_kl, compute_entropy, masked_mean, torch_dist_barrier_and_cuda_sync
-from openrlhf.models.utils import log_probs_from_logits
-
+from utils import compute_approx_kl, compute_entropy, masked_mean, torch_dist_barrier_and_cuda_sync, log_probs_from_logits
 
 class Actor(nn.Module):
     """
@@ -286,7 +284,7 @@ class BatchPPOTrainer:
             self.vllm_engine.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        model = self.actor.model
+        model = self.actor.model.module
         count, num_params = 0, len(list(model.named_parameters()))
         for name, param in model.named_parameters():
             count += 1  # empty_cache at last param

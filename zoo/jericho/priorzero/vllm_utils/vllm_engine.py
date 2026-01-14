@@ -54,7 +54,6 @@ def create_vllm_engine(
     vllm_enable_sleep=False,
 ):
     from packaging import version
-    assert version.parse(vllm.__version__) > version.parse("0.8.2"), "OpenRLHF only supports vllm > 0.8.2"
 
     distributed_executor_backend = "external_launcher"
 

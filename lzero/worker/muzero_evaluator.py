@@ -98,6 +98,8 @@ class MuZeroEvaluator(ISerialEvaluator):
                     f'./{self._exp_name}/log/{self._instance_name}', self._instance_name, need_tb=False
                 )
                 self._tb_logger = tb_logger
+            else:
+                self._tb_logger = None
 
         self._rank = get_rank()
         print(f'rank {self._rank}, self.task_id: {self.task_id}')

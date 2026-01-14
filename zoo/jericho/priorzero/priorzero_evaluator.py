@@ -31,6 +31,3 @@ class PriorZeroEvaluator(OriginalEvaluator):
             **kwargs: Arguments for parent MuZeroEvaluator
         """
         super().__init__(**kwargs)
-
-    # All other methods are inherited from MuZeroEvaluator
-    # The policy's _forward_collect already handles LLM prior integration

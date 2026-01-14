@@ -20,7 +20,7 @@ from torch.optim import Optimizer
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from utils import torch_dist_barrier_and_cuda_sync
-from openrlhf.models import Actor
+from models.actor import Actor
 
 ModelOptimPair = Tuple[nn.Module, Optimizer]
 ModelOrModelOptimPair = Union[nn.Module, ModelOptimPair]
