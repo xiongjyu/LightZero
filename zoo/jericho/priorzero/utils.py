@@ -1,6 +1,30 @@
 import torch
 from typing import List, Dict, Any, Tuple, Union, Optional
 from transformers import AutoTokenizer
+from dataclasses import is_dataclass
+import os
+import inspect
+import textwrap
+
+def dump_dataclass_cfg_py(cfg, path: str) -> str:
+    if not is_dataclass(cfg):
+        raise TypeError(type(cfg))
+
+    def norm(x):
+        if isinstance(x, dict):
+            return {k: norm(v) for k, v in x.items()}
+        if hasattr(x, "__class__") and x.__class__.__name__ == "EasyDict":
+            return {k: norm(v) for k, v in dict(x).items()}
+        if isinstance(x, (list, tuple)):
+            t = [norm(v) for v in x]
+            return tuple(t) if isinstance(x, tuple) else t
+        return x
+    cls = type(cfg)
+    fields = cls.__dataclass_fields__.keys()
+    lines = [f"{k} = {repr(norm(getattr(cfg, k)))}" for k in fields] + [""]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return 
 
 def torch_dist_barrier_and_cuda_sync():
     """Synchronize distributed training and CUDA operations.

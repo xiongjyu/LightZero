@@ -1,8 +1,8 @@
 import os
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 from easydict import EasyDict
 import torch.distributed as dist
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # ============================================================================
 # Model Configuration Presets
@@ -69,7 +69,7 @@ def print_available_models():
 
 @dataclass
 class PriorZeroLLMConfig:
-    local_rank = -1
+    local_rank: int = -1
     # 训练指标的相关参数
     enable_sft: bool = False
     enable_rft: bool = True
@@ -79,8 +79,8 @@ class PriorZeroLLMConfig:
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 5
     use_cot: bool = False
-    prompt_max_len = 8192
-    generate_max_len = 512
+    prompt_max_len: int = 8192
+    generate_max_len: int = 512
     bf16: bool = True
 
     # vLLM engines 
@@ -101,10 +101,10 @@ class PriorZeroLLMConfig:
     
     # 训练相关参数
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练
-    policy_model_num_gpus = 1 # 需要训练的 llm 使用几张卡
-    reference_model_num_gpus = 1
-    broadcast_every = 1 # 每次训练多少次 priorzero_every才同步vllm参数
-    deepspeed_enable_sleep = False
+    policy_model_num_gpus: int = 1 # 需要训练的 llm 使用几张卡
+    reference_model_num_gpus: int = 1
+    broadcast_every: int = 1 # 每次训练多少次 priorzero_every才同步vllm参数
+    deepspeed_enable_sleep: bool = False
     
     zero_stage: int = 2
     gradient_checkpointing: bool = False
@@ -123,20 +123,20 @@ class PriorZeroLLMConfig:
     lr_warmup_ratio: float = 0.03
     max_steps: int = int(1e4)
     policy_loss_type: str = "ppo"   # 'ppo' / 'gspo'
-    reward_func = EasyDict({
-        'format_reward': True,
-        'format_param': EasyDict({
-            'format_weight': 0.1
-        })
-        
-    })
+    reward_func: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "format_reward": True,
+        "format_param": EasyDict(
+            {"format_weight": 0.1, }
+        ),
+    }))
+
     advantage_type: str = "target_value_running_norm"  # "target_value", "target_reward", "target_value_batch_norm", "target_value_running_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"
     
     train_llm_after_wm_warm_step: int = int(1e3)
-    value_norm_cfg = EasyDict({
+    value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         'enable_stability_optimizer': True,
         'value_norm_init_momentum': 0.9,        # Fast adaptation in early training
         'value_norm_final_momentum': 0.99,     # Slow, stable updates in later training
@@ -144,7 +144,7 @@ class PriorZeroLLMConfig:
         'value_norm_clip_percentile': 0.95,     # Clip outliers beyond this percentile
         'value_norm_clip_method': "soft",
         "value_norm_history_size": 1000,
-    })
+    }))
 
 
 def get_priorzero_config(

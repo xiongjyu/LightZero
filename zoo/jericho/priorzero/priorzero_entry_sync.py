@@ -25,7 +25,7 @@ import torch
 import torch.distributed as dist
 import wandb
 
-from ding.config import compile_config
+from ding.config import compile_config, save_config
 from ding.envs import create_env_manager, get_vec_env_setting
 from ding.policy import create_policy
 from ding.utils import set_pkg_seed, get_rank, get_world_size
@@ -43,7 +43,7 @@ from priorzero_collector import PriorZeroCollector
 from priorzero_evaluator import PriorZeroEvaluator
 from priorzero_policy import *
 from lzero.mcts.buffer.game_buffer_priorzero import PriorZeroGameBufferOptimized
-
+from utils import dump_dataclass_cfg_py
 
 from lzero.entry.utils import calculate_update_per_collect
 
@@ -129,6 +129,7 @@ def train_priorzero(
                                                                             seed=seed)
         batch_size = cfg.policy.batch_size
         logger.info(f"[Rank {rank}] World Model components initialized")
+        dump_dataclass_cfg_py(llm_cfg, path=f"{cfg.exp_name}/llm_cfg.py")
 
     from utils import Profiler
     prof = Profiler(log_interval=10, stats_file=f'./{cfg.exp_name}/log/profiler.txt', enable_profile=enable_profile)
@@ -307,6 +308,7 @@ Examples:
     # Model selection
     parser.add_argument('--model', type=str, default="qwen2.5-3b", choices=get_available_models())
     parser.add_argument('--enable_profile', action='store_true', default=False)
+    parser.add_argument('--use_cot', action='store_true', default=False)
     args = parser.parse_args()
 
     model_key = args.model if args.model else "qwen2.5-1.5b"
@@ -319,18 +321,18 @@ Examples:
     print(f"Quick Test: {args.quick_test}")
     print(f"{'='*80}\n")
 
-    use_cot = True 
+    # use_cot = True 
     if args.quick_test:
         logger.info("Using quick test configuration")
         main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(
-            args.env_id, args.seed, use_cot=use_cot,
-            exp_name=f'data_priorzero/priorzero_sync_debug_{args.env_id}_seed0',
+            args.env_id, args.seed, use_cot=args.use_cot,
+            exp_name=f'data_priorzero/priorzero_debug_{args.env_id}',
             model_key=model_key,
         )
     else:
         main_cfg, create_cfg, llm_cfg = get_priorzero_config(
-            args.env_id, args.seed, use_cot=use_cot,
-            exp_name=f'data_priorzero/priorzero_ppo_{args.env_id}_seed0',
+            args.env_id, args.seed, use_cot=args.use_cot,
+            exp_name=f'data_priorzero/priorzero_ppo_{args.env_id}_use_cot_{args.use_cot}_with_fmtReward_seed0',
             model_key=model_key,
         )
 
