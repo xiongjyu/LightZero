@@ -226,7 +226,7 @@ class BatchPPOTrainer:
                 return_output=True,
                 logits_to_keep=logits_to_keep, 
             )
-            actor_loss, clip_ratio, ppo_kl, vllm_kl = self.policy_loss(
+            actor_loss, clipfrac, approx_kl, vllm_kl = self.policy_loss(
                 action_log_probs,
                 micro_batch['old_action_logprob'],
                 micro_batch['advantages'],
@@ -251,8 +251,8 @@ class BatchPPOTrainer:
             status = {
                 "policy_loss": actor_loss.detach().float().mean().item(),
                 "actor_lr": self.actor_scheduler.get_last_lr()[0],
-                "ppo_clip_ratio": clip_ratio.detach().float().mean().item(),
-                "ppo_kl": ppo_kl.detach().float().mean().item(),
+                "clipfrac": clipfrac.detach().float().mean().item(),
+                "approx_kl": approx_kl.detach().float().mean().item(),
             }
             if isinstance(kl_loss, torch.Tensor):
                 status["kl"] = kl_loss.detach().float().mean().item()
@@ -265,8 +265,9 @@ class BatchPPOTrainer:
 
             pbar.set_postfix({
                 "act_loss": status["policy_loss"],
+                "approx_kl": status["approx_kl"],
                 "kl": status["kl"],
-                "clip": status["ppo_clip_ratio"],
+                "clipfrac": status["clipfrac"],
                 "lr": status["actor_lr"],
             })
 
