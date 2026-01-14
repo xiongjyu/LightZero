@@ -215,7 +215,7 @@ class DataProcessor:
                 )
         return samples
 
-    def make_llm_train_samples(self, priorzero_batch) -> List[Dict[str, Any]]:
+    def make_llm_train_samples(self, priorzero_batch, ddp: bool = False) -> List[Dict[str, Any]]:
         """
         Convert PriorZero batch to LLM training samples.
 
@@ -235,14 +235,17 @@ class DataProcessor:
         samples = self.build_llm_samples(
             raw_obs_list, history_obs_list, action_logprob_list, target_value, cot_prefix_list
         )
-        per_rank = len(samples) // self.world_size
-        start = self.rank * per_rank
-        end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(samples)
-        print(f"[Rank {self.rank}] process {start}: {end} samples, total {len(samples)} samples.")
-        real_samples = samples[start:end]
+        if ddp:
+            print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")
+            real_samples = samples
+        else:
+            per_rank = len(samples) // self.world_size
+            start = self.rank * per_rank
+            end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(samples)
+            print(f"[Rank {self.rank}] process {start}: {end} samples. Total {len(samples)} samples collected by Rank 0.")
+            real_samples = samples[start:end]
         
         prompts_only = [s["prompt"] for s in real_samples]
-
         if self.use_cot:
             targets_only = [s["prefix_cot"] + " " + s["target"] + self.tokenizer.eos_token for s in real_samples]
             if self.args.reward_func.format_reward:

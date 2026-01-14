@@ -135,7 +135,7 @@ class PriorZeroLLMConfig:
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"
     
-    train_llm_after_wm_warm_step: int = int(1e3)
+    train_llm_after_wm_warm_step: int = int(1e2)
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         'enable_stability_optimizer': True,
         'value_norm_init_momentum': 0.9,        # Fast adaptation in early training
@@ -153,6 +153,7 @@ def get_priorzero_config(
     exp_name: str = None,
     use_cot: bool = False,
     model_key: Optional[str] = None,
+    multi_gpu: bool = False
 ) -> Tuple[EasyDict, EasyDict]:
     """
     Generate complete PriorZero configuration with automatic model configuration.
@@ -218,7 +219,7 @@ def get_priorzero_config(
     )
     policy_config = dict(
         type='priorzero',
-        multi_gpu=False,  
+        multi_gpu=multi_gpu,  
         use_wandb=False,
         learn=dict(
                 learner=dict(
