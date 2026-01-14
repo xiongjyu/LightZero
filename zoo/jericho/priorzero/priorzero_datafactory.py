@@ -270,29 +270,32 @@ class DataProcessor:
         action_mask_full = (labels != -100).long()
         max_tgt_len = max(len(t) for t in tgt_ids_list)
         action_mask = action_mask_full[:, -max_tgt_len:] 
-
+        
+        if fmt_rewards is not None:
+            fmt_weight = self.args.reward_func.format_param.format_weight
+            
         if self.args.advantage_type == "target_value":
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
             if fmt_rewards is not None:
-                gt = gt + fmt_rewards
+                gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
+
 
         elif self.args.advantage_type == "target_reward":
             gt = torch.tensor([s["reward"] for s in real_samples], dtype=torch.float32)
             if fmt_rewards is not None:
-                gt = gt + fmt_rewards
+                gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
 
         elif self.args.advantage_type == "target_value_batch_norm":
             # Legacy implementation: batch normalization (not recommended)
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
-            if fmt_rewards is not None:
-                gt = gt + fmt_rewards
             gt = (gt - gt.mean()) / (gt.std() + 1e-8)
+            
+            if fmt_rewards is not None:
+                gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
 
         elif self.args.advantage_type == "target_value_running_norm":
             # New implementation: running normalization for consistent training signals
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
-            if fmt_rewards is not None:
-                gt = gt + fmt_rewards
 
             if self.value_normalizer is not None:
                 gt, norm_stats = self.value_normalizer.normalize(
@@ -333,6 +336,8 @@ class DataProcessor:
                         f"running_std={self.value_running_std:.3f}, "
                         f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
 
+            if fmt_rewards is not None:
+                gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
         else:
             raise ValueError(f"Unknown advantage_type: {self.args.advantage_type}")
         
