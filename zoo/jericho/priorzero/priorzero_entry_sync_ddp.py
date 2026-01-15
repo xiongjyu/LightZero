@@ -104,7 +104,7 @@ def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed):
 
 def all_gather_cmd(world_size, obj) -> List:
     if world_size <= 1:
-        return obj
+        return [obj]
     lst = [None] * dist.get_world_size()
     dist.all_gather_object(lst, obj)
     return lst
@@ -240,7 +240,7 @@ def train_priorzero(
         else:
             cmd = 1
             
-        if max(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
+        if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
             continue
 
         logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
@@ -272,7 +272,7 @@ def train_priorzero(
         elif min(all_cmd) == 1:
             with prof.block("train_llm", rank=rank):
                 logger.info(f"[Rank {rank}] train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'None'}. Starting LLM training...")
-                train_samples = data_processor.make_llm_train_samples(priorzero_batch)
+                train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True)
                 trainer.train_batch(train_samples)
                 torch_dist_barrier_and_cuda_sync()
         else:

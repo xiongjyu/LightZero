@@ -528,7 +528,7 @@ def calculate_update_per_collect(
             collected_transitions_tensor
         ).item()
         updates = int(total_collected_transitions * cfg.policy.replay_ratio)
-        print(f"total_collected_transitions={total_collected_transitions}\tupdates={updates}")
+        print(f"\ntotal_collected_transitions={total_collected_transitions}\tupdates={updates}\n")
     else:
         # In a single-process setup.
         updates = int(collected_transitions_num * cfg.policy.replay_ratio)

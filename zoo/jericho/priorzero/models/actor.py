@@ -191,6 +191,7 @@ class BatchPPOTrainer:
             clip_eps_high=self.args.eps_clip_low_high[1],
             policy_loss_type=self.args.policy_loss_type,
         )
+        self.train_iter = 0
 
     def train_batch(self, batch_data: Dict[str, torch.Tensor], kl_ctl: float, step_idx: int = 0) -> Dict[str, float]:
         device = torch.cuda.current_device()
@@ -213,6 +214,7 @@ class BatchPPOTrainer:
                 "action_mask": batch_data['action_mask'][start_idx:end_idx],
                 "advantages": batch_data['advantages'][start_idx:end_idx],
                 "old_action_logprob": batch_data['old_action_logprob'][start_idx:end_idx],
+                "log_status": batch_data['log_status'][start_idx:end_idx]
             }
             micro_batch['ref_action_log_probs'] = batch_data['ref_action_log_probs'][start_idx:end_idx] if batch_data['ref_action_log_probs'] is not None else None
 
@@ -224,7 +226,7 @@ class BatchPPOTrainer:
                 return_output=True,
                 logits_to_keep=logits_to_keep, 
             )
-            actor_loss, clipfrac, approx_kl, vllm_kl = self.policy_loss(
+            actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
                 action_log_probs,
                 micro_batch['old_action_logprob'],
                 micro_batch['advantages'],
@@ -248,35 +250,35 @@ class BatchPPOTrainer:
 
             status = {
                 "policy_loss": actor_loss.detach().float().mean().item(),
-                "actor_lr": self.actor_scheduler.get_last_lr()[0],
+                "lr": self.actor_scheduler.get_last_lr()[0],
                 "clipfrac": clipfrac.detach().float().mean().item(),
+                "clip_ratio": clip_ratio.detach().float().mean().item(),
                 "approx_kl": approx_kl.detach().float().mean().item(),
+                "iter": self.train_iter,
             }
+            log_status = micro_batch["log_status"]
+            other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}
+            for k, v in other_status.items():
+                status[k] = sum(v) / len(v)
+            
             if isinstance(kl_loss, torch.Tensor):
                 status["kl"] = kl_loss.detach().float().mean().item()
             else:
                 status["kl"] = float(kl_loss)
             
             status = self.strategy.all_reduce(status)
-            
             status_list.append(status)
 
             pbar.set_postfix({
-                "act_loss": status["policy_loss"],
+                "policy_loss": status["policy_loss"],
                 "approx_kl": status["approx_kl"],
                 "kl": status["kl"],
                 "clipfrac": status["clipfrac"],
-                "lr": status["actor_lr"],
+                "lr": status["lr"],
+                "iter": self.train_iter,
             })
-
-        if status_list:
-            status_mean = status_list[0]
-            for m in status_list[1:]:
-                for k, v in m.items():
-                    status_mean[k] += v
-            for k in status_mean.keys():
-                status_mean[k] /= len(status_list)
-        return status_mean
+            self.train_iter += 1
+        return status_list
     
     def _deepspeed_broadcast(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)

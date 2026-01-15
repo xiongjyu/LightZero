@@ -7,6 +7,8 @@ import torch
 import torch.distributed as dist
 from vllm import SamplingParams
 from ding.utils import build_logger
+import random
+import math
 
 _FMT_RE = re.compile(
     r'^\s*Reasoning:\s*(?P<reason>[\s\S]*?)\nAction:\s*(?P<action>[^\n\r]+)\s*$',
@@ -73,7 +75,7 @@ class DataProcessor:
         self.llm_prior_with_cot = False
         
         from collections import deque
-        self.vllm_output = deque(maxlen=10)
+        self.episode_output = []
 
         # Running statistics for advantage normalization
         self.value_running_mean = 0.0
@@ -235,6 +237,7 @@ class DataProcessor:
         samples = self.build_llm_samples(
             raw_obs_list, history_obs_list, action_logprob_list, target_value, cot_prefix_list
         )
+        random.shuffle(samples)
         if ddp:
             print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")
             real_samples = samples
@@ -273,18 +276,22 @@ class DataProcessor:
         action_mask_full = (labels != -100).long()
         max_tgt_len = max(len(t) for t in tgt_ids_list)
         action_mask = action_mask_full[:, -max_tgt_len:] 
+        log_status_tmp = {}
+        log_status = []
         
         if fmt_rewards is not None:
             fmt_weight = self.args.reward_func.format_param.format_weight
+            log_status_tmp['fmt_rewards'] = fmt_rewards.tolist()
             
         if self.args.advantage_type == "target_value":
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
+            log_status_tmp["env_rewards (target_value)"] = gt.tolist()
             if fmt_rewards is not None:
                 gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
 
-
         elif self.args.advantage_type == "target_reward":
             gt = torch.tensor([s["reward"] for s in real_samples], dtype=torch.float32)
+            log_status_tmp["env_rewards (target_reward)"] = gt.tolist()
             if fmt_rewards is not None:
                 gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
 
@@ -292,6 +299,7 @@ class DataProcessor:
             # Legacy implementation: batch normalization (not recommended)
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
             gt = (gt - gt.mean()) / (gt.std() + 1e-8)
+            log_status_tmp["env_rewards (target_value_batch_norm)"] = gt.tolist()
             
             if fmt_rewards is not None:
                 gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
@@ -299,7 +307,6 @@ class DataProcessor:
         elif self.args.advantage_type == "target_value_running_norm":
             # New implementation: running normalization for consistent training signals
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
-
             if self.value_normalizer is not None:
                 gt, norm_stats = self.value_normalizer.normalize(
                     gt,
@@ -338,12 +345,17 @@ class DataProcessor:
                         f"running_mean={self.value_running_mean:.3f}, "
                         f"running_std={self.value_running_std:.3f}, "
                         f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
-
+                    
+            log_status_tmp["env_rewards (target_value_running_norm)"] = gt.tolist()
             if fmt_rewards is not None:
                 gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
         else:
             raise ValueError(f"Unknown advantage_type: {self.args.advantage_type}")
         
+        log_status_tmp["total_rewards"] = gt.tolist()
+        log_status = [
+            {k: log_status_tmp[k][i] for k in log_status_tmp.keys()} for i in range(len(log_status_tmp['total_rewards']))
+        ]
         
         old_seq_max_len = max([len(s['old_logprob']) for s in real_samples])
         old_logprob = torch.zeros(len(real_samples), old_seq_max_len, dtype=torch.float32)
@@ -351,7 +363,7 @@ class DataProcessor:
             logprob_token_list = real_samples[idx]['old_logprob']
             old_logprob[idx, -len(logprob_token_list):] = torch.tensor(logprob_token_list, dtype=torch.float32)
 
-        return inputs.input_ids, inputs.attention_mask, action_mask, gt, old_logprob
+        return inputs.input_ids, inputs.attention_mask, action_mask, gt, old_logprob, log_status
         
     @torch.no_grad()
     def _build_cot_prefix_texts(self, all_user_prompts: List[str]) -> List[str]:
@@ -365,7 +377,8 @@ class DataProcessor:
             temperature=1.0,
             top_p=1.0,
             max_tokens=self.generate_max_len, 
-            stop=["Action:", "\n\n"],  # Stop early when Action is generated or double newline
+            stop=["\n\n"],
+            # stop=["Action:", "\n\n"]
             include_stop_str_in_output=True,
             logprobs=None,
             prompt_logprobs=None,
@@ -383,10 +396,11 @@ class DataProcessor:
         self.vllm_engine.add_requests(sampling_params=cot_sampling_params, prompt_token_ids=context_token_ids)
         cot_outputs = self.vllm_engine.get_responses()
 
-        prefix_cot_list = []
+        prefix_cot_list, full_output = [], []
         for output in cot_outputs:
             gen_text = output.outputs[0].text
-
+            full_output.append(gen_text)
+            
             matches = list(re.finditer(r"(?mi)^\s*Action\s*:\s*", gen_text))
             if not matches:
                 matches = list(re.finditer(r"action\s*:\s*", gen_text, flags=re.IGNORECASE))
@@ -397,9 +411,10 @@ class DataProcessor:
 
             m = matches[-1]
             prefix_piece = gen_text[: m.end()].strip() 
+            
             prefix_cot_list.append(prefix_piece)
 
-        return prefix_cot_list
+        return prefix_cot_list, full_output
     
     @torch.no_grad()
     def get_llm_prior(
@@ -422,8 +437,6 @@ class DataProcessor:
             If return_cot=False: (llm_prior_per_seq, llm_prior_per_tok)
             If return_cot=True: (llm_prior_per_seq, llm_prior_per_tok, prefix_cots)
         """
-        self.vllm_output.append((states[0], histories[0]))
-
         prompt_list = []
         assert len(states) == len(histories) == len(valid_actions_list)
         for state, history in zip(states, histories):
@@ -431,9 +444,10 @@ class DataProcessor:
             prompt_list.append(prompt)
 
         if self.use_cot:
-            prefix_cots = self._build_cot_prefix_texts(prompt_list)
+            prefix_cots, full_output = self._build_cot_prefix_texts(prompt_list)
         else:
             prefix_cots = [None] * len(prompt_list)
+            full_output = None
 
         all_prompts = []
         all_labels = []
@@ -460,6 +474,12 @@ class DataProcessor:
             llm_prior_per_seq.append(tmp_dict)
             llm_prior_per_tok.append(tmp_dict2)
 
+        if self.use_cot:
+            self.episode_output.append({
+                "Instruction": prompt_list[0],
+                "Response": full_output[0],
+                "llm_prior_per_seq": llm_prior_per_seq[0]
+            })
         # CoT reuse optimization: return CoT prefixes if requested
         if return_cot:
             return llm_prior_per_seq, llm_prior_per_tok, prefix_cots
@@ -527,38 +547,26 @@ class DataProcessor:
         return scores, old_action_logprob
 
     @torch.no_grad()
-    def get_llm_output_log(self):
+    def get_llm_output_log(self, wm_train_iter: int = 0, llm_train_iter: int = 0):
         if self.rank != 0:
             return 
-        sampling_params = SamplingParams(
-            temperature=1.0,
-            top_p=1.0,
-            max_tokens=self.generate_max_len,
-            logprobs=None,
-            prompt_logprobs=None,
-        )
-
-        all_context_texts = [self.build_chat_context(self.build_llm_prompt(state, history)) for state, history in list(self.vllm_output)]
-        context_token_ids = self.tokenizer(
-            all_context_texts,
-            add_special_tokens=False,
-            max_length=self.prompt_max_len,
-            padding=False,
-            truncation=True,
-        )["input_ids"]
-
-        self.vllm_engine.add_requests(sampling_params=sampling_params, prompt_token_ids=context_token_ids)
-        outputs = self.vllm_engine.get_responses()
+        self._logger.info(f"===========================================\n"
+                          f"[LLM_OUTPUT] wm_train_iter={wm_train_iter}, llm_train_iter={llm_train_iter}\n"
+                          f"===========================================")
         
-        self.output_step += 1
-        # if not hasattr(self, "_logger") or self._logger is None:
-            # return
+        for i, tmp_dict in enumerate(self.episode_output[:15]):
+            instruction = tmp_dict["Instruction"]
+            response = tmp_dict["Response"]
+            llm_prior = tmp_dict["llm_prior_per_seq"]
+            
+            self._logger.info(f"[STEP {i}][Instruction]:\n{instruction} \n\n\n [Response]:\n{response}\n\n[LLM_PROABILITY]\n")
+            action_probs = {a: math.exp(float(lp)) for a, lp in llm_prior.items() if lp is not None and math.isfinite(float(lp))}
+            all_prob = sum(action_probs.values())
+            
+            for action, prob in sorted(action_probs.items(), key=lambda x: x[1], reverse=True):
+                self._logger.info(f"  - {action}: unnorm_prob={prob:.2e}, norm_prob={(prob / all_prob):.6e}")
+            self._logger.info(f"  - other: unnorm_prob={1-all_prob}")
+        self.episode_output = []
 
-        for i, ((state, history), out) in enumerate(zip(list(self.vllm_output), outputs)):
-            self._logger.info(
-                f"\n[vllm_output step={self.output_step} idx={i}]"
-                f"\n--- INPUT ---\n{self.build_llm_prompt(state, history)}"
-                f"\n--- OUTPUT ---\n{out.outputs[0].text}\n"
-            )
         
         

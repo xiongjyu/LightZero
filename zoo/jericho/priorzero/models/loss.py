@@ -101,6 +101,9 @@ class PolicyLoss(nn.Module):
             if self.token_level_loss
             else masked_mean(loss, action_mask, dim=-1).mean()
         )
-        clipfrac = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
+        clipped = ratio.gt(1 + self.clip_eps_high) | ratio.lt(1 - self.clip_eps_low)
+        clipfrac = masked_mean(clipped, action_mask, dim=None)
+
+        clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
         approx_kl = masked_mean(-log_ratio.detach(), action_mask, dim=None)
-        return loss, clipfrac, approx_kl, vllm_kl
+        return loss, clipfrac, clip_ratio, approx_kl, vllm_kl

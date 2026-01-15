@@ -11,10 +11,39 @@ import ray
 import numpy as np
 from transformers import AutoTokenizer
 
-from openrlhf.trainer.ppo_utils import  FixedKLController 
-
 import ray
 import torch
+
+import numpy as np
+
+
+class AdaptiveKLController:
+    """
+    Adaptive KL controller described in the paper:
+    https://arxiv.org/pdf/1909.08593.pdf
+    """
+
+    def __init__(self, init_kl_coef, target, horizon):
+        self.value = init_kl_coef
+        self.target = target
+        self.horizon = horizon
+
+    def update(self, current, n_steps):
+        target = self.target
+        proportional_error = np.clip(current / target - 1, -0.2, 0.2)
+        mult = 1 + proportional_error * n_steps / self.horizon
+        self.value *= mult
+
+
+class FixedKLController:
+    """Fixed KL controller."""
+
+    def __init__(self, kl_coef):
+        self.value = kl_coef
+
+    def update(self, current, n_steps):
+        pass
+
 
 def get_tokenizer(pretrain: str) -> AutoTokenizer:
     tokenizer = AutoTokenizer.from_pretrained(
@@ -72,15 +101,16 @@ class PriorZeroLLMTrainer:
     def train_batch(self, data) -> Dict[str, float]:
         if data is None:
             return {}
-        input_ids, attention_mask, action_mask, gt, old_lp = data
-        assert len(input_ids) == len(attention_mask) == len(action_mask) == len(gt) == len(old_lp)
+        input_ids, attention_mask, action_mask, gt, old_lp, log_status = data
+        assert len(input_ids) == len(attention_mask) == len(action_mask) == len(gt) == len(old_lp) == len(log_status)
         
         batch = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "action_mask": action_mask,
             "advantages": gt,     
-            "old_action_logprob": old_lp     
+            "old_action_logprob": old_lp,
+            "log_status": log_status,     
         }
         if self.reference_model is not None:
             base_action_log_probs = self.reference_model.forward(
@@ -100,8 +130,11 @@ class PriorZeroLLMTrainer:
             self._broadcast_to_vllm()
         
         if self._tb_logger is not None and self.strategy.is_rank_0():
-            for k, v in status.items():
-                self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), self.global_step)
+            for tmp_dict in status:
+                for k, v in tmp_dict.items():
+                    if k == 'iter':
+                        continue
+                    self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), int(tmp_dict['iter']))
         
         # if self.strategy.args.deepspeed_enable_sleep:
         #     self.policy_model.reload_states()
@@ -115,8 +148,10 @@ class PriorZeroLLMTrainer:
     def _broadcast_to_vllm(self):
         if self.strategy.args.vllm_enable_sleep:
             self.vllm_engine.wake_up()
-
+        
+        print(f"[Rank {self.rank}]: vllm starting update weights....")
         self.policy_model.broadcast_to_vllm()
+        print(f"[Rank {self.rank}]: vllm has updating done.")
 
         if self.strategy.args.vllm_enable_sleep:
             self.vllm_engine.sleep()
