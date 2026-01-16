@@ -122,7 +122,14 @@ class PriorZeroLLMTrainer:
             batch["ref_action_log_probs"] = base_action_log_probs
         else:
             batch["ref_action_log_probs"] = None
+            
+        if self.strategy.args.deepspeed_enable_sleep:
+            self.policy_model.reload_states()
+            
         status = self.policy_model.fit(batch, self.kl_ctl)
+        
+        if self.strategy.args.deepspeed_enable_sleep:
+            self.policy_model.offload_states()
         
         self.global_step += 1
         
@@ -136,10 +143,8 @@ class PriorZeroLLMTrainer:
                         continue
                     self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), int(tmp_dict['iter']))
         
-        # if self.strategy.args.deepspeed_enable_sleep:
-        #     self.policy_model.reload_states()
-        # if self.strategy.args.deepspeed_enable_sleep:
-        #     self.policy_model.offload_states()
+        
+        
 
     def get_state(self) -> Dict[str, Any]:
         kl_val = float(self.kl_ctl.value) if hasattr(self.kl_ctl, "value") else float(self.init_kl_coef)

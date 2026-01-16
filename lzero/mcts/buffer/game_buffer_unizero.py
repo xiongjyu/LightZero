@@ -556,7 +556,7 @@ class UniZeroGameBuffer(MuZeroGameBuffer):
         # transition_batch_size = game_segment_batch_size * (num_unroll_steps+1)
         transition_batch_size = len(value_obs_list)
 
-        batch_target_values, batch_rewards = [], []
+        batch_target_values, batch_rewards, batch_pred_values = [], [], []
         with torch.no_grad():
             value_obs_list = prepare_observation(value_obs_list, self._cfg.model.model_type)
             network_output = []
@@ -589,6 +589,7 @@ class UniZeroGameBuffer(MuZeroGameBuffer):
             else:
                 # use the predicted values
                 value_numpy = concat_output_value(network_output)
+            pred_value_raw = value_numpy.copy()
 
             # get last state value
             if self._cfg.env_type == 'board_games' and to_play_segment[0][0] in [1, 2]:
@@ -608,12 +609,16 @@ class UniZeroGameBuffer(MuZeroGameBuffer):
 
             value_numpy= value_numpy * np.array(value_mask)
             value_list = value_numpy.tolist()
+            
+            pred_value_raw = pred_value_raw * np.array(value_mask)
+            pred_value_list = pred_value_raw.tolist()
             horizon_id, value_index = 0, 0
 
             for game_segment_len_non_re, reward_list, state_index, to_play_list in zip(game_segment_lens, rewards_list,
                                                                                        pos_in_game_segment_list,
                                                                                        to_play_segment):
                 target_values = []
+                pred_values = []
                 target_rewards = []
                 base_index = state_index
 
@@ -644,6 +649,7 @@ class UniZeroGameBuffer(MuZeroGameBuffer):
 
                     # TODO: check the boundary condition
                     target_values.append(value_list[value_index])
+                    pred_values.append(pred_value_list[value_index])
                     if current_index < len(reward_list):
                         target_rewards.append(reward_list[current_index])
                     else:
@@ -653,10 +659,13 @@ class UniZeroGameBuffer(MuZeroGameBuffer):
 
                 batch_rewards.append(target_rewards)
                 batch_target_values.append(target_values)
+                batch_pred_values.append(pred_values)
 
         batch_rewards = np.asarray(batch_rewards)
         batch_target_values = np.asarray(batch_target_values)
+        batch_pred_values = np.asarray(batch_pred_values)
 
+        # return batch_rewards, batch_target_values, batch_pred_values
         return batch_rewards, batch_target_values
     
     def update_priority(self, train_data: List[np.ndarray], batch_priorities: np.ndarray) -> None:

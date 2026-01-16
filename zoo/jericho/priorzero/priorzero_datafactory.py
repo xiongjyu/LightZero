@@ -285,13 +285,13 @@ class DataProcessor:
             
         if self.args.advantage_type == "target_value":
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
-            log_status_tmp["env_rewards (target_value)"] = gt.tolist()
+            log_status_tmp["env_rewards"] = gt.tolist()
             if fmt_rewards is not None:
                 gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
 
         elif self.args.advantage_type == "target_reward":
             gt = torch.tensor([s["reward"] for s in real_samples], dtype=torch.float32)
-            log_status_tmp["env_rewards (target_reward)"] = gt.tolist()
+            log_status_tmp["env_rewards"] = gt.tolist()
             if fmt_rewards is not None:
                 gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
 
@@ -299,7 +299,7 @@ class DataProcessor:
             # Legacy implementation: batch normalization (not recommended)
             gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
             gt = (gt - gt.mean()) / (gt.std() + 1e-8)
-            log_status_tmp["env_rewards (target_value_batch_norm)"] = gt.tolist()
+            log_status_tmp["env_rewards"] = gt.tolist()
             
             if fmt_rewards is not None:
                 gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
@@ -346,7 +346,7 @@ class DataProcessor:
                         f"running_std={self.value_running_std:.3f}, "
                         f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
                     
-            log_status_tmp["env_rewards (target_value_running_norm)"] = gt.tolist()
+            log_status_tmp["env_rewards"] = gt.tolist()
             if fmt_rewards is not None:
                 gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
         else:

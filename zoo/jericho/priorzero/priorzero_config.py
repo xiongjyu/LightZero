@@ -11,25 +11,25 @@ MODEL_CONFIGS = {
     "qwen2.5-0.5b": {
         "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-0.5B-Instruct",
         "vllm_tensor_parallel_size": 1,
-        "gpu_memory_utilization": 0.3,
+        "gpu_memory_utilization": 0.2,
         "description": "Qwen2.5-0.5B-Instruct (smallest, fastest)",
     },
     "qwen2.5-1.5b": {
         "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-1.5B-Instruct",
         "vllm_tensor_parallel_size": 1,
-        "gpu_memory_utilization": 0.3,
+        "gpu_memory_utilization": 0.2,
         "description": "Qwen2.5-1.5B-Instruct (balanced performance)",
     },
     "qwen2.5-3b": {
         "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-3B-Instruct",
         "vllm_tensor_parallel_size": 1,
-        "gpu_memory_utilization": 0.5,
+        "gpu_memory_utilization": 0.25,
         "description": "Qwen2.5-3B-Instruct (better quality)",
     },
     "qwen2.5-7b": {
         "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct",
         "vllm_tensor_parallel_size": 2,
-        "gpu_memory_utilization": 0.5,
+        "gpu_memory_utilization": 0.35,
         "description": "Qwen2.5-7B-Instruct (high quality, needs 2+ GPUs)",
     },
     "qwen2.5-14b": {
@@ -104,7 +104,7 @@ class PriorZeroLLMConfig:
     policy_model_num_gpus: int = 1 # 需要训练的 llm 使用几张卡
     reference_model_num_gpus: int = 1
     broadcast_every: int = 1 # 每次训练多少次 priorzero_every才同步vllm参数
-    deepspeed_enable_sleep: bool = False
+    deepspeed_enable_sleep: bool = True
     
     zero_stage: int = 2
     gradient_checkpointing: bool = False

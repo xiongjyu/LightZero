@@ -21,6 +21,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 
 from utils import torch_dist_barrier_and_cuda_sync
 from models.actor import Actor
+from packaging import version
 
 ModelOptimPair = Tuple[nn.Module, Optimizer]
 ModelOrModelOptimPair = Union[nn.Module, ModelOptimPair]
@@ -151,6 +152,62 @@ def get_optimizer_grouped_parameters(
     ]
     return optimizer_grouped_parameters
 
+def offload_deepspeed_states(model, pin_memory=True, non_blocking=True):
+    zero_stage = model.zero_optimization_stage()  # config['zero_optimization']['stage']
+    adam_offload = model.config["zero_optimization"]["offload_optimizer"]["device"] == "cpu"
+
+    # state offloading not required when using Adam optimizer offloading
+    if adam_offload:
+        return
+
+    if zero_stage != 3 and version.parse(deepspeed.__version__) <= version.parse("0.17.5"):
+        raise NotImplementedError(
+            "Only Zero stage 3 is currently supported when using DeepSpeed version 0.17.5 or lower"
+        )
+
+    # if zero_stage == 3 and not adam_offload:
+    from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
+
+    offload_state_types = [
+        OffloadStateTypeEnum.optim_states,
+        OffloadStateTypeEnum.contiguous_grad_buffer,
+        OffloadStateTypeEnum.hp_params,
+    ]
+
+    if version.parse(deepspeed.__version__) >= version.parse("0.16.5"):
+        # These offload types are fixed in https://github.com/deepspeedai/DeepSpeed/pull/7050
+        offload_state_types += [
+            OffloadStateTypeEnum.lp_grads,
+            # OffloadStateTypeEnum.lp_params,
+        ]
+
+    model.optimizer.offload_states(
+        include=offload_state_types,
+        device=OffloadDeviceEnum.cpu,
+        pin_memory=pin_memory,
+        non_blocking=non_blocking,
+    )
+    model.empty_partition_cache()
+    torch.cuda.empty_cache()
+    torch.distributed.barrier()
+    torch.cuda.synchronize()
+
+def reload_deepspeed_states(model, non_blocking=True):
+    zero_stage = model.zero_optimization_stage()  # config['zero_optimization']['stage']
+    adam_offload = model.config["zero_optimization"]["offload_optimizer"]["device"] == "cpu"
+
+    # state offloading not required when using Adam optimizer offloading
+    if adam_offload:
+        return
+
+    if zero_stage != 3 and version.parse(deepspeed.__version__) <= version.parse("0.17.5"):
+        raise NotImplementedError(
+            "Only Zero stage 3 is currently supported when using DeepSpeed version 0.17.5 or lower"
+        )
+    model.reload_states(non_blocking=non_blocking)
+    torch.cuda.empty_cache()
+    torch.distributed.barrier()
+    torch.cuda.synchronize()
 
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 def _z3_params_to_fetch(param_list):

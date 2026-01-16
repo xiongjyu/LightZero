@@ -423,6 +423,10 @@ class PolicyModel:
             (actor, actor_optim, actor_scheduler),
             is_rlhf=True,
         )
+    
+        if strategy.args.deepspeed_enable_sleep:
+            from strategy.deepspeed import offload_deepspeed_states
+            offload_deepspeed_states(self.actor.model)
 
         self.trainer = BatchPPOTrainer(
             strategy,
@@ -482,3 +486,14 @@ class PolicyModel:
             self.tokenizer,
             args.save_path,
         )
+    @property
+    def train_iter(self):
+        return self.trainer.train_iter
+
+    def reload_states(self):
+        from strategy.deepspeed import reload_deepspeed_states
+        reload_deepspeed_states(self.actor.model)
+
+    def offload_states(self):
+        from strategy.deepspeed import offload_deepspeed_states
+        offload_deepspeed_states(self.actor.model)
