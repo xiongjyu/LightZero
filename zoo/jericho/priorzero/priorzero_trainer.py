@@ -128,13 +128,13 @@ class PriorZeroLLMTrainer:
             
         status = self.policy_model.fit(batch, self.kl_ctl)
         
-        if self.strategy.args.deepspeed_enable_sleep:
-            self.policy_model.offload_states()
-        
         self.global_step += 1
         
         if self.vllm_engine is not None and (self.global_step % self.broadcast_every == 0):
             self._broadcast_to_vllm()
+        
+        if self.strategy.args.deepspeed_enable_sleep:
+            self.policy_model.offload_states()
         
         if self._tb_logger is not None and self.strategy.is_rank_0():
             for tmp_dict in status:
