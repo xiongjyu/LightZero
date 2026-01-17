@@ -152,7 +152,8 @@ class DataProcessor:
         raw_obs_list: List[List[str]],
         history_obs_list: List[List[List[Tuple[str, str, float]]]],
         action_logprob_list: Optional[List[List[Any]]] = None,
-        target_values: Optional[torch.Tensor] = None,   # [B, T-1] 的 G_t
+        pred_values: Optional[torch.Tensor] = None,   # [B, T-1] 
+        target_values: Optional[torch.Tensor] = None,   # [B, T-1] 
         cot_prefix_list: Optional[List[List[str]]] = None,  # CoT reuse optimization
     ) -> List[Dict[str, Any]]:
         """
@@ -196,6 +197,10 @@ class DataProcessor:
                 target_value = None
                 if target_values is not None:
                     target_value = float(target_values[b][t].item())
+                
+                pred_value = None
+                if pred_values is not None:
+                    pred_value = float(pred_values[b][t].item())
 
                 # CoT reuse optimization: get CoT prefix from stored data
                 # 需要注意的是：game_segment在reset的时候，obs是第一个obs,而cot_prefix是None; 每次append的时候都是next_obs, 和当前obs的cot_prefix
@@ -210,6 +215,7 @@ class DataProcessor:
                         "prompt": prompt,
                         "target": true_action,
                         "reward": float(reward_value) if reward_value is not None else 0.0,
+                        "pred_value": pred_value,
                         "target_value": target_value,
                         "old_logprob": old_logprob,  # Reinforce++ ratio 需要
                         "prefix_cot": prefix_cot,  # CoT reuse optimization
@@ -228,14 +234,14 @@ class DataProcessor:
         Returns:
             Tuple of (input_ids, attention_mask, action_mask, advantages, old_logprob)
         """
-        raw_obs_list, history_obs_list, action_logprob_list, target_value, cot_prefix_list = priorzero_batch
+        raw_obs_list, history_obs_list, action_logprob_list, target_value, pred_value, cot_prefix_list = priorzero_batch
 
-        assert len(raw_obs_list) == len(history_obs_list) == len(action_logprob_list) == len(target_value) == len(cot_prefix_list), \
+        assert len(raw_obs_list) == len(history_obs_list) == len(action_logprob_list) == len(target_value) == len(pred_value) == len(cot_prefix_list), \
             f"Batch size mismatch: raw_obs={len(raw_obs_list)}, history_obs={len(history_obs_list)}, action_logprob={len(action_logprob_list)}, target_value={len(target_value)}, cot_prefix={len(cot_prefix_list)}"
 
         # Build samples with CoT prefixes
         samples = self.build_llm_samples(
-            raw_obs_list, history_obs_list, action_logprob_list, target_value, cot_prefix_list
+            raw_obs_list, history_obs_list, action_logprob_list, pred_value, target_value, cot_prefix_list
         )
         random.shuffle(samples)
         if ddp:
@@ -282,34 +288,37 @@ class DataProcessor:
         if fmt_rewards is not None:
             fmt_weight = self.args.reward_func.format_param.format_weight
             log_status_tmp['fmt_rewards'] = fmt_rewards.tolist()
-            
-        if self.args.advantage_type == "target_value":
-            gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
-            log_status_tmp["env_rewards"] = gt.tolist()
+        
+        # t 时刻的 target_value = td_step 步真实 r 的折扣和 + boostrap( t + td_step) 的 v
+        target_value = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
+        # t 时刻的 pred_value = boostrap( t ) 的 v
+        pred_value = torch.tensor([s["pred_value"] for s in real_samples], dtype=torch.float32)
+        advantage = target_value - pred_value
+        
+        if self.args.advantage_type == "advantage":
+            advantage = advantage
+            log_status_tmp["advantage"] = advantage.tolist()
             if fmt_rewards is not None:
-                gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
+                advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
 
         elif self.args.advantage_type == "target_reward":
-            gt = torch.tensor([s["reward"] for s in real_samples], dtype=torch.float32)
-            log_status_tmp["env_rewards"] = gt.tolist()
+            advantage = torch.tensor([s["reward"] for s in real_samples], dtype=torch.float32)
+            log_status_tmp["advantage"] = advantage.tolist()
             if fmt_rewards is not None:
-                gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
+                advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
 
-        elif self.args.advantage_type == "target_value_batch_norm":
+        elif self.args.advantage_type == "advantage_batch_norm":
             # Legacy implementation: batch normalization (not recommended)
-            gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
-            gt = (gt - gt.mean()) / (gt.std() + 1e-8)
-            log_status_tmp["env_rewards"] = gt.tolist()
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+            log_status_tmp["advantage"] = advantage.tolist()
             
             if fmt_rewards is not None:
-                gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
+                advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
 
-        elif self.args.advantage_type == "target_value_running_norm":
-            # New implementation: running normalization for consistent training signals
-            gt = torch.tensor([s["target_value"] for s in real_samples], dtype=torch.float32)
+        elif self.args.advantage_type == "advantage_running_norm":
             if self.value_normalizer is not None:
-                gt, norm_stats = self.value_normalizer.normalize(
-                    gt,
+                advantage, norm_stats = self.value_normalizer.normalize(
+                    advantage,
                     clip_values=True,
                     return_stats=True
                 )
@@ -321,8 +330,8 @@ class DataProcessor:
                           f"batch_std={norm_stats['batch_std']:.3f}, "
                           f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']}")
             else:
-                batch_mean = gt.mean().item()
-                batch_std = gt.std().item()
+                batch_mean = advantage.mean().item()
+                batch_std = advantage.std().item()
 
                 if self.value_count == 0:
                     self.value_running_mean = batch_mean
@@ -338,7 +347,7 @@ class DataProcessor:
                     )
 
                 self.value_count += 1
-                gt = (gt - self.value_running_mean) / (self.value_running_std + 1e-8)
+                advantage = (advantage - self.value_running_mean) / (self.value_running_std + 1e-8)
 
                 if self.rank == 0 and self.value_count % 10 == 0:
                     print(f"[Advantage Running Stats] count={self.value_count}, "
@@ -346,15 +355,14 @@ class DataProcessor:
                         f"running_std={self.value_running_std:.3f}, "
                         f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
                     
-            log_status_tmp["env_rewards"] = gt.tolist()
+            log_status_tmp["advantage"] = advantage.tolist()
             if fmt_rewards is not None:
-                gt = (1 - fmt_weight) * gt + fmt_weight * fmt_rewards
+                advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
         else:
             raise ValueError(f"Unknown advantage_type: {self.args.advantage_type}")
         
-        log_status_tmp["total_rewards"] = gt.tolist()
         log_status = [
-            {k: log_status_tmp[k][i] for k in log_status_tmp.keys()} for i in range(len(log_status_tmp['total_rewards']))
+            {k: log_status_tmp[k][i] for k in log_status_tmp.keys()} for i in range(len(log_status_tmp['advantage']))
         ]
         
         old_seq_max_len = max([len(s['old_logprob']) for s in real_samples])
@@ -363,7 +371,7 @@ class DataProcessor:
             logprob_token_list = real_samples[idx]['old_logprob']
             old_logprob[idx, -len(logprob_token_list):] = torch.tensor(logprob_token_list, dtype=torch.float32)
 
-        return inputs.input_ids, inputs.attention_mask, action_mask, gt, old_logprob, log_status
+        return inputs.input_ids, inputs.attention_mask, action_mask, advantage, old_logprob, log_status
         
     @torch.no_grad()
     def _build_cot_prefix_texts(self, all_user_prompts: List[str]) -> List[str]:
@@ -564,7 +572,7 @@ class DataProcessor:
             all_prob = sum(action_probs.values())
             
             for action, prob in sorted(action_probs.items(), key=lambda x: x[1], reverse=True):
-                self._logger.info(f"  - {action}: unnorm_prob={prob:.2e}, norm_prob={(prob / all_prob):.6e}")
+                self._logger.info(f"  - {action}: unnorm_prob={prob:.2f}, norm_prob={(prob / all_prob):.2f}")
             self._logger.info(f"  - other: unnorm_prob={1-all_prob}")
         self.episode_output = []
 

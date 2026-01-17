@@ -129,8 +129,8 @@ class PriorZeroLLMConfig:
             {"format_weight": 0.1, }
         ),
     }))
-
-    advantage_type: str = "target_value_running_norm"  # "target_value", "target_reward", "target_value_batch_norm", "target_value_running_norm"
+    # advantage = target_value - pred_value 
+    advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"
@@ -379,15 +379,13 @@ def get_priorzero_debug_config(
     )
     collector_env_num = 4
     evaluator_env_num = 1
-    max_steps = 10
+    max_steps = 20
     
-    num_unroll_steps = 4
-    infer_context_length = 2
     batch_size = 8
     collect_num_simulations=2
     eval_num_simulations=2
     num_layers=1
-    game_segment_length = 10
+    game_segment_length = 50
 
     llm_config.prompt_max_len = 512
     llm_config.generate_max_len = 128
@@ -400,12 +398,8 @@ def get_priorzero_debug_config(
     create_config.evaluator_env_num = evaluator_env_num
     create_config.max_steps = max_steps
     
-    main_config.policy.model.world_model_cfg.max_blocks = num_unroll_steps
-    main_config.policy.model.world_model_cfg.max_tokens = 2 * num_unroll_steps
-    main_config.policy.model.world_model_cfg.context_length = 2 * infer_context_length
     main_config.policy.model.world_model_cfg.num_layers = num_layers
     main_config.policy.model.world_model_cfg.game_segment_length = game_segment_length
-    main_config.policy.num_unroll_steps = num_unroll_steps
     main_config.policy.batch_size = batch_size
     main_config.policy.collect_num_simulations = collect_num_simulations
     main_config.policy.eval_num_simulations = eval_num_simulations

@@ -101,14 +101,14 @@ class PriorZeroLLMTrainer:
     def train_batch(self, data) -> Dict[str, float]:
         if data is None:
             return {}
-        input_ids, attention_mask, action_mask, gt, old_lp, log_status = data
-        assert len(input_ids) == len(attention_mask) == len(action_mask) == len(gt) == len(old_lp) == len(log_status)
+        input_ids, attention_mask, action_mask, advantage, old_lp, log_status = data
+        assert len(input_ids) == len(attention_mask) == len(action_mask) == len(advantage) == len(old_lp) == len(log_status)
         
         batch = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "action_mask": action_mask,
-            "advantages": gt,     
+            "advantages": advantage,     
             "old_action_logprob": old_lp,
             "log_status": log_status,     
         }

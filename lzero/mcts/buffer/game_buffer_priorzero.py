@@ -1,22 +1,10 @@
-# game_buffer_priorzero.py
-"""
-[PRIORZERO] Enhanced Game Buffer for PriorZero
-
-This module extends UniZeroGameBuffer to support LLM policy training (SFT + RFT).
-
-Key Features:
-- Returns game_segments in sample() for LLM training data extraction
-- Efficient indexing to avoid duplicating large observation data
-- Robust handling of edge cases (partial batches, variable-length segments)
-- Minimal memory overhead (only stores references, not copies)
-
-Author: PriorZero Team
-Date: 2025-01-21
-"""
-
 import numpy as np
 from typing import List, Any, Union, Tuple
 from lzero.mcts.buffer.game_buffer_unizero import UniZeroGameBuffer
+from lzero.policy import to_detach_cpu_numpy, concat_output_value, inverse_scalar_transform
+from lzero.mcts.utils import prepare_observation
+import torch
+
 
 class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
     """
@@ -48,8 +36,8 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, action_logprob_list, cot_prefix_list = current_batch
 
         # Standard processing
-        batch_rewards, batch_target_values = self._compute_target_reward_value(
-            reward_value_context, policy._target_model, current_batch[2], timestep_list
+        batch_rewards, batch_target_values, batch_pred_values = self._compute_target_reward_value_and_pred_value(
+            reward_value_context, policy._target_model, action_list, bootstrap_action_list, timestep_list
         )
 
         batch_target_policies = self._compute_target_policy_non_reanalyzed(
@@ -58,7 +46,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
 
         # CoT reuse optimization: return cot_prefix_list
         # IMPORTANT: Validate return value before returning to ensure broadcast compatibility
-        result = [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values, cot_prefix_list]
+        result = [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values, batch_pred_values, cot_prefix_list]
 
         return result
     
@@ -198,9 +186,14 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         # print(f"[DEBUG] _make_batch created current_batch with {len(current_batch)} elements (expected 12)")
         total_transitions = self.get_num_of_transitions()
 
-        reward_value_context = self._prepare_reward_value_context(
-            batch_index_list, game_segment_list, pos_in_game_segment_list, total_transitions
-        )
+        if not fetch_latest:
+            reward_value_context = self._prepare_reward_value_context(
+                batch_index_list, game_segment_list, pos_in_game_segment_list, total_transitions
+            )
+        else:
+            reward_value_context = self._prepare_reward_value_context_and_pred_values(
+                batch_index_list, game_segment_list, pos_in_game_segment_list, total_transitions
+            )
 
         reanalyze_num = max(int(batch_size * reanalyze_ratio), 1) if reanalyze_ratio > 0 else 0
         self.reanalyze_num = reanalyze_num
@@ -327,3 +320,221 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         orig_data = (game_segment_list, pos_in_game_segment_list, batch_index_list, weights_list, make_time)
             
         return orig_data
+    
+    # 从原来的_prepare_reward_value_context函数修改得到
+    def _prepare_reward_value_context_and_pred_values(
+            self, batch_index_list: List[str], game_segment_list: List[Any], pos_in_game_segment_list: List[Any],
+            total_transitions: int
+    ) -> List[Any]:
+        """
+        Overview:
+            prepare the context of rewards and values for calculating TD value target in reanalyzing part.
+        Arguments:
+            - batch_index_list (:obj:`list`): the index of start transition of sampled minibatch in replay buffer
+            - game_segment_list (:obj:`list`): list of game segments
+            - pos_in_game_segment_list (:obj:`list`): list of transition index in game_segment
+            - total_transitions (:obj:`int`): number of collected transitions
+        Returns:
+            - reward_value_context (:obj:`list`): value_obs_list, value_mask, pos_in_game_segment_list, rewards_list, game_segment_lens,
+              td_steps_list, action_mask_segment, to_play_segment
+        """
+        zero_obs = game_segment_list[0].zero_obs()
+        
+        pred_obs_list = []
+        pred_mask = []
+        
+        value_obs_list = []
+        # the value is valid or not (out of game_segment)
+        value_mask = []
+        rewards_list = []
+        game_segment_lens = []
+        # for board games
+        action_mask_segment, to_play_segment = [], []
+
+        root_values = []
+
+        td_steps_list = []
+        for game_segment, state_index in zip(game_segment_list, pos_in_game_segment_list):
+            game_segment_len = len(game_segment)
+            game_segment_lens.append(game_segment_len)
+            # original buffer td-steps
+            td_steps = np.clip(self._cfg.td_steps, 1, max(1, game_segment_len - state_index)).astype(np.int32)
+
+            # prepare the corresponding observations for bootstrapped values o_{t+k}
+            # o[t+ td_steps, t + td_steps + stack frames + num_unroll_steps]
+            # t=2+3 -> o[2+3, 2+3+4+5] -> o[5, 14]
+            game_obs_pred = game_segment.get_unroll_obs(state_index, self._cfg.num_unroll_steps)
+            game_obs = game_segment.get_unroll_obs(state_index + td_steps, self._cfg.num_unroll_steps)
+
+            rewards_list.append(game_segment.reward_segment)
+            
+            # for board games
+            action_mask_segment.append(game_segment.action_mask_segment)
+            to_play_segment.append(game_segment.to_play_segment)
+
+            truncation_length = game_segment_len
+
+            for current_index in range(state_index, state_index + self._cfg.num_unroll_steps + 1):
+                # get the <num_unroll_steps+1>  bootstrapped target obs
+                td_steps_list.append(td_steps)
+                # index of bootstrapped obs o_{t+td_steps}
+                bootstrap_index = current_index + td_steps
+                
+                beg_index = current_index - state_index
+                end_index = beg_index + self._cfg.model.frame_stack_num
+                
+                if bootstrap_index < truncation_length:
+                    value_mask.append(1)
+                    # the stacked obs in time t
+                    obs = game_obs[beg_index:end_index]
+                else:
+                    value_mask.append(0)
+                    obs = zero_obs
+                
+                if current_index < truncation_length:
+                    pred_mask.append(1)
+                    obs_pred = game_obs_pred[beg_index:end_index]
+                else:
+                    pred_mask.append(0)
+                    obs_pred = zero_obs
+
+                value_obs_list.append(obs)
+                pred_obs_list.append(obs_pred)
+
+        reward_value_context = [
+            value_obs_list, value_mask, pos_in_game_segment_list, rewards_list, root_values, game_segment_lens, td_steps_list,
+            action_mask_segment, to_play_segment, pred_obs_list, pred_mask
+        ]
+        return reward_value_context
+    
+    # 从原来的_compute_target_reward_value函数修改得到
+    def _compute_target_reward_value_and_pred_value(self, reward_value_context: List[Any], model: Any, batch_action_pred, batch_action, batch_timestep) -> Tuple[Any, Any]:
+        """
+        Overview:
+            prepare reward and value targets from the context of rewards and values.
+        Arguments:
+            - reward_value_context (:obj:'list'): the reward value context
+            - model (:obj:'torch.tensor'):model of the target model
+        Returns:
+            - batch_value_prefixs (:obj:'np.ndarray): batch of value prefix
+            - batch_target_values (:obj:'np.ndarray): batch of value estimation
+        """
+        value_obs_list, value_mask, pos_in_game_segment_list, rewards_list, root_values, game_segment_lens, td_steps_list, action_mask_segment, \
+            to_play_segment, pred_obs_list, pred_mask = reward_value_context  # noqa
+        # transition_batch_size = game_segment_batch_size * (num_unroll_steps+1)
+        transition_batch_size = len(value_obs_list)
+
+        batch_target_values, batch_rewards, batch_pred_values = [], [], []
+        with torch.no_grad():
+            value_obs_list = prepare_observation(value_obs_list, self._cfg.model.model_type)
+            pred_obs_list = prepare_observation(pred_obs_list, self._cfg.model.model_type)
+            
+            network_output = []
+            network_output_pred = []
+            
+            batch_obs = torch.from_numpy(value_obs_list).to(self._cfg.device)
+            batch_obs_pred = torch.from_numpy(pred_obs_list).to(self._cfg.device)
+
+            # =============== NOTE: The key difference with MuZero =================
+            # calculate the bootstrapped value and target value
+            # NOTE: batch_obs(value_obs_list) is at t+td_steps, batch_action is at timestep t+td_steps
+            if self.task_id is not None:
+                # m_output = model.initial_inference(batch_obs, batch_action, start_pos=batch_timestep, task_id=self.task_id)
+                m_output = model.initial_inference(batch_obs, batch_action, task_id=self.task_id)
+                m_output_pred = model.initial_inference(batch_obs_pred, batch_action_pred, task_id=self.task_id)
+
+            else:
+                m_output = model.initial_inference(batch_obs, batch_action, start_pos=batch_timestep)
+                m_output_pred = model.initial_inference(batch_obs_pred, batch_action_pred, start_pos=batch_timestep)
+
+            # ======================================================================
+
+            # if not in training, obtain the scalars of the value/reward
+            [m_output.latent_state, m_output.value, m_output.policy_logits] = to_detach_cpu_numpy(
+                [
+                    m_output.latent_state,
+                    inverse_scalar_transform(m_output.value, self.value_support),
+                    m_output.policy_logits
+                ]
+            )
+            [m_output_pred.latent_state, m_output_pred.value, m_output_pred.policy_logits] = to_detach_cpu_numpy(
+                [
+                    m_output_pred.latent_state,
+                    inverse_scalar_transform(m_output_pred.value, self.value_support),
+                    m_output_pred.policy_logits
+                ]
+            )
+            
+            network_output.append(m_output)
+            network_output_pred.append(m_output_pred)
+
+            if self._cfg.use_root_value:
+                value_numpy = np.array(root_values)
+                raise ValueError("error!!!")
+            else:
+                # use the predicted values
+                value_numpy = concat_output_value(network_output)
+                pred_numpy = concat_output_value(network_output_pred)
+
+            # 不考虑 board_games的情况
+            value_numpy = value_numpy.reshape(-1) * (
+                    np.array([self._cfg.discount_factor for _ in range(transition_batch_size)]) ** td_steps_list
+            )
+            pred_numpy = pred_numpy.reshape(-1)
+            
+            value_numpy= value_numpy * np.array(value_mask)
+            value_list = value_numpy.tolist()
+            
+            pred_numpy = pred_numpy * np.array(pred_mask)                 
+            pred_list = pred_numpy.tolist()
+
+            
+            horizon_id, value_index = 0, 0
+
+            for game_segment_len_non_re, reward_list, state_index, to_play_list in zip(game_segment_lens, rewards_list,
+                                                                                       pos_in_game_segment_list,
+                                                                                       to_play_segment):
+                target_values = []
+                target_rewards = []
+                pred_values = []
+                base_index = state_index
+
+                # =========== NOTE ===============
+                # if game_segment_len_non_re < self._cfg.game_segment_length:
+                #     # The last segment of one episode, the target value of excess part should be 0
+                #     truncation_length = game_segment_len_non_re
+                # else:
+                #     # game_segment_len is game_segment.action_segment.shape[0]
+                #     # action_segment.shape[0] = reward_segment.shape[0] or action_segment.shape[0] = reward_segment.shape[0] + 1
+                #     truncation_length = game_segment_len_non_re
+                #     assert reward_list.shape[0] + 1 == game_segment_len_non_re or reward_list.shape[0] == game_segment_len_non_re
+
+                truncation_length = game_segment_len_non_re
+
+                for current_index in range(state_index, state_index + self._cfg.num_unroll_steps + 1):
+                    bootstrap_index = current_index + td_steps_list[value_index]
+                    for i, reward in enumerate(reward_list[current_index:bootstrap_index]):
+                        # 不考虑 board_games的情况
+                        value_list[value_index] += reward * self._cfg.discount_factor ** i
+                    horizon_id += 1
+
+                    # TODO: check the boundary condition
+                    target_values.append(value_list[value_index])
+                    pred_values.append(pred_list[value_index])
+                    
+                    if current_index < len(reward_list):
+                        target_rewards.append(reward_list[current_index])
+                    else:
+                        target_rewards.append(np.array(0.))
+
+                    value_index += 1
+
+                batch_rewards.append(target_rewards)
+                batch_target_values.append(target_values)
+                batch_pred_values.append(pred_values)
+
+        batch_rewards = np.asarray(batch_rewards)
+        batch_target_values = np.asarray(batch_target_values)
+        batch_pred_values = np.asarray(batch_pred_values)
+
+        return batch_rewards, batch_target_values, batch_pred_values
