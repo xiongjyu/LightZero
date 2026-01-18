@@ -191,7 +191,6 @@ def train_priorzero(
         vllm_engine = vllm_engine,
         policy_model=policy_model,
         reference_model=ref_model,
-        broadcast_every=llm_cfg.broadcast_every,
         exp_name=cfg.exp_name if rank == 0 else None,
         tb_logger=tb_logger if rank == 0 else None,
     )
