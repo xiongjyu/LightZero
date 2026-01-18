@@ -63,7 +63,6 @@ class PriorZeroLLMTrainer:
         vllm_engine,
         policy_model,  # RayActorGroup(PolicyModelActor)
         reference_model=None,  # RayActorGroup(ReferenceModelActor) or None
-        broadcast_every: int = 1,   # 每 N step 同步一次权重到 vLLM
         exp_name: str = None,
         tb_logger = None,
         instance_name: str = "llm_ppo"
@@ -76,8 +75,6 @@ class PriorZeroLLMTrainer:
         self.policy_model = policy_model
         self.reference_model = reference_model
         self.vllm_engine = vllm_engine
-
-        self.broadcast_every = max(int(broadcast_every), 1)
         self.global_step = 0
 
         self.tokenizer = get_tokenizer(self.pretrain)
@@ -130,7 +127,7 @@ class PriorZeroLLMTrainer:
         
         self.global_step += 1
         
-        if self.vllm_engine is not None and (self.global_step % self.broadcast_every == 0):
+        if self.vllm_engine is not None:
             self._broadcast_to_vllm()
         
         if self.strategy.args.deepspeed_enable_sleep:

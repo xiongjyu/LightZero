@@ -103,7 +103,6 @@ class PriorZeroLLMConfig:
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练
     policy_model_num_gpus: int = 1 # 需要训练的 llm 使用几张卡
     reference_model_num_gpus: int = 1
-    broadcast_every: int = 1 # 每次训练多少次 priorzero_every才同步vllm参数
     deepspeed_enable_sleep: bool = True
     
     zero_stage: int = 2
@@ -112,9 +111,10 @@ class PriorZeroLLMConfig:
     ds_tensor_parallel_size: int = 1
     ring_attn_size: int = 1
     
-    llm_learn_num_samples: int = 256 # 每次取buffer中最新的256条轨迹训练
-    train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    micro_train_batch_size: int = 8
+    # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
+    train_batch_size: int = 640 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    micro_train_batch_size: int = 16 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    broadcast_every: int = 1 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
     learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
@@ -182,7 +182,7 @@ def get_priorzero_config(
     # wm_model_name = 'BAAI/bge-base-en-v1.5'  
     wm_model_name = '/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/bge-base-en-v1.5'  
     
-    collector_env_num = 4
+    collector_env_num = 1
     evaluator_env_num = 2
     n_episode = collector_env_num
     
