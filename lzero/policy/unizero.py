@@ -1629,7 +1629,7 @@ class UniZeroPolicy(MuZeroPolicy):
                 self._cfg.device,
                 pad_token_id=self.pad_token_id
             )
-            self.last_batch_action = [-1 for _ in range(self._cfg.collector_env_num)]
+            self.last_batch_action_collect = [-1 for _ in range(self._cfg.collector_env_num)]
 
 
         # We must handle both single int and list of ints for env_id.
@@ -1707,7 +1707,7 @@ class UniZeroPolicy(MuZeroPolicy):
                 )
                 logging.info(f'unizero.py task_id:{task_id} after _reset_eval: last_batch_obs_eval:', self.last_batch_obs_eval.shape)
 
-            self.last_batch_action = [-1 for _ in range(self._cfg.evaluator_env_num)]
+            self.last_batch_action_eval = [-1 for _ in range(self._cfg.evaluator_env_num)]
 
         # This logic handles the crucial end-of-episode cache clearing for evaluation.
         # The evaluator calls `_policy.reset([env_id])` when an episode is done.
