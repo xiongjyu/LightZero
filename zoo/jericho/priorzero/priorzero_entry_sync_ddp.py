@@ -260,11 +260,7 @@ def train_priorzero(
         llm_need_transition_cnt = llm_need_sample_cnt // cfg.policy.num_unroll_steps
         
         if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt:
-            with prof.block("fetch_latest_batch", rank=rank):
-                print(f"[Rank {rank}] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
-                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
-                print(f"[Rank {rank}] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
-                cmd = 1
+            cmd = 1
         else:
             cmd = 0
 
@@ -275,6 +271,11 @@ def train_priorzero(
         if max(all_cmd) == 2:
             break
         elif min(all_cmd) == 1:
+            with prof.block("fetch_latest_batch", rank=rank):
+                print(f"[Rank {rank}] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
+                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
+                print(f"[Rank {rank}] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
+                
             with prof.block("train_llm", rank=rank):
                 logger.info(f"[Rank {rank}] train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'None'}. Starting LLM training...")
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True)
