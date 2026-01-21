@@ -29,7 +29,7 @@ MODEL_CONFIGS = {
     "qwen2.5-7b": {
         "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-7B-Instruct",
         "vllm_tensor_parallel_size": 1,
-        # "vllm_tensor_parallel_size": 2,
+        # "vllm_tensor_parallel_size": 2, # TODO
         "gpu_memory_utilization": 0.35,
         "description": "Qwen2.5-7B-Instruct (high quality, needs 2+ GPUs)",
     },
@@ -115,7 +115,8 @@ class PriorZeroLLMConfig:
     
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 640 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    micro_train_batch_size: int = 16 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    # micro_train_batch_size: int = 16 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
     broadcast_every: int = 1 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
     learning_rate: float = 1e-6

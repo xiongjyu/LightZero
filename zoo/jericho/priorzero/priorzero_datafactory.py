@@ -101,18 +101,78 @@ class DataProcessor:
             )
         else:
             self.value_normalizer = None
+    # v1
+    # def build_llm_prompt(self, current_obs: str, history: Optional[List[Tuple[str, str, float]]] = None) -> str:
+    #     prompt_parts = []
+        
+    #     # 1. System / Role Definition
+    #     prompt_parts.append(
+    #         "You are an expert player in a text-based adventure game. "
+    #         "Your goal is to maximize the score by choosing the best possible next action. "
+    #         "You must choose exactly ONE best next action."
+    #     )
+        
+    #     # 2. History (Context)
+    #     if history is not None and len(history) > 0:
+    #         history = list(history)
+    #         prompt_parts.append("\n=== Recent History ===")
+    #         for i, (obs, action, reward) in enumerate(history, start=1):  
+    #             obs_str = obs
+    #             prompt_parts.append(f"Step {i}:")
+    #             prompt_parts.append(f"  Observation: {obs_str.strip()}")
+    #             prompt_parts.append(f"  Action: {action.strip()}")
+    #             prompt_parts.append(f"  Reward: {reward}")
+
+    #     # 3. Current State
+    #     prompt_parts.append("\n=== Current Situation ===")
+    #     prompt_parts.append(current_obs.strip())
+
+    #     # 4. Task & Format Instructions
+    #     if self.use_cot:
+    #         prompt_parts.append(
+    #             "\n=== Task ===\n"
+    #             "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n"
+    #             "\n"
+    #             "### Format Requirements ###\n"
+    #             "Your output MUST strictly follow this format:\n"
+    #             "Reasoning: <detailed analysis of the state, constraints, and why you are choosing the action>\n"
+    #             "Action: <the chosen command>\n"
+    #             "\n"
+    #             "### Instruction ###\n"
+    #             "1. Analyze the 'Current Situation' and 'Recent History'.\n"
+    #             "2. In the 'Reasoning' section, explain your thought process. Do NOT output the final command string here, just the logic.\n"
+    #             "3. In the 'Action' section, output the specific command to execute.\n"
+    #             "### Example ###\n"
+    #             "Observation: You are in a dark room. There is a lamp on the table. It is too dark to see the exit.\n"
+    #             "Reasoning: The room is currently too dark to navigate safely or find an exit. I see a lamp which can provide light. Therefore, the logical first step is to acquire the light source.\n"
+    #             "Action: take lamp\n"
+    #             "\n"
+    #         )
+    #     else:
+    #         prompt_parts.append(
+    #             "\n=== Task ===\n"
+    #             "Analyze the recent history and the current situation, and decide on the SINGLE best next action. "
+    #             "Please keep the output concise, avoiding any other content."
+    #         )
+            
+    #     return "\n".join(prompt_parts)
+
+
 
     def build_llm_prompt(self, current_obs: str, history: Optional[List[Tuple[str, str, float]]] = None) -> str:
         prompt_parts = []
+        
+        # 1. Role & Goal (保持不变，强调唯一性)
         prompt_parts.append(
             "You are an expert player in a text-based adventure game. "
             "Your goal is to maximize the score by choosing the best possible next action. "
             "You must choose exactly ONE best next action."
         )
+        
+        # 2. History (保持不变)
         if history is not None and len(history) > 0:
             history = list(history)
-            prompt_parts.append("=== Recent History ===")
-
+            prompt_parts.append("\n=== Recent History ===")
             for i, (obs, action, reward) in enumerate(history, start=1):  
                 obs_str = obs
                 prompt_parts.append(f"Step {i}:")
@@ -120,26 +180,87 @@ class DataProcessor:
                 prompt_parts.append(f"  Action: {action.strip()}")
                 prompt_parts.append(f"  Reward: {reward}")
 
-        prompt_parts.append("=== Current Situation ===")
+        # 3. Current Situation (保持不变)
+        prompt_parts.append("\n=== Current Situation ===")
         prompt_parts.append(current_obs.strip())
 
+        # 4. Task & Format (核心优化部分)
         if self.use_cot:
             prompt_parts.append(
-                "=== Task ==="
+                "\n=== Task ===\n"
                 "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n"
-                "1) Reasoning:\n"
-                "Perform a detailed reasoning process based ONLY on the current state and the recent interaction history; first analyze what environment or situation you are currently in, then identify what actions are available at this step along with the relevant constraints, and you may also discuss key observations, uncertainties, and implications of different possibilities; however, do NOT state, imply, or reveal which action will be chosen, and the reasoning section MUST be output exactly in the format: Reasoning: <your reasoning content>.\n"
-                "2) Action:\n"
-                "After finishing the reasoning, output exactly ONE line in the following format: Action: <the chosen action>." 
-                "Your output MUST strictly follow this format: \nReasoning: <your reasoning content>\nAction: <the chosen action>"
+                "\n"
+                "### Guidelines ###\n"
+                "1. **Analyze**: Look at the history. If you are stuck in a loop (repeating actions), choose a DIFFERENT action (e.g., 'look', 'inventory', 'go north').\n"
+                "2. **Sparse Observation**: If the 'Current Situation' is short (e.g., 'Dropped.', 'Done.'), you likely need to re-examine your surroundings. Try 'look'.\n"
+                "3. **Conclude**: Your reasoning MUST end with a clear decision on what to do next.\n"
+                "\n"
+                "### Format Requirements ###\n"
+                "Your output MUST strictly follow this format:\n"
+                "Reasoning: <analysis of state -> logic -> final decision>\n"
+                "Action: <the chosen command>\n"
+                "\n"
+                "### Example 1 ###\n"
+                "Observation: Dropped.\n"
+                "Reasoning: The previous action was to drop the paper, and the observation confirms it is dropped. I am currently lacking information about the room. To make a better decision, I need to see what else is here.\n"
+                "Action: look\n"
+                "### Example 2 ###\n"
+                "Observation: You are in a dark room. There is a lamp on the table. It is too dark to see the exit.\n"
+                "Reasoning: The room is currently too dark to navigate safely or find an exit. I see a lamp which can provide light. Therefore, the logical first step is to acquire the light source.\n"
+                "Action: take lamp\n"
+                "\n"
+                "### Final Instruction ###\n"
+                "Ensure you generate the 'Action:' line immediately after your reasoning."
             )
         else:
             prompt_parts.append(
                 "\n=== Task ===\n"
-                "Analyze the recent history and the current situation, and decide on the SINGLE best next action."
-                "Please keep the output concise, avoiding any other content.\n"
+                "Analyze the recent history and the current situation, and decide on the SINGLE best next action. "
+                "Please keep the output concise, avoiding any other content."
             )
+            
         return "\n".join(prompt_parts)
+
+    # v0
+
+    # def build_llm_prompt(self, current_obs: str, history: Optional[List[Tuple[str, str, float]]] = None) -> str:
+    #     prompt_parts = []
+    #     prompt_parts.append(
+    #         "You are an expert player in a text-based adventure game. "
+    #         "Your goal is to maximize the score by choosing the best possible next action. "
+    #         "You must choose exactly ONE best next action."
+    #     )
+    #     if history is not None and len(history) > 0:
+    #         history = list(history)
+    #         prompt_parts.append("=== Recent History ===")
+
+    #         for i, (obs, action, reward) in enumerate(history, start=1):  
+    #             obs_str = obs
+    #             prompt_parts.append(f"Step {i}:")
+    #             prompt_parts.append(f"  Observation: {obs_str.strip()}")
+    #             prompt_parts.append(f"  Action: {action.strip()}")
+    #             prompt_parts.append(f"  Reward: {reward}")
+
+    #     prompt_parts.append("=== Current Situation ===")
+    #     prompt_parts.append(current_obs.strip())
+
+    #     if self.use_cot:
+    #         prompt_parts.append(
+    #             "=== Task ==="
+    #             "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n"
+    #             "1) Reasoning:\n"
+    #             "Perform a detailed reasoning process based ONLY on the current state and the recent interaction history; first analyze what environment or situation you are currently in, then identify what actions are available at this step along with the relevant constraints, and you may also discuss key observations, uncertainties, and implications of different possibilities; however, do NOT state, imply, or reveal which action will be chosen, and the reasoning section MUST be output exactly in the format: Reasoning: <your reasoning content>.\n"
+    #             "2) Action:\n"
+    #             "After finishing the reasoning, output exactly ONE line in the following format: Action: <the chosen action>." 
+    #             "Your output MUST strictly follow this format: \nReasoning: <your reasoning content>\nAction: <the chosen action>"
+    #         )
+    #     else:
+    #         prompt_parts.append(
+    #             "\n=== Task ===\n"
+    #             "Analyze the recent history and the current situation, and decide on the SINGLE best next action."
+    #             "Please keep the output concise, avoiding any other content.\n"
+    #         )
+    #     return "\n".join(prompt_parts)
 
     def build_chat_context(self, user_prompt: str) -> str:
         return self.tokenizer.apply_chat_template(
@@ -263,13 +384,13 @@ class DataProcessor:
         )
         random.shuffle(samples)
         if ddp:
-            print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")
+            print(f"[Rank {self.rank}] Processing {len(samples)} samples collected by Rank {self.rank}")
             real_samples = samples
         else:
             per_rank = len(samples) // self.world_size
             start = self.rank * per_rank
             end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(samples)
-            print(f"[Rank {self.rank}] process {start}: {end} samples. Total {len(samples)} samples collected by Rank 0.")
+            print(f"[Rank {self.rank}] Processing samples {start}:{end} (Total: {len(samples)} samples from Rank 0)")
             real_samples = samples[start:end]
         
         prompts_only = [s["prompt"] for s in real_samples]
@@ -316,7 +437,7 @@ class DataProcessor:
         # FIX: Check for NaN/Inf in advantage before normalization
         if torch.isnan(advantage).any() or torch.isinf(advantage).any():
             if self.rank == 0:
-                print(f"[WARNING] Advantage contains NaN/Inf, replacing with zeros")
+                print(f"[WARNING] Advantage contains NaN/Inf values, replacing with zeros")
             advantage = torch.where(torch.isnan(advantage) | torch.isinf(advantage),
                                    torch.zeros_like(advantage), advantage)
 
@@ -349,12 +470,14 @@ class DataProcessor:
                     return_stats=True
                 )
                 if self.rank == 0 and self.value_normalizer.update_count % 10 == 0:
-                    print(f"[Adaptive Value Norm] step={self.value_normalizer.update_count}, "
-                          f"running_mean={norm_stats['running_mean']:.3f}, "
-                          f"running_std={norm_stats['running_std']:.3f}, "
-                          f"batch_mean={norm_stats['batch_mean']:.3f}, "
-                          f"batch_std={norm_stats['batch_std']:.3f}, "
-                          f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']}")
+                    print(
+                        f"[Value Norm] step={self.value_normalizer.update_count} | "
+                        f"mean={norm_stats['running_mean']:.3f} | "
+                        f"std={norm_stats['running_std']:.3f} | "
+                        f"batch_mean={norm_stats['batch_mean']:.3f} | "
+                        f"batch_std={norm_stats['batch_std']:.3f} | "
+                        f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']}"
+                    )
             else:
                 batch_mean = advantage.mean().item()
                 batch_std = advantage.std().item()
@@ -377,10 +500,12 @@ class DataProcessor:
                 advantage = (advantage - self.value_running_mean) / (self.value_running_std + 1e-4)
 
                 if self.rank == 0 and self.value_count % 10 == 0:
-                    print(f"[Advantage Running Stats] count={self.value_count}, "
-                        f"running_mean={self.value_running_mean:.3f}, "
-                        f"running_std={self.value_running_std:.3f}, "
-                        f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
+                    print(
+                        f"[Advantage Stats] count={self.value_count} | "
+                        f"mean={self.value_running_mean:.3f} | "
+                        f"std={self.value_running_std:.3f} | "
+                        f"batch_mean={batch_mean:.3f} | batch_std={batch_std:.3f}"
+                    )
                     
             log_status_tmp["advantage"] = advantage.tolist()
             if fmt_rewards is not None:
@@ -590,23 +715,37 @@ class DataProcessor:
     @torch.no_grad()
     def get_llm_output_log(self, wm_train_iter: int = 0, llm_train_iter: int = 0):
         if self.rank != 0:
-            return 
-        self._logger.info(f"===========================================\n"
-                          f"[LLM_OUTPUT] wm_train_iter={wm_train_iter}, llm_train_iter={llm_train_iter}\n"
-                          f"===========================================")
-        
+            return
+
+        # Structured LLM output log header
+        self._logger.info(
+            f"\n{'='*80}\n"
+            f"[LLM Output Log] WM Iter: {wm_train_iter} | LLM Iter: {llm_train_iter}\n"
+            f"{'='*80}"
+        )
+
         for i, tmp_dict in enumerate(self.episode_output[:15]):
             instruction = tmp_dict["Instruction"]
             response = tmp_dict["Response"]
             llm_prior = tmp_dict["llm_prior_per_seq"]
-            
-            self._logger.info(f"[STEP {i}][Instruction]:\n{instruction} \n\n\n [Response]:\n{response}\n\n[LLM_PROABILITY]\n")
+
+            # Structured step log
+            self._logger.info(
+                f"\n{'-'*80}\n"
+                f"[Step {i}]\n"
+                f"{'-'*80}\n"
+                f"Instruction:\n{instruction}\n\n"
+                f"Response:\n{response}\n\n"
+                f"Action Probabilities:"
+            )
+
             action_probs = {a: math.exp(float(lp)) for a, lp in llm_prior.items() if lp is not None and math.isfinite(float(lp))}
             all_prob = sum(action_probs.values())
-            
+
             for action, prob in sorted(action_probs.items(), key=lambda x: x[1], reverse=True):
-                self._logger.info(f"  - {action}: unnorm_prob={prob:.10f}, norm_prob={(prob / all_prob):.10f}")
-            self._logger.info(f"  - other: unnorm_prob={1-all_prob}")
+                self._logger.info(f"  {action:30s} | unnorm={prob:.6f} | norm={(prob / all_prob):.6f}")
+            self._logger.info(f"  {'<other>':30s} | unnorm={1-all_prob:.6f}")
+
         self.episode_output = []
 
         

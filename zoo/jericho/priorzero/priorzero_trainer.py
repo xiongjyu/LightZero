@@ -148,10 +148,12 @@ class PriorZeroLLMTrainer:
     def _broadcast_to_vllm(self):
         if self.strategy.args.vllm_enable_sleep:
             self.vllm_engine.wake_up()
-        
-        print(f"[Rank {self.rank}]: vllm starting update weights....")
+
+        if self.rank == 0:
+            print(f"[vLLM Update] Rank {self.rank}: Broadcasting weights to vLLM...")
         self.policy_model.broadcast_to_vllm()
-        print(f"[Rank {self.rank}]: vllm has updating done.")
+        if self.rank == 0:
+            print(f"[vLLM Update] Rank {self.rank}: Weight broadcast complete")
 
         if self.strategy.args.vllm_enable_sleep:
             self.vllm_engine.sleep()

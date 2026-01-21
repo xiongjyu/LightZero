@@ -263,6 +263,23 @@ class BatchPPOTrainer:
 
             self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
 
+            # Calculate response length statistics
+            response_lengths = micro_batch['action_mask'].sum(dim=1).float()
+            avg_response_length = response_lengths.mean().item()
+            max_response_length = response_lengths.max().item()
+            min_response_length = response_lengths.min().item()
+
+            # Calculate log_probs statistics
+            valid_log_probs = action_log_probs[micro_batch['action_mask'] > 0]
+            avg_log_prob = valid_log_probs.mean().item() if valid_log_probs.numel() > 0 else 0.0
+
+            # Calculate ratio statistics
+            log_ratio = action_log_probs - micro_batch['old_action_logprob']
+            ratio = log_ratio.exp()
+            valid_ratio = ratio[micro_batch['action_mask'] > 0]
+            avg_ratio = valid_ratio.mean().item() if valid_ratio.numel() > 0 else 1.0
+            max_ratio = valid_ratio.max().item() if valid_ratio.numel() > 0 else 1.0
+
             status = {
                 "policy_loss": actor_loss.detach().float().mean().item(),
                 "lr": self.actor_scheduler.get_last_lr()[0],
@@ -271,6 +288,14 @@ class BatchPPOTrainer:
                 # "approx_kl": approx_kl.detach().float().mean().item(),
                 "cur_old_kl": approx_kl.detach().float().mean().item(),
                 "iter": self.train_iter,
+                # Response length statistics
+                "response_length_avg": avg_response_length,
+                "response_length_max": max_response_length,
+                "response_length_min": min_response_length,
+                # Log prob and ratio statistics
+                "log_prob_avg": avg_log_prob,
+                "ratio_avg": avg_ratio,
+                "ratio_max": max_ratio,
             }
             log_status = micro_batch["log_status"]
             other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}
@@ -298,6 +323,10 @@ class BatchPPOTrainer:
         return status_list
     
     def _deepspeed_broadcast(self):
+        # FIX: Add barrier before vLLM weight update to prevent NCCL deadlock with tp>1
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
         if use_prefix_cache:
             self.vllm_engine.reset_prefix_cache()
@@ -310,7 +339,11 @@ class BatchPPOTrainer:
             # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
             with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
                 shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
-                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params)) 
+                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params))
+
+        # FIX: Add barrier after vLLM weight update to ensure all ranks complete
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier() 
     
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
