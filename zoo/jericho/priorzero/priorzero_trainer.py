@@ -140,8 +140,6 @@ class PriorZeroLLMTrainer:
                         continue
                     self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), int(tmp_dict['iter']))
         
-        
-        
 
     def get_state(self) -> Dict[str, Any]:
         kl_val = float(self.kl_ctl.value) if hasattr(self.kl_ctl, "value") else float(self.init_kl_coef)

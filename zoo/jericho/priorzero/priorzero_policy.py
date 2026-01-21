@@ -340,6 +340,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             latent_state_roots_np = latent_state_roots.detach().cpu().numpy()
             policy_logits = policy_priors.detach().cpu().numpy().tolist()
             
+
             legal_actions = [[i for i, x in enumerate(action_mask[j]) if x == 1] for j in range(active_collect_env_num)]
             noises = [
                 np.random.dirichlet([self._cfg.root_dirichlet_alpha] * int(sum(action_mask[j]))

@@ -21,14 +21,15 @@ MODEL_CONFIGS = {
         "description": "Qwen2.5-1.5B-Instruct (balanced performance)",
     },
     "qwen2.5-3b": {
-        "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-3B-Instruct",
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-3B-Instruct",
         "vllm_tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.25,
         "description": "Qwen2.5-3B-Instruct (better quality)",
     },
     "qwen2.5-7b": {
-        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct",
-        "vllm_tensor_parallel_size": 2,
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-7B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+        # "vllm_tensor_parallel_size": 2,
         "gpu_memory_utilization": 0.35,
         "description": "Qwen2.5-7B-Instruct (high quality, needs 2+ GPUs)",
     },
@@ -78,7 +79,8 @@ class PriorZeroLLMConfig:
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 5
-    use_cot: bool = False
+    # use_cot: bool = False
+    use_cot: bool = True
     prompt_max_len: int = 8192
     generate_max_len: int = 512
     bf16: bool = True
@@ -135,7 +137,7 @@ class PriorZeroLLMConfig:
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"
     
-    train_llm_after_wm_warm_step: int = int(1e2)
+    train_llm_after_wm_warm_step: int = int(1e2) # TODO
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         'enable_stability_optimizer': True,
         'value_norm_init_momentum': 0.9,        # Fast adaptation in early training
@@ -151,7 +153,8 @@ def get_priorzero_config(
     env_id: str = 'detective.z5',
     seed: int = 0,
     exp_name: str = None,
-    use_cot: bool = False,
+    # use_cot: bool = False,
+    use_cot: bool = True,
     model_key: Optional[str] = None,
     multi_gpu: bool = False
 ) -> Tuple[EasyDict, EasyDict]:
@@ -180,7 +183,8 @@ def get_priorzero_config(
     action_space_size, max_steps = env_configurations.get(env_id, (20, 100))
     wm_encoder_option = 'legacy' 
     # wm_model_name = 'BAAI/bge-base-en-v1.5'  
-    wm_model_name = '/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/bge-base-en-v1.5'  
+    # wm_model_name = '/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/bge-base-en-v1.5'  
+    wm_model_name = '/mnt/shared-storage-user/puyuan/xiongjyu/models/bge-base-en-v1.5'  
     
     collector_env_num = 1
     evaluator_env_num = 2
@@ -202,8 +206,8 @@ def get_priorzero_config(
         max_steps=max_steps,
         observation_shape=512,  
         env_id=env_id,
-        game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
-        # game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        # game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
         for_unizero=True,
         tokenizer_path=wm_model_name,
         max_action_num=action_space_size,
@@ -370,7 +374,8 @@ def get_priorzero_debug_config(
     env_id: str = 'detective.z5',
     seed: int = 0,
     exp_name: str = None,
-    use_cot: bool = False,
+    # use_cot: bool = False,
+    use_cot: bool = True,
     model_key: Optional[str] = None,
 ) -> EasyDict:
 

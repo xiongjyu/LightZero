@@ -51,6 +51,9 @@ class PolicyLoss(nn.Module):
     ) -> torch.Tensor:
         if self.policy_loss_type == "ppo":
             log_ratio = log_probs - old_log_probs
+            # FIX: Clamp log_ratio to prevent exp overflow when old_log_probs contains extreme values
+            # This prevents ratio explosion when old_logprobs are very negative (e.g., -100)
+            # log_ratio = torch.clamp(log_ratio, min=-10.0, max=10.0) # TODO
             ratio = log_ratio.exp()
         elif self.policy_loss_type == "gspo":
             # GSPO: https://arxiv.org/pdf/2507.18071

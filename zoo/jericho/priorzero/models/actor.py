@@ -244,8 +244,23 @@ class BatchPPOTrainer:
                 kl_loss = 0.0
             
             loss = actor_loss + kl_loss * float(kl_ctl.value)
-            
+
             self.strategy.backward(loss, self.actor, self.actor_optim)
+
+            # FIX: Check for NaN gradients before optimizer step
+            has_nan_grad = False
+            for name, param in self.actor.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        has_nan_grad = True
+                        if self.strategy.is_rank_0():
+                            print(f"[CRITICAL] NaN/Inf gradient detected in {name}, skipping optimizer step")
+                        break
+
+            if has_nan_grad:
+                self.actor_optim.zero_grad()
+                continue  # Skip this micro batch
+
             self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
 
             status = {
@@ -253,7 +268,8 @@ class BatchPPOTrainer:
                 "lr": self.actor_scheduler.get_last_lr()[0],
                 "clipfrac": clipfrac.detach().float().mean().item(),
                 "clip_ratio": clip_ratio.detach().float().mean().item(),
-                "approx_kl": approx_kl.detach().float().mean().item(),
+                # "approx_kl": approx_kl.detach().float().mean().item(),
+                "cur_old_kl": approx_kl.detach().float().mean().item(),
                 "iter": self.train_iter,
             }
             log_status = micro_batch["log_status"]
@@ -271,8 +287,9 @@ class BatchPPOTrainer:
 
             pbar.set_postfix({
                 "policy_loss": status["policy_loss"],
-                "approx_kl": status["approx_kl"],
-                "kl": status["kl"],
+                # "approx_kl": status["approx_kl"],
+                "cur_old_kl": status["cur_old_kl"],
+                "cur_refer_kl": status["kl"],
                 "clipfrac": status["clipfrac"],
                 "lr": status["lr"],
                 "iter": self.train_iter,

@@ -194,13 +194,31 @@ class DataProcessor:
                 if action_logprob_list is not None:
                     old_logprob = action_logprob_list[b][t + 1][true_action]
 
+                # FIX: Filter samples with extreme logprobs to prevent ratio explosion
+                if old_logprob is not None:
+                    # Skip if empty
+                    if len(old_logprob) == 0:
+                        continue
+                    # Skip if contains extreme values (< -50 indicates very low probability)
+                    if min(old_logprob) < -50.0:
+                        continue
+                    # Skip if contains NaN/Inf
+                    if any(math.isnan(x) or math.isinf(x) for x in old_logprob):
+                        continue
+
                 target_value = None
                 if target_values is not None:
                     target_value = float(target_values[b][t].item())
-                
+
                 pred_value = None
                 if pred_values is not None:
                     pred_value = float(pred_values[b][t].item())
+
+                # FIX: Skip samples with NaN/Inf values
+                if target_value is not None and (math.isnan(target_value) or math.isinf(target_value)):
+                    continue
+                if pred_value is not None and (math.isnan(pred_value) or math.isinf(pred_value)):
+                    continue
 
                 # CoT reuse optimization: get CoT prefix from stored data
                 # 需要注意的是：game_segment在reset的时候，obs是第一个obs,而cot_prefix是None; 每次append的时候都是next_obs, 和当前obs的cot_prefix
@@ -294,7 +312,14 @@ class DataProcessor:
         # t 时刻的 pred_value = boostrap( t ) 的 v
         pred_value = torch.tensor([s["pred_value"] for s in real_samples], dtype=torch.float32)
         advantage = target_value - pred_value
-        
+
+        # FIX: Check for NaN/Inf in advantage before normalization
+        if torch.isnan(advantage).any() or torch.isinf(advantage).any():
+            if self.rank == 0:
+                print(f"[WARNING] Advantage contains NaN/Inf, replacing with zeros")
+            advantage = torch.where(torch.isnan(advantage) | torch.isinf(advantage),
+                                   torch.zeros_like(advantage), advantage)
+
         if self.args.advantage_type == "advantage":
             advantage = advantage
             log_status_tmp["advantage"] = advantage.tolist()
@@ -309,9 +334,10 @@ class DataProcessor:
 
         elif self.args.advantage_type == "advantage_batch_norm":
             # Legacy implementation: batch normalization (not recommended)
-            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+            # FIX: Increase epsilon for numerical stability
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-4)
             log_status_tmp["advantage"] = advantage.tolist()
-            
+
             if fmt_rewards is not None:
                 advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
 
@@ -347,7 +373,8 @@ class DataProcessor:
                     )
 
                 self.value_count += 1
-                advantage = (advantage - self.value_running_mean) / (self.value_running_std + 1e-8)
+                # FIX: Increase epsilon for numerical stability
+                advantage = (advantage - self.value_running_mean) / (self.value_running_std + 1e-4)
 
                 if self.rank == 0 and self.value_count % 10 == 0:
                     print(f"[Advantage Running Stats] count={self.value_count}, "
@@ -370,6 +397,7 @@ class DataProcessor:
         for idx in range(len(real_samples)):
             logprob_token_list = real_samples[idx]['old_logprob']
             old_logprob[idx, -len(logprob_token_list):] = torch.tensor(logprob_token_list, dtype=torch.float32)
+
 
         return inputs.input_ids, inputs.attention_mask, action_mask, advantage, old_logprob, log_status
         
@@ -537,12 +565,17 @@ class DataProcessor:
                 tok_id = ids[j]
                 lp_dict = prompt_logprobs[j]
                 if tok_id not in lp_dict:
-                    token_lps.append(float("-inf"))
+                    # FIX: Use finite value instead of -inf to prevent ratio explosion
+                    # -100 corresponds to probability ~3.7e-44, small enough but won't cause exp(+inf)
+                    token_lps.append(-100.0)
+                    self._logger.info(f"tok_id not in lp_dict: -100 corresponds to probability ~3.7e-44, small enough but won't cause exp(+inf)")
                 else:
                     token_lps.append(lp_dict[tok_id].logprob)
 
             if not token_lps:
-                scores.append(float("-inf"))
+                scores.append(-100.0)
+                # scores.append(float("-inf"))
+                self._logger.info(f"not token_lps: -100 corresponds to probability ~3.7e-44, small enough but won't cause exp(+inf)")
                 old_action_logprob.append([])
             else:
                 assert l_no_cots_len <= l_len
@@ -572,7 +605,7 @@ class DataProcessor:
             all_prob = sum(action_probs.values())
             
             for action, prob in sorted(action_probs.items(), key=lambda x: x[1], reverse=True):
-                self._logger.info(f"  - {action}: unnorm_prob={prob:.2f}, norm_prob={(prob / all_prob):.2f}")
+                self._logger.info(f"  - {action}: unnorm_prob={prob:.10f}, norm_prob={(prob / all_prob):.10f}")
             self._logger.info(f"  - other: unnorm_prob={1-all_prob}")
         self.episode_output = []
 

@@ -20,6 +20,8 @@ from lzero.worker.muzero_segment_collector import MuZeroSegmentCollector as Orig
 from lzero.mcts.utils import prepare_observation
 from game_segment_priorzero import GameSegment
 
+global DEBUG_ENABLED;DEBUG_ENABLED = True
+
 # ==============================================================================
 # Helper Functions
 # ==============================================================================
@@ -314,6 +316,17 @@ class PriorZeroCollector(OriginalCollector):
                         valid_actions = obs[env_id].get('valid_actions', [])
                         valid_actions_list.append(valid_actions)
                     with self.prof.block("collect_step_get_llm_prior", rank=self._rank):
+
+                        # 在本文件开始，通过全局变量来控制是否处于调试状态
+                        # global DEBUG_ENABLED;DEBUG_ENABLED = True 
+ 
+                        # import torch.distributed as dist
+                        # if dist.get_rank() == 0 and DEBUG_ENABLED:
+                        #     print(f"rank {dist.get_rank()} 进入调试模式，输入interact，可以键入整段的python代码调试。通过设置 DEBUG_ENABLED = False, 可以跳过调试状态")
+                        #     import ipdb; ipdb.set_trace()
+                        # # 同步点，防止其它进程早跑
+                        # dist.barrier()
+
                         # CoT reuse optimization: request CoT prefixes to store in game segments
                         llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
                             states=raw_obs_list,

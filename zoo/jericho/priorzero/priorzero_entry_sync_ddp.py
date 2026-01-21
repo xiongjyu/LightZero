@@ -316,7 +316,8 @@ Examples:
     # Model selection
     parser.add_argument('--model', type=str, default="qwen2.5-3b", choices=get_available_models())
     parser.add_argument('--enable_profile', action='store_true', default=False)
-    parser.add_argument('--use_cot', action='store_true', default=False)
+    # parser.add_argument('--use_cot', action='store_true', default=False)
+    parser.add_argument('--use_cot', action='store_true', default=True)
     args = parser.parse_args()
 
     model_key = args.model if args.model else "qwen2.5-1.5b"
@@ -340,7 +341,7 @@ Examples:
     else:
         main_cfg, create_cfg, llm_cfg = get_priorzero_config(
             args.env_id, args.seed, use_cot=args.use_cot,
-            exp_name=f'data_priorzero/priorzero_ddp_ppo_{args.env_id}_use_cot_{args.use_cot}_with_fmtReward_seed0',
+            exp_name=f'data_priorzero/priorzero_ddp_ppo_{args.env_id}_use_cot_{args.use_cot}_{model_key}_with_fmtReward_seed0',
             model_key=model_key,
             multi_gpu=True
         )
