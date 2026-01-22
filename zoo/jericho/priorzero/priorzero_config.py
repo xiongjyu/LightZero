@@ -133,7 +133,10 @@ class PriorZeroLLMConfig:
         ),
     }))
     # advantage = target_value - pred_value 
-    advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    # advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    # TODO========
+    advantage_type: str = "advantage_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"

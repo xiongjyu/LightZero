@@ -303,9 +303,9 @@ class BatchPPOTrainer:
                 status[k] = sum(v) / len(v)
             
             if isinstance(kl_loss, torch.Tensor):
-                status["kl"] = kl_loss.detach().float().mean().item()
+                status["cur_refer_kl"] = kl_loss.detach().float().mean().item()
             else:
-                status["kl"] = float(kl_loss)
+                status["cur_refer_kl"] = float(kl_loss)
             
             status = self.strategy.all_reduce(status)
             status_list.append(status)
@@ -314,7 +314,7 @@ class BatchPPOTrainer:
                 "policy_loss": status["policy_loss"],
                 # "approx_kl": status["approx_kl"],
                 "cur_old_kl": status["cur_old_kl"],
-                "cur_refer_kl": status["kl"],
+                "cur_refer_kl": status["cur_refer_kl"],
                 "clipfrac": status["clipfrac"],
                 "lr": status["lr"],
                 "iter": self.train_iter,
@@ -322,28 +322,94 @@ class BatchPPOTrainer:
             self.train_iter += 1
         return status_list
     
+    # def _deepspeed_broadcast(self):
+    #     use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
+    #     if use_prefix_cache:
+    #         self.vllm_engine.reset_prefix_cache()
+
+    #     torch.cuda.empty_cache()
+    #     model = self.actor.model.module
+    #     count, num_params = 0, len(list(model.named_parameters()))
+    #     for name, param in model.named_parameters():
+    #         count += 1  # empty_cache at last param
+    #         # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+    #         with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
+    #             shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+    #             self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params)) 
+
     def _deepspeed_broadcast(self):
-        # FIX: Add barrier before vLLM weight update to prevent NCCL deadlock with tp>1
+        # 1. 前置 Barrier：防止上一轮训练未结束就开始更新权重
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
+        # 2. 只有 Rank 0 重置缓存（这是纯逻辑操作，不需要通信，所以可以包在 if 里）
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
-        if use_prefix_cache:
+        if use_prefix_cache and torch.distributed.get_rank() == 0:
             self.vllm_engine.reset_prefix_cache()
 
         torch.cuda.empty_cache()
-        model = self.actor.model.module
-        count, num_params = 0, len(list(model.named_parameters()))
-        for name, param in model.named_parameters():
-            count += 1  # empty_cache at last param
-            # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-            with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
-                shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
-                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params))
 
-        # FIX: Add barrier after vLLM weight update to ensure all ranks complete
+        # 3. 权重更新逻辑
+        model = self.actor.model.module
+        # 注意：所有 rank 都要获取参数列表，以便进入循环
+        params_list = list(model.named_parameters())
+        count, num_params = 0, len(params_list)
+
+        for name, param in params_list:
+            count += 1
+            
+            # 【关键修正 1】所有 Rank 必须都进入这个上下文管理器！
+            # modifier_rank=0：表示只在 Rank 0 上将参数聚合成完整形状，其他 Rank 不占用完整显存
+            with deepspeed.zero.GatheredParameters([param], 
+                                                modifier_rank=0, 
+                                                enabled=self.strategy.args.zero_stage == 3):
+                
+                # 【关键修正 2】在上下文内部，只有 Rank 0 拿到完整数据并发送给 vLLM
+                if torch.distributed.get_rank() == 0:
+                    # 此时 param.data 在 Rank 0 上是完整的，在其他 Rank 上可能是空的或分片的
+                    shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+                    
+                    self.vllm_engine.update_weight(
+                        name, 
+                        dtype=param.dtype, 
+                        shape=shape, 
+                        weight=param.data, 
+                        empty_cache=(count == num_params)
+                    )
+
+        # 4. 后置 Barrier：确保 Rank 0 完成所有 RPC 后，大家再一起继续
         if torch.distributed.is_initialized():
-            torch.distributed.barrier() 
+            torch.distributed.barrier()
+
+    # def _deepspeed_broadcast(self):
+    #     # FIX: Add barrier before vLLM weight update to prevent NCCL deadlock with tp>1
+    #     if torch.distributed.is_initialized():
+    #         torch.distributed.barrier()
+
+    #     # Only rank 0 should reset prefix cache and update vLLM weights
+    #     use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
+    #     if use_prefix_cache and torch.distributed.get_rank() == 0:
+    #         self.vllm_engine.reset_prefix_cache()
+
+    #     torch.cuda.empty_cache()
+
+    #     # Only rank 0 updates vLLM weights to avoid:
+    #     # 1. Redundant collective_rpc calls (8 ranks × 3000 params = 24000 RPC calls)
+    #     # 2. NCCL communication congestion from simultaneous GatheredParameters
+    #     # 3. GPU memory bandwidth competition from simultaneous load_weights
+    #     if torch.distributed.get_rank() == 0:
+    #         model = self.actor.model.module
+    #         count, num_params = 0, len(list(model.named_parameters()))
+    #         for name, param in model.named_parameters():
+    #             count += 1  # empty_cache at last param
+    #             # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+    #             with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
+    #                 shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+    #                 self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params))
+
+    #     # FIX: Add barrier after vLLM weight update to ensure all ranks complete
+    #     if torch.distributed.is_initialized():
+    #         torch.distributed.barrier() 
     
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
@@ -357,9 +423,10 @@ class BatchPPOTrainer:
         def _broadcast_param(param, count, num_params):
             if torch.distributed.get_rank() == 0:
                 shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
-                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, empty_cache=count == num_params) 
-                
-                self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
+                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, empty_cache=count == num_params)
+
+            # All ranks must participate in broadcast (collective operation)
+            self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
 
         def _handle_cuda_ipc(param, count, num_params):
             from torch.multiprocessing.reductions import reduce_tensor
