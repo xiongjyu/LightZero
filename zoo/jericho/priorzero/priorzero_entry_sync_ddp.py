@@ -350,7 +350,7 @@ Examples:
     print(f"Quick Test: {args.quick_test}")
     print(f"{'='*80}\n")
 
-    # use_cot = True 
+    # use_cot = True
     if args.quick_test:
         logger.info("Using quick test configuration")
         main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(
@@ -359,9 +359,11 @@ Examples:
             model_key=model_key,
         )
     else:
+        # Generate exp_name with key configuration info
+        # This will be called after get_priorzero_config, so we'll modify it there
         main_cfg, create_cfg, llm_cfg = get_priorzero_config(
             args.env_id, args.seed, use_cot=args.use_cot,
-            exp_name=f'data_priorzero/priorzero_ddp_ppo_{args.env_id}_use_cot_{args.use_cot}_{model_key}_with_fmtReward_seed0',
+            exp_name=None,  # Will be auto-generated with config info
             model_key=model_key,
             multi_gpu=True
         )

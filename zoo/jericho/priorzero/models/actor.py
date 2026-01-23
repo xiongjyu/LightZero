@@ -263,11 +263,23 @@ class BatchPPOTrainer:
 
             self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
 
-            # Calculate response length statistics
+            # Calculate response length statistics (action tokens)
             response_lengths = micro_batch['action_mask'].sum(dim=1).float()
             avg_response_length = response_lengths.mean().item()
             max_response_length = response_lengths.max().item()
             min_response_length = response_lengths.min().item()
+
+            # Calculate prompt length statistics (total - action tokens)
+            total_lengths = micro_batch['attention_mask'].sum(dim=1).float()
+            prompt_lengths = total_lengths - response_lengths
+            avg_prompt_length = prompt_lengths.mean().item()
+            max_prompt_length = prompt_lengths.max().item()
+            min_prompt_length = prompt_lengths.min().item()
+
+            # Calculate total sequence length statistics
+            avg_total_length = total_lengths.mean().item()
+            max_total_length = total_lengths.max().item()
+            min_total_length = total_lengths.min().item()
 
             # Calculate log_probs statistics
             valid_log_probs = action_log_probs[micro_batch['action_mask'] > 0]
@@ -288,10 +300,18 @@ class BatchPPOTrainer:
                 # "approx_kl": approx_kl.detach().float().mean().item(),
                 "cur_old_kl": approx_kl.detach().float().mean().item(),
                 "iter": self.train_iter,
-                # Response length statistics
+                # Response length statistics (action tokens)
                 "response_length_avg": avg_response_length,
                 "response_length_max": max_response_length,
                 "response_length_min": min_response_length,
+                # Prompt length statistics (context tokens)
+                "prompt_length_avg": avg_prompt_length,
+                "prompt_length_max": max_prompt_length,
+                "prompt_length_min": min_prompt_length,
+                # Total sequence length statistics
+                "total_length_avg": avg_total_length,
+                "total_length_max": max_total_length,
+                "total_length_min": min_total_length,
                 # Log prob and ratio statistics
                 "log_prob_avg": avg_log_prob,
                 "ratio_avg": avg_ratio,

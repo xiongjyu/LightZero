@@ -412,6 +412,40 @@ def get_priorzero_config(
     print(f"  - Tensor Parallel Size: {llm_config.vllm_tensor_parallel_size}")
     print(f"  - GPU Memory Utilization: {llm_config.gpu_memory_utilization}")
 
+    # Auto-generate exp_name with key configuration info if not provided
+    if exp_name is None:
+        # Extract key configuration parameters
+        adv_type = llm_config.advantage_type
+        adv_type_short = {
+            'advantage': 'adv',
+            'target_reward': 'tgt-rew',
+            'advantage_batch_norm': 'adv-bn',
+            'advantage_running_norm': 'adv-rn',
+        }.get(adv_type, adv_type)
+
+        # Prior temperature schedule info
+        prior_temp_cfg = llm_config.prior_temp_schedule
+        if prior_temp_cfg.enable:
+            prior_temp_str = f"pt-{prior_temp_cfg.schedule_type[:3]}-{prior_temp_cfg.init_temperature:.1f}to{prior_temp_cfg.final_temperature:.1f}"
+        else:
+            prior_temp_str = "pt-off"
+
+        # CoT info
+        cot_str = "cot" if use_cot else "nocot"
+
+        # Format reward info
+        fmt_rew_str = "fmt" if llm_config.reward_func.format_reward else "nofmt"
+
+        # Build exp_name
+        exp_name = (
+            f"data_priorzero/pz_{env_id}_{model_key}_"
+            f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_seed{seed}"
+        )
+
+        # Update config with generated exp_name
+        main_config.exp_name = exp_name
+        print(f"\n[Config] Auto-generated exp_name: {exp_name}\n")
+
     return main_config, create_config, llm_config
 
 
