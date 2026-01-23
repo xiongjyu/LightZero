@@ -170,12 +170,13 @@ def train_priorzero(
     print(f'[Rank {rank}] Vllm engine successfully created!')
     
     from priorzero_datafactory import DataProcessor
-    data_processor = DataProcessor(rank=rank, 
+    data_processor = DataProcessor(rank=rank,
                                    world_size=world_size,
-                                   vllm_engine=vllm_engine, 
-                                   strategy=strategy, 
+                                   vllm_engine=vllm_engine,
+                                   strategy=strategy,
                                    model_path=llm_cfg.model_name_or_path,
                                    exp_name=cfg.exp_name if rank == 0 else None,
+                                   tb_logger=tb_logger if rank == 0 else None,
                                 )
     # 在collector中初始化data_processor 和prof对象
     collector.data_processor = data_processor

@@ -50,11 +50,11 @@ class DataProcessor:
       - samples -> Dataset/Dataloader（collate_fn 做 pack）
     """
 
-    def __init__(self, rank, world_size, vllm_engine, strategy, model_path, exp_name=None, instance_name="vllm_output"):
+    def __init__(self, rank, world_size, vllm_engine, strategy, model_path, exp_name=None, instance_name="vllm_output", tb_logger=None):
         self.vllm_engine = vllm_engine
         self.strategy = strategy
         self.args = getattr(strategy, "args", None)
-        
+
         from transformers import AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_path, trust_remote_code=True, padding_side="left"
@@ -73,7 +73,7 @@ class DataProcessor:
         self.world_size = world_size
         self.output_step = 0
         self.llm_prior_with_cot = False
-        
+
         from collections import deque
         self.episode_output = []
 
@@ -83,11 +83,39 @@ class DataProcessor:
         self.value_count = 0
         self.running_momentum = 0.99  # EMA momentum for running statistics
 
+        # TensorBoard logger for advantage statistics
+        self.tb_logger = tb_logger
+        self.advantage_norm_step = 0  # Global step counter for advantage normalization
+
+        # Prior temperature scheduler
+        self.prior_temp_scheduler = None
+        if hasattr(self.args, 'prior_temp_schedule') and self.args.prior_temp_schedule.enable:
+            from prior_temperature_scheduler import PriorTemperatureScheduler
+            cfg = self.args.prior_temp_schedule
+            self.prior_temp_scheduler = PriorTemperatureScheduler(
+                init_temperature=cfg.init_temperature,
+                final_temperature=cfg.final_temperature,
+                total_steps=self.args.max_steps,
+                warmup_steps=cfg.warmup_steps,
+                schedule_type=cfg.schedule_type,
+                decay_rate=cfg.get('decay_rate', 0.95),
+                step_size=cfg.get('step_size', 1000),
+                step_gamma=cfg.get('step_gamma', 0.8),
+                target_entropy=cfg.get('target_entropy', None),
+                entropy_window=cfg.get('entropy_window', 100),
+                entropy_lr=cfg.get('entropy_lr', 0.01),
+                min_temperature=cfg.get('min_temperature', 0.1),
+                max_temperature=cfg.get('max_temperature', 5.0),
+            )
+            if self.rank == 0:
+                print(f"[Prior Temperature Scheduler] Initialized with {cfg.schedule_type} schedule: "
+                      f"{cfg.init_temperature:.2f} -> {cfg.final_temperature:.2f} over {self.args.max_steps} steps")
+
         if self.rank == 0:
             self._logger, _ = build_logger(
                 path=f'./{exp_name}/log/{instance_name}', name=instance_name, need_tb=False
             )
-        
+
         if self.args.value_norm_cfg.enable_stability_optimizer:
             from models.stability_optimizer import AdaptiveValueNormalizer
             self.value_normalizer = AdaptiveValueNormalizer(
@@ -455,32 +483,109 @@ class DataProcessor:
 
         elif self.args.advantage_type == "advantage_batch_norm":
             # Legacy implementation: batch normalization (not recommended)
+            # Calculate batch statistics before normalization
+            batch_mean = advantage.mean().item()
+            batch_std = advantage.std().item()
+            batch_min = advantage.min().item()
+            batch_max = advantage.max().item()
+            batch_size = advantage.numel()
+
             # FIX: Increase epsilon for numerical stability
-            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-4)
+            advantage_normalized = (advantage - advantage.mean()) / (advantage.std() + 1e-4)
+
+            # Calculate normalized statistics
+            norm_min = advantage_normalized.min().item()
+            norm_max = advantage_normalized.max().item()
+            norm_mean = advantage_normalized.mean().item()
+            norm_std = advantage_normalized.std().item()
+
+            # Print detailed statistics
+            if self.rank == 0:
+                print(
+                    f"[Advantage Batch Norm] step={self.advantage_norm_step} | "
+                    f"batch_size={batch_size} | "
+                    f"raw: mean={batch_mean:.3f}, std={batch_std:.3f}, min={batch_min:.3f}, max={batch_max:.3f} | "
+                    f"norm: mean={norm_mean:.3f}, std={norm_std:.3f}, min={norm_min:.3f}, max={norm_max:.3f}"
+                )
+
+            # Log to TensorBoard
+            if self.tb_logger is not None and self.rank == 0:
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/raw_mean", batch_mean, self.advantage_norm_step)
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/raw_std", batch_std, self.advantage_norm_step)
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/raw_min", batch_min, self.advantage_norm_step)
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/raw_max", batch_max, self.advantage_norm_step)
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/batch_size", batch_size, self.advantage_norm_step)
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/norm_mean", norm_mean, self.advantage_norm_step)
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/norm_std", norm_std, self.advantage_norm_step)
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/norm_min", norm_min, self.advantage_norm_step)
+                self.tb_logger.add_scalar("advantage_norm/batch_norm/norm_max", norm_max, self.advantage_norm_step)
+
+            advantage = advantage_normalized
             log_status_tmp["advantage"] = advantage.tolist()
 
             if fmt_rewards is not None:
                 advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
 
+            self.advantage_norm_step += 1
+
         elif self.args.advantage_type == "advantage_running_norm":
             if self.value_normalizer is not None:
+                # Store raw advantage statistics before normalization
+                raw_mean = advantage.mean().item()
+                raw_std = advantage.std().item()
+                raw_min = advantage.min().item()
+                raw_max = advantage.max().item()
+                batch_size = advantage.numel()
+
                 advantage, norm_stats = self.value_normalizer.normalize(
                     advantage,
                     clip_values=True,
                     return_stats=True
                 )
+
+                # Calculate normalized statistics
+                norm_min = advantage.min().item()
+                norm_max = advantage.max().item()
+                norm_mean = advantage.mean().item()
+                norm_std = advantage.std().item()
+
                 if self.rank == 0 and self.value_normalizer.update_count % 10 == 0:
                     print(
                         f"[Value Norm] step={self.value_normalizer.update_count} | "
-                        f"mean={norm_stats['running_mean']:.3f} | "
-                        f"std={norm_stats['running_std']:.3f} | "
-                        f"batch_mean={norm_stats['batch_mean']:.3f} | "
-                        f"batch_std={norm_stats['batch_std']:.3f} | "
-                        f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']}"
+                        f"batch_size={batch_size} | "
+                        f"running: mean={norm_stats['running_mean']:.3f}, std={norm_stats['running_std']:.3f} | "
+                        f"batch: mean={norm_stats['batch_mean']:.3f}, std={norm_stats['batch_std']:.3f} | "
+                        f"raw: min={raw_min:.3f}, max={raw_max:.3f} | "
+                        f"norm: min={norm_min:.3f}, max={norm_max:.3f} | "
+                        f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']} | "
+                        f"momentum={norm_stats['momentum']:.3f}"
                     )
+
+                # Log to TensorBoard
+                if self.tb_logger is not None and self.rank == 0:
+                    step = self.value_normalizer.update_count
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/raw_mean", raw_mean, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/raw_std", raw_std, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/raw_min", raw_min, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/raw_max", raw_max, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/batch_size", batch_size, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/running_mean", norm_stats['running_mean'], step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/running_std", norm_stats['running_std'], step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/batch_mean", norm_stats['batch_mean'], step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/batch_std", norm_stats['batch_std'], step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/norm_mean", norm_mean, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/norm_std", norm_std, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/norm_min", norm_min, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/norm_max", norm_max, step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/clipped_count", norm_stats['clipped_count'], step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/clipped_ratio", norm_stats['clipped_count'] / max(norm_stats['total_count'], 1), step)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/momentum", norm_stats['momentum'], step)
             else:
                 batch_mean = advantage.mean().item()
                 batch_std = advantage.std().item()
+                batch_min = advantage.min().item()
+                batch_max = advantage.max().item()
+                batch_size = advantage.numel()
 
                 if self.value_count == 0:
                     self.value_running_mean = batch_mean
@@ -499,14 +604,38 @@ class DataProcessor:
                 # FIX: Increase epsilon for numerical stability
                 advantage = (advantage - self.value_running_mean) / (self.value_running_std + 1e-4)
 
+                # Calculate normalized statistics
+                norm_min = advantage.min().item()
+                norm_max = advantage.max().item()
+                norm_mean = advantage.mean().item()
+                norm_std = advantage.std().item()
+
                 if self.rank == 0 and self.value_count % 10 == 0:
                     print(
-                        f"[Advantage Stats] count={self.value_count} | "
-                        f"mean={self.value_running_mean:.3f} | "
-                        f"std={self.value_running_std:.3f} | "
-                        f"batch_mean={batch_mean:.3f} | batch_std={batch_std:.3f}"
+                        f"[Advantage Running Norm] step={self.value_count} | "
+                        f"batch_size={batch_size} | "
+                        f"running: mean={self.value_running_mean:.3f}, std={self.value_running_std:.3f} | "
+                        f"batch: mean={batch_mean:.3f}, std={batch_std:.3f} | "
+                        f"raw: min={batch_min:.3f}, max={batch_max:.3f} | "
+                        f"norm: min={norm_min:.3f}, max={norm_max:.3f}"
                     )
-                    
+
+                # Log to TensorBoard
+                if self.tb_logger is not None and self.rank == 0:
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/raw_mean", batch_mean, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/raw_std", batch_std, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/raw_min", batch_min, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/raw_max", batch_max, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/batch_size", batch_size, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/running_mean", self.value_running_mean, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/running_std", self.value_running_std, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/batch_mean", batch_mean, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/batch_std", batch_std, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/norm_mean", norm_mean, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/norm_std", norm_std, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/norm_min", norm_min, self.value_count)
+                    self.tb_logger.add_scalar("advantage_norm/running_norm/norm_max", norm_max, self.value_count)
+
             log_status_tmp["advantage"] = advantage.tolist()
             if fmt_rewards is not None:
                 advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
@@ -650,10 +779,16 @@ class DataProcessor:
     @torch.no_grad()
     def _score_labels_with_prompt_logprobs(self, all_prompts: List[str], all_labels: List[str], all_prefix_cots: List[str]) -> List[float]:
         assert len(all_prompts) == len(all_labels) == len(all_prefix_cots)
+
+        # Get current temperature from scheduler
+        current_temperature = self.temperature  # Default temperature
+        if self.prior_temp_scheduler is not None:
+            current_temperature = self.prior_temp_scheduler.get_temperature()
+
         sampling_params = SamplingParams(
-            temperature=self.temperature,
+            temperature=self.temperature,  # Keep original for generation
             top_p=self.top_p,
-            max_tokens=1,                       
+            max_tokens=1,
             include_stop_str_in_output=True,
             logprobs=None,
             prompt_logprobs=1,
@@ -668,7 +803,7 @@ class DataProcessor:
         else:
             label_texts = [l + self.tokenizer.eos_token for l in all_labels]
             label_texts_no_cots = label_texts
-            
+
         label_ids = self.tokenizer(label_texts, add_special_tokens=False, padding=False, truncation=False)["input_ids"]
         label_ids_no_cots = self.tokenizer(label_texts_no_cots, add_special_tokens=False, padding=False, truncation=False)["input_ids"]
 
@@ -682,6 +817,8 @@ class DataProcessor:
 
         scores = []
         old_action_logprob = []
+        all_entropies = []  # Track entropies for adaptive scheduling
+
         for out, ids, p_len, l_len, l_no_cots_len in zip(outs, full_ids, p_lens, l_lens, l_no_cots_lens):
             prompt_logprobs = getattr(out, "prompt_logprobs", None)
 
@@ -693,23 +830,70 @@ class DataProcessor:
                     # FIX: Use finite value instead of -inf to prevent ratio explosion
                     # -100 corresponds to probability ~3.7e-44, small enough but won't cause exp(+inf)
                     token_lps.append(-100.0)
-                    self._logger.info(f"tok_id not in lp_dict: -100 corresponds to probability ~3.7e-44, small enough but won't cause exp(+inf)")
+                    if self.rank == 0:
+                        self._logger.info(f"tok_id not in lp_dict: -100 corresponds to probability ~3.7e-44, small enough but won't cause exp(+inf)")
                 else:
                     token_lps.append(lp_dict[tok_id].logprob)
 
             if not token_lps:
                 scores.append(-100.0)
-                # scores.append(float("-inf"))
-                self._logger.info(f"not token_lps: -100 corresponds to probability ~3.7e-44, small enough but won't cause exp(+inf)")
+                if self.rank == 0:
+                    self._logger.info(f"not token_lps: -100 corresponds to probability ~3.7e-44, small enough but won't cause exp(+inf)")
                 old_action_logprob.append([])
             else:
                 assert l_no_cots_len <= l_len
+
+                # Apply temperature scaling to logprobs
+                if current_temperature != 1.0:
+                    import torch
+                    token_lps_tensor = torch.tensor(token_lps, dtype=torch.float32)
+
+                    # Apply temperature scaling
+                    scaled_lps = token_lps_tensor / current_temperature
+
+                    # Compute entropy before normalization (for adaptive scheduling)
+                    probs = torch.exp(scaled_lps)
+                    entropy = -(probs * scaled_lps).sum().item()
+                    all_entropies.append(entropy)
+
+                    # Renormalize to maintain valid probability distribution
+                    scaled_lps = torch.log_softmax(scaled_lps, dim=0)
+                    token_lps = scaled_lps.tolist()
+
                 if self.llm_prior_with_cot:
                     scores.append(sum(token_lps) if self.reduction == "sum" else sum(token_lps) / l_len)
                 else:
                     scores.append(sum(token_lps[-l_no_cots_len:]) if self.reduction == "sum" else sum(token_lps[-l_no_cots_len:]) / l_no_cots_len)
                 old_action_logprob.append(token_lps)
-            
+
+        # Update temperature scheduler with average entropy
+        if self.prior_temp_scheduler is not None and all_entropies:
+            avg_entropy = sum(all_entropies) / len(all_entropies)
+            new_temperature = self.prior_temp_scheduler.step(entropy=avg_entropy)
+
+            # Log temperature and entropy statistics
+            if self.rank == 0 and self.prior_temp_scheduler.current_step % 10 == 0:
+                stats = self.prior_temp_scheduler.get_stats()
+                print(
+                    f"[Prior Temperature] step={stats['temperature_step']} | "
+                    f"temp={stats['prior_temperature']:.3f} | "
+                    f"entropy={avg_entropy:.3f} | "
+                    f"progress={stats['temperature_progress']:.2%}"
+                )
+
+                # Log to TensorBoard
+                if self.tb_logger is not None:
+                    step = stats['temperature_step']
+                    self.tb_logger.add_scalar("prior_temp/temperature", stats['prior_temperature'], step)
+                    self.tb_logger.add_scalar("prior_temp/entropy", avg_entropy, step)
+                    self.tb_logger.add_scalar("prior_temp/progress", stats['temperature_progress'], step)
+                    if 'prior_avg_entropy' in stats:
+                        self.tb_logger.add_scalar("prior_temp/avg_entropy", stats['prior_avg_entropy'], step)
+                    if 'prior_target_entropy' in stats:
+                        self.tb_logger.add_scalar("prior_temp/target_entropy", stats['prior_target_entropy'], step)
+                    if 'prior_entropy_gap' in stats:
+                        self.tb_logger.add_scalar("prior_temp/entropy_gap", stats['prior_entropy_gap'], step)
+
         return scores, old_action_logprob
 
     @torch.no_grad()

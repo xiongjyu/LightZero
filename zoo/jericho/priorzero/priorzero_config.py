@@ -100,7 +100,48 @@ class PriorZeroLLMConfig:
     top_p: float = 1.0
     seed: int = 0
     reduction: str = "mean"
-    
+
+    # Prior temperature scheduling (for exploration-exploitation trade-off)
+    # prior_temp_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+    #     'enable': True,                          # Enable temperature scheduling
+    #     'init_temperature': 2.0,                 # Initial temperature (high for exploration)
+    #     'final_temperature': 1.0,                # Final temperature (low for exploitation)
+    #     'schedule_type': 'cosine',               # 'linear', 'cosine', 'exponential', 'step', 'adaptive'
+    #     'warmup_steps': 100,                     # Steps to keep at init_temperature
+    #     # Exponential schedule parameters
+    #     'decay_rate': 0.95,
+    #     # Step schedule parameters
+    #     'step_size': 1000,
+    #     'step_gamma': 0.8,
+    #     # Adaptive schedule parameters
+    #     'target_entropy': None,                  # None = auto-compute from early training
+    #     'entropy_window': 100,
+    #     'entropy_lr': 0.01,
+    #     # Numerical stability
+    #     'min_temperature': 0.1,
+    #     'max_temperature': 5.0,
+    # }))
+
+    prior_temp_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        'enable': True,                          # Enable temperature scheduling
+        'init_temperature': 3.0,                 # Initial temperature (high for exploration)
+        'final_temperature': 1.0,                # Final temperature (low for exploitation)
+        'schedule_type': 'cosine',               # 'linear', 'cosine', 'exponential', 'step', 'adaptive'
+        'warmup_steps': 100,                     # Steps to keep at init_temperature
+        # Exponential schedule parameters
+        'decay_rate': 0.95,
+        # Step schedule parameters
+        'step_size': 2000,
+        'step_gamma': 0.8,
+        # Adaptive schedule parameters
+        'target_entropy': None,                  # None = auto-compute from early training
+        'entropy_window': 100,
+        'entropy_lr': 0.01,
+        # Numerical stability
+        'min_temperature': 0.1,
+        'max_temperature': 5.0,
+    }))
+
     # 训练相关参数
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练
     policy_model_num_gpus: int = 1 # 需要训练的 llm 使用几张卡
@@ -133,9 +174,9 @@ class PriorZeroLLMConfig:
         ),
     }))
     # advantage = target_value - pred_value 
-    # advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
     # TODO========
-    advantage_type: str = "advantage_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    # advantage_type: str = "advantage_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
     
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
