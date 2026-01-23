@@ -843,7 +843,10 @@ class DataProcessor:
             else:
                 assert l_no_cots_len <= l_len
 
-                # Apply temperature scaling to logprobs
+                # IMPORTANT: Keep original logprobs for PPO training
+                original_token_lps = token_lps.copy()
+
+                # Apply temperature scaling ONLY for prior scores (MCTS root)
                 if current_temperature != 1.0:
                     import torch
                     token_lps_tensor = torch.tensor(token_lps, dtype=torch.float32)
@@ -858,13 +861,21 @@ class DataProcessor:
 
                     # Renormalize to maintain valid probability distribution
                     scaled_lps = torch.log_softmax(scaled_lps, dim=0)
-                    token_lps = scaled_lps.tolist()
 
-                if self.llm_prior_with_cot:
-                    scores.append(sum(token_lps) if self.reduction == "sum" else sum(token_lps) / l_len)
+                    # Use scaled logprobs for prior scores
+                    scaled_token_lps = scaled_lps.tolist()
                 else:
-                    scores.append(sum(token_lps[-l_no_cots_len:]) if self.reduction == "sum" else sum(token_lps[-l_no_cots_len:]) / l_no_cots_len)
-                old_action_logprob.append(token_lps)
+                    # No temperature scaling
+                    scaled_token_lps = token_lps
+
+                # Prior scores: use temperature-scaled logprobs for MCTS exploration
+                if self.llm_prior_with_cot:
+                    scores.append(sum(scaled_token_lps) if self.reduction == "sum" else sum(scaled_token_lps) / l_len)
+                else:
+                    scores.append(sum(scaled_token_lps[-l_no_cots_len:]) if self.reduction == "sum" else sum(scaled_token_lps[-l_no_cots_len:]) / l_no_cots_len)
+
+                # Old action logprob: use ORIGINAL logprobs for PPO training
+                old_action_logprob.append(original_token_lps)
 
         # Update temperature scheduler with average entropy
         if self.prior_temp_scheduler is not None and all_entropies:
