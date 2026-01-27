@@ -399,12 +399,14 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             network_output = self._collect_model.initial_inference(self.last_batch_obs, self.last_batch_action, data, timestep)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
 
+            # Move policy_priors to the same device as policy_logits
+            policy_priors = policy_priors.to(policy_logits.device)
+
             # ======================================================================
             # LLM Prior Mixing: Soft Mixing + Clip Prior
             # ======================================================================
-            # Get mixing configuration from llm_config if available
-            from zoo.jericho.priorzero.priorzero_entry_sync_ddp import llm_config
-            mixing_cfg = llm_config.prior_mixing_cfg if hasattr(llm_config, 'prior_mixing_cfg') else {}
+            # Get mixing configuration from policy config
+            mixing_cfg = self._cfg.get('prior_mixing_cfg', {})
 
             # Store original network policy for logging
             network_policy_logits = policy_logits.clone()

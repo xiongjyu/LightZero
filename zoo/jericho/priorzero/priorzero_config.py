@@ -191,7 +191,7 @@ class PriorZeroLLMConfig:
         'enable_soft_mixing': True,              # Enable soft mixing instead of hard override
         # 'mixing_alpha': 0.5,                     # Weight for LLM prior (0=network only, 1=LLM only)
         'mixing_alpha': 0.,                     # Weight for LLM prior (0=network only, 1=LLM only)
-        # 'alpha_schedule': None,                  # 'linear', 'cosine', 'exponential', or None (fixed)
+        'alpha_schedule': None,                  # 'linear', 'cosine', 'exponential', or None (fixed)
         # 'alpha_schedule': 'cosine',  # Smooth decay          
         'alpha_init': 0.8,                       # Initial alpha (high LLM influence)
         'alpha_final': 0.2,                      # Final alpha (low LLM influence)
@@ -426,6 +426,9 @@ def get_priorzero_config(
     llm_config.vllm_tensor_parallel_size = model_config["vllm_tensor_parallel_size"]
     llm_config.gpu_memory_utilization = model_config["gpu_memory_utilization"]
 
+    # Add prior_mixing_cfg to policy config for access in policy
+    main_config.policy.prior_mixing_cfg = llm_config.prior_mixing_cfg
+
     print(f"[Config] Model configuration applied:")
     print(f"  - Model: {model_key}")
     print(f"  - Path: {llm_config.model_name_or_path}")
@@ -455,16 +458,39 @@ def get_priorzero_config(
 
         # Format reward info
         fmt_rew_str = "fmt" if llm_config.reward_func.format_reward else "nofmt"
-        # entropy_loss_coef = 
+
+        # Entropy loss coefficient info
+        entropy_coef = llm_config.entropy_loss_coef
+        if entropy_coef is None:
+            entropy_str = "ent-off"
+        else:
+            entropy_str = f"ent{entropy_coef:.3f}".replace("0.", "")  # 0.01 -> ent01
+
+        # Prior mixing info
+        mixing_cfg = llm_config.prior_mixing_cfg
+        if mixing_cfg.get('enable_soft_mixing', False):
+            alpha = mixing_cfg.get('mixing_alpha', 0.5)
+            schedule = mixing_cfg.get('alpha_schedule', None)
+            if schedule:
+                schedule_short = {'linear': 'lin', 'cosine': 'cos', 'exponential': 'exp'}.get(schedule, schedule[:3])
+                mixing_str = f"mix-{schedule_short}-{alpha:.1f}"
+            else:
+                mixing_str = f"mix-fix-{alpha:.1f}"
+        else:
+            mixing_str = "mix-hard"
+
+        # Clip prior info
+        if mixing_cfg.get('enable_clip_prior', False):
+            clip_eps = mixing_cfg.get('clip_prior_epsilon', 0.01)
+            clip_str = f"clip{clip_eps:.2f}".replace("0.", "")  # 0.01 -> clip01
+        else:
+            clip_str = "noclip"
 
         # Build exp_name
-        # exp_name = (
-        #     f"data_priorzero/pz_{env_id}_{model_key}_"
-        #     f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_pel{entropy_loss_coef}_llm-mix-0-true_seed{seed}" # TODO
-        # )
         exp_name = (
             f"data_priorzero/pz_{env_id}_{model_key}_"
-            f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_pel001_llm-mix-0-true_seed{seed}" # TODO
+            f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_"
+            f"{entropy_str}_{mixing_str}_{clip_str}_seed{seed}"
         )
 
         # Update config with generated exp_name
