@@ -224,7 +224,8 @@ class BatchPPOTrainer:
                 micro_batch['action_mask'],
                 attention_mask=micro_batch['attention_mask'],
                 return_output=True,
-                logits_to_keep=logits_to_keep, 
+                return_entropy=self.args.entropy_loss_coef is not None,
+                logits_to_keep=logits_to_keep,
             )
             actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
                 action_log_probs,
@@ -242,8 +243,20 @@ class BatchPPOTrainer:
                 kl_loss = masked_mean(kl, micro_batch["action_mask"])
             else:
                 kl_loss = 0.0
-            
+
+            # Entropy loss for exploration bonus
+            if self.args.entropy_loss_coef is not None:
+                # Extract entropy for action tokens only
+                # Note: output.entropy is already [:, :-1] from Actor.forward (line 89)
+                # So we extract the last action_mask.shape[1] tokens
+                entropy = output.entropy[:, -micro_batch['action_mask'].shape[1]:]
+                entropy_loss = masked_mean(entropy, micro_batch['action_mask'])
+            else:
+                entropy_loss = 0.0
+
             loss = actor_loss + kl_loss * float(kl_ctl.value)
+            if self.args.entropy_loss_coef is not None and self.args.entropy_loss_coef != 0:
+                loss -= entropy_loss * self.args.entropy_loss_coef
 
             self.strategy.backward(loss, self.actor, self.actor_optim)
 
@@ -326,6 +339,13 @@ class BatchPPOTrainer:
                 status["cur_refer_kl"] = kl_loss.detach().float().mean().item()
             else:
                 status["cur_refer_kl"] = float(kl_loss)
+
+            # Add entropy loss logging
+            if self.args.entropy_loss_coef is not None:
+                if isinstance(entropy_loss, torch.Tensor):
+                    status["entropy_loss"] = entropy_loss.detach().float().mean().item()
+                else:
+                    status["entropy_loss"] = float(entropy_loss)
             
             status = self.strategy.all_reduce(status)
             status_list.append(status)

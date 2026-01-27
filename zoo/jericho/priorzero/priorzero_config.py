@@ -181,7 +181,25 @@ class PriorZeroLLMConfig:
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"
-    
+
+    # Entropy loss for exploration bonus
+    entropy_loss_coef: Optional[float] = 0.01  # None = disabled, typical values: 0.001-0.01
+    # entropy_loss_coef: Optional[float] = None  # None = disabled, typical values: 0.001-0.01  
+
+    # LLM Prior Mixing Configuration
+    prior_mixing_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        'enable_soft_mixing': True,              # Enable soft mixing instead of hard override
+        # 'mixing_alpha': 0.5,                     # Weight for LLM prior (0=network only, 1=LLM only)
+        'mixing_alpha': 0.,                     # Weight for LLM prior (0=network only, 1=LLM only)
+        # 'alpha_schedule': None,                  # 'linear', 'cosine', 'exponential', or None (fixed)
+        # 'alpha_schedule': 'cosine',  # Smooth decay          
+        'alpha_init': 0.8,                       # Initial alpha (high LLM influence)
+        'alpha_final': 0.2,                      # Final alpha (low LLM influence)
+        'alpha_decay_steps': 10000,              # Steps to decay from init to final
+        'enable_clip_prior': True,               # Enable clipping of LLM prior probabilities
+        'clip_prior_epsilon': 0.01,              # Minimum probability for each action (exploration)
+    }))
+
     train_llm_after_wm_warm_step: int = int(1e2) # TODO
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         'enable_stability_optimizer': True,
@@ -327,7 +345,9 @@ def get_priorzero_config(
         n_episode=n_episode,
         train_start_after_envsteps=0,
         replay_buffer_size=replay_buffer_size,
-        eval_freq=int(3e4),
+        # eval_freq=int(3e4),
+        eval_freq=int(1e3), # TODO
+        # eval_freq=int(2), # TODO
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         buffer_reanalyze_freq=1 / 1000000,
@@ -435,11 +455,16 @@ def get_priorzero_config(
 
         # Format reward info
         fmt_rew_str = "fmt" if llm_config.reward_func.format_reward else "nofmt"
+        # entropy_loss_coef = 
 
         # Build exp_name
+        # exp_name = (
+        #     f"data_priorzero/pz_{env_id}_{model_key}_"
+        #     f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_pel{entropy_loss_coef}_llm-mix-0-true_seed{seed}" # TODO
+        # )
         exp_name = (
             f"data_priorzero/pz_{env_id}_{model_key}_"
-            f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_seed{seed}"
+            f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_pel001_llm-mix-0-true_seed{seed}" # TODO
         )
 
         # Update config with generated exp_name
