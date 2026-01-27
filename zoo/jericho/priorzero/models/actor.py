@@ -224,7 +224,8 @@ class BatchPPOTrainer:
                 micro_batch['action_mask'],
                 attention_mask=micro_batch['attention_mask'],
                 return_output=True,
-                logits_to_keep=logits_to_keep, 
+                return_entropy=self.args.entropy_loss_coef is not None,
+                logits_to_keep=logits_to_keep,
             )
             actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
                 action_log_probs,
@@ -242,19 +243,92 @@ class BatchPPOTrainer:
                 kl_loss = masked_mean(kl, micro_batch["action_mask"])
             else:
                 kl_loss = 0.0
-            
+
+            # Entropy loss for exploration bonus
+            if self.args.entropy_loss_coef is not None:
+                # Extract entropy for action tokens only
+                # Note: output.entropy is already [:, :-1] from Actor.forward (line 89)
+                # So we extract the last action_mask.shape[1] tokens
+                entropy = output.entropy[:, -micro_batch['action_mask'].shape[1]:]
+                entropy_loss = masked_mean(entropy, micro_batch['action_mask'])
+            else:
+                entropy_loss = 0.0
+
             loss = actor_loss + kl_loss * float(kl_ctl.value)
-            
+            if self.args.entropy_loss_coef is not None and self.args.entropy_loss_coef != 0:
+                loss -= entropy_loss * self.args.entropy_loss_coef
+
             self.strategy.backward(loss, self.actor, self.actor_optim)
+
+            # FIX: Check for NaN gradients before optimizer step
+            has_nan_grad = False
+            for name, param in self.actor.named_parameters():
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        has_nan_grad = True
+                        if self.strategy.is_rank_0():
+                            print(f"[CRITICAL] NaN/Inf gradient detected in {name}, skipping optimizer step")
+                        break
+
+            if has_nan_grad:
+                self.actor_optim.zero_grad()
+                continue  # Skip this micro batch
+
             self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
+
+            # Calculate response length statistics (action tokens)
+            response_lengths = micro_batch['action_mask'].sum(dim=1).float()
+            avg_response_length = response_lengths.mean().item()
+            max_response_length = response_lengths.max().item()
+            min_response_length = response_lengths.min().item()
+
+            # Calculate prompt length statistics (total - action tokens)
+            total_lengths = micro_batch['attention_mask'].sum(dim=1).float()
+            prompt_lengths = total_lengths - response_lengths
+            avg_prompt_length = prompt_lengths.mean().item()
+            max_prompt_length = prompt_lengths.max().item()
+            min_prompt_length = prompt_lengths.min().item()
+
+            # Calculate total sequence length statistics
+            avg_total_length = total_lengths.mean().item()
+            max_total_length = total_lengths.max().item()
+            min_total_length = total_lengths.min().item()
+
+            # Calculate log_probs statistics
+            valid_log_probs = action_log_probs[micro_batch['action_mask'] > 0]
+            avg_log_prob = valid_log_probs.mean().item() if valid_log_probs.numel() > 0 else 0.0
+
+            # Calculate ratio statistics
+            log_ratio = action_log_probs - micro_batch['old_action_logprob']
+            ratio = log_ratio.exp()
+            valid_ratio = ratio[micro_batch['action_mask'] > 0]
+            avg_ratio = valid_ratio.mean().item() if valid_ratio.numel() > 0 else 1.0
+            max_ratio = valid_ratio.max().item() if valid_ratio.numel() > 0 else 1.0
 
             status = {
                 "policy_loss": actor_loss.detach().float().mean().item(),
                 "lr": self.actor_scheduler.get_last_lr()[0],
                 "clipfrac": clipfrac.detach().float().mean().item(),
                 "clip_ratio": clip_ratio.detach().float().mean().item(),
-                "approx_kl": approx_kl.detach().float().mean().item(),
+                # "approx_kl": approx_kl.detach().float().mean().item(),
+                "cur_old_kl": approx_kl.detach().float().mean().item(),
                 "iter": self.train_iter,
+                # Response length statistics (action tokens)
+                "response_length_avg": avg_response_length,
+                "response_length_max": max_response_length,
+                "response_length_min": min_response_length,
+                # Prompt length statistics (context tokens)
+                "prompt_length_avg": avg_prompt_length,
+                "prompt_length_max": max_prompt_length,
+                "prompt_length_min": min_prompt_length,
+                # Total sequence length statistics
+                "total_length_avg": avg_total_length,
+                "total_length_max": max_total_length,
+                "total_length_min": min_total_length,
+                # Log prob and ratio statistics
+                "log_prob_avg": avg_log_prob,
+                "ratio_avg": avg_ratio,
+                "ratio_max": max_ratio,
             }
             log_status = micro_batch["log_status"]
             other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}
@@ -262,17 +336,25 @@ class BatchPPOTrainer:
                 status[k] = sum(v) / len(v)
             
             if isinstance(kl_loss, torch.Tensor):
-                status["kl"] = kl_loss.detach().float().mean().item()
+                status["cur_refer_kl"] = kl_loss.detach().float().mean().item()
             else:
-                status["kl"] = float(kl_loss)
+                status["cur_refer_kl"] = float(kl_loss)
+
+            # Add entropy loss logging
+            if self.args.entropy_loss_coef is not None:
+                if isinstance(entropy_loss, torch.Tensor):
+                    status["entropy_loss"] = entropy_loss.detach().float().mean().item()
+                else:
+                    status["entropy_loss"] = float(entropy_loss)
             
             status = self.strategy.all_reduce(status)
             status_list.append(status)
 
             pbar.set_postfix({
                 "policy_loss": status["policy_loss"],
-                "approx_kl": status["approx_kl"],
-                "kl": status["kl"],
+                # "approx_kl": status["approx_kl"],
+                "cur_old_kl": status["cur_old_kl"],
+                "cur_refer_kl": status["cur_refer_kl"],
                 "clipfrac": status["clipfrac"],
                 "lr": status["lr"],
                 "iter": self.train_iter,
@@ -280,20 +362,94 @@ class BatchPPOTrainer:
             self.train_iter += 1
         return status_list
     
+    # def _deepspeed_broadcast(self):
+    #     use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
+    #     if use_prefix_cache:
+    #         self.vllm_engine.reset_prefix_cache()
+
+    #     torch.cuda.empty_cache()
+    #     model = self.actor.model.module
+    #     count, num_params = 0, len(list(model.named_parameters()))
+    #     for name, param in model.named_parameters():
+    #         count += 1  # empty_cache at last param
+    #         # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+    #         with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
+    #             shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+    #             self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params)) 
+
     def _deepspeed_broadcast(self):
+        # 1. 前置 Barrier：防止上一轮训练未结束就开始更新权重
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+        # 2. 只有 Rank 0 重置缓存（这是纯逻辑操作，不需要通信，所以可以包在 if 里）
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
-        if use_prefix_cache:
+        if use_prefix_cache and torch.distributed.get_rank() == 0:
             self.vllm_engine.reset_prefix_cache()
 
         torch.cuda.empty_cache()
+
+        # 3. 权重更新逻辑
         model = self.actor.model.module
-        count, num_params = 0, len(list(model.named_parameters()))
-        for name, param in model.named_parameters():
-            count += 1  # empty_cache at last param
-            # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-            with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
-                shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
-                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params)) 
+        # 注意：所有 rank 都要获取参数列表，以便进入循环
+        params_list = list(model.named_parameters())
+        count, num_params = 0, len(params_list)
+
+        for name, param in params_list:
+            count += 1
+            
+            # 【关键修正 1】所有 Rank 必须都进入这个上下文管理器！
+            # modifier_rank=0：表示只在 Rank 0 上将参数聚合成完整形状，其他 Rank 不占用完整显存
+            with deepspeed.zero.GatheredParameters([param], 
+                                                modifier_rank=0, 
+                                                enabled=self.strategy.args.zero_stage == 3):
+                
+                # 【关键修正 2】在上下文内部，只有 Rank 0 拿到完整数据并发送给 vLLM
+                if torch.distributed.get_rank() == 0:
+                    # 此时 param.data 在 Rank 0 上是完整的，在其他 Rank 上可能是空的或分片的
+                    shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+                    
+                    self.vllm_engine.update_weight(
+                        name, 
+                        dtype=param.dtype, 
+                        shape=shape, 
+                        weight=param.data, 
+                        empty_cache=(count == num_params)
+                    )
+
+        # 4. 后置 Barrier：确保 Rank 0 完成所有 RPC 后，大家再一起继续
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+    # def _deepspeed_broadcast(self):
+    #     # FIX: Add barrier before vLLM weight update to prevent NCCL deadlock with tp>1
+    #     if torch.distributed.is_initialized():
+    #         torch.distributed.barrier()
+
+    #     # Only rank 0 should reset prefix cache and update vLLM weights
+    #     use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
+    #     if use_prefix_cache and torch.distributed.get_rank() == 0:
+    #         self.vllm_engine.reset_prefix_cache()
+
+    #     torch.cuda.empty_cache()
+
+    #     # Only rank 0 updates vLLM weights to avoid:
+    #     # 1. Redundant collective_rpc calls (8 ranks × 3000 params = 24000 RPC calls)
+    #     # 2. NCCL communication congestion from simultaneous GatheredParameters
+    #     # 3. GPU memory bandwidth competition from simultaneous load_weights
+    #     if torch.distributed.get_rank() == 0:
+    #         model = self.actor.model.module
+    #         count, num_params = 0, len(list(model.named_parameters()))
+    #         for name, param in model.named_parameters():
+    #             count += 1  # empty_cache at last param
+    #             # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+    #             with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
+    #                 shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+    #                 self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params))
+
+    #     # FIX: Add barrier after vLLM weight update to ensure all ranks complete
+    #     if torch.distributed.is_initialized():
+    #         torch.distributed.barrier() 
     
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
@@ -307,9 +463,10 @@ class BatchPPOTrainer:
         def _broadcast_param(param, count, num_params):
             if torch.distributed.get_rank() == 0:
                 shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
-                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, empty_cache=count == num_params) 
-                
-                self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
+                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, empty_cache=count == num_params)
+
+            # All ranks must participate in broadcast (collective operation)
+            self._model_update_group.broadcast(param.data, src=0, stream=torch.cuda.current_stream())
 
         def _handle_cuda_ipc(param, count, num_params):
             from torch.multiprocessing.reductions import reduce_tensor

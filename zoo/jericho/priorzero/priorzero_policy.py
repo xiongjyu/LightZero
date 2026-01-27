@@ -26,8 +26,9 @@ import lzero.model.unizero_model
 
 @POLICY_REGISTRY.register('priorzero', force_overwrite=True)
 class PriorZeroPolicy(OriginalUniZeroPolicy):
-    def __init__(self, cfg: Dict, model: torch.nn.Module = None, enable_field: List[str] = None, **kwargs):   
+    def __init__(self, cfg: Dict, model: torch.nn.Module = None, enable_field: List[str] = None, **kwargs):
         super().__init__(cfg, model, enable_field)
+        self._mixing_step = 0  # Track steps for alpha scheduling
 
     def _init_learn(self) -> None:
         super()._init_learn()
@@ -283,7 +284,76 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             if L > 0:
                 out[i, :L] = torch.tensor(seq[:L], dtype=dtype)
         return out
-    
+
+    def _clip_prior_probabilities(self, policy_logits: torch.Tensor, epsilon: float, action_mask: List[np.ndarray]) -> torch.Tensor:
+        """
+        Clip LLM prior probabilities to ensure minimum exploration.
+
+        Args:
+            policy_logits: Log probabilities from LLM [B, A]
+            epsilon: Minimum probability for each legal action
+            action_mask: List of action masks for each environment
+
+        Returns:
+            Clipped policy logits
+        """
+        # Convert logits to probabilities
+        policy_probs = F.softmax(policy_logits, dim=-1)
+
+        # Clip probabilities for legal actions
+        batch_size = policy_probs.shape[0]
+        for i in range(batch_size):
+            legal_actions = action_mask[i] == 1
+            num_legal = legal_actions.sum()
+
+            if num_legal > 0:
+                # Clip legal action probabilities to be at least epsilon
+                policy_probs[i, legal_actions] = torch.clamp(
+                    policy_probs[i, legal_actions],
+                    min=epsilon
+                )
+
+                # Renormalize to sum to 1
+                policy_probs[i, legal_actions] = policy_probs[i, legal_actions] / policy_probs[i, legal_actions].sum()
+
+        # Convert back to log probabilities
+        clipped_logits = torch.log(policy_probs + 1e-10)
+        return clipped_logits
+
+    def _compute_mixing_alpha(self, cfg: Dict) -> float:
+        """
+        Compute the mixing alpha based on schedule configuration.
+
+        Args:
+            cfg: Prior mixing configuration
+
+        Returns:
+            Current alpha value
+        """
+        if not cfg.get('alpha_schedule'):
+            # Fixed alpha
+            return cfg.get('mixing_alpha', 0.5)
+
+        schedule_type = cfg['alpha_schedule']
+        init_alpha = cfg.get('alpha_init', 0.8)
+        final_alpha = cfg.get('alpha_final', 0.2)
+        decay_steps = cfg.get('alpha_decay_steps', 10000)
+
+        # Compute progress
+        progress = min(self._mixing_step / decay_steps, 1.0)
+
+        if schedule_type == 'linear':
+            alpha = init_alpha + (final_alpha - init_alpha) * progress
+        elif schedule_type == 'cosine':
+            alpha = final_alpha + (init_alpha - final_alpha) * 0.5 * (1 + np.cos(np.pi * progress))
+        elif schedule_type == 'exponential':
+            decay_rate = cfg.get('alpha_decay_rate', 0.95)
+            alpha = final_alpha + (init_alpha - final_alpha) * (decay_rate ** self._mixing_step)
+        else:
+            alpha = cfg.get('mixing_alpha', 0.5)
+
+        return alpha
+
     def _forward_collect(
         self,
         data: torch.Tensor,
@@ -324,12 +394,43 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     prior.append(llm_prior_logprob[env_id][action])
             policy_priors.append(prior)
         policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
-        
+
         with torch.no_grad():
             network_output = self._collect_model.initial_inference(self.last_batch_obs, self.last_batch_action, data, timestep)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
 
-            network_output.policy_logits = policy_priors
+            # Move policy_priors to the same device as policy_logits
+            policy_priors = policy_priors.to(policy_logits.device)
+
+            # ======================================================================
+            # LLM Prior Mixing: Soft Mixing + Clip Prior
+            # ======================================================================
+            # Get mixing configuration from policy config
+            mixing_cfg = self._cfg.get('prior_mixing_cfg', {})
+
+            # Store original network policy for logging
+            network_policy_logits = policy_logits.clone()
+
+            # Apply clip prior if enabled
+            if mixing_cfg.get('enable_clip_prior', False):
+                epsilon = mixing_cfg.get('clip_prior_epsilon', 0.01)
+                policy_priors = self._clip_prior_probabilities(policy_priors, epsilon, action_mask)
+
+            # Apply soft mixing if enabled
+            if mixing_cfg.get('enable_soft_mixing', False):
+                alpha = self._compute_mixing_alpha(mixing_cfg)
+                # Soft mixing: (1 - alpha) * network + alpha * LLM
+                mixed_policy_logits = (1 - alpha) * policy_logits + alpha * policy_priors
+                final_policy_logits = mixed_policy_logits
+                self._mixing_step += 1  # Increment step for alpha scheduling
+            else:
+                # Hard override (original behavior)
+                final_policy_logits = policy_priors
+                alpha = 1.0  # For logging
+
+            # Update network output with final policy
+            network_output.policy_logits = final_policy_logits
+
             if not self._cfg.mcts_ctree:
                 raise NotImplementedError("Python MCTS not supported for PriorZero")
 
@@ -338,15 +439,16 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             # ======================================================================
             pred_values_np = self.value_inverse_scalar_transform_handle(pred_values).detach().cpu().numpy()
             latent_state_roots_np = latent_state_roots.detach().cpu().numpy()
-            policy_logits = policy_priors.detach().cpu().numpy().tolist()
+            policy_logits_for_mcts = final_policy_logits.detach().cpu().numpy().tolist()
             
+
             legal_actions = [[i for i, x in enumerate(action_mask[j]) if x == 1] for j in range(active_collect_env_num)]
             noises = [
                 np.random.dirichlet([self._cfg.root_dirichlet_alpha] * int(sum(action_mask[j]))
                                     ).astype(np.float32).tolist() for j in range(active_collect_env_num)
             ]
             roots = MCTSCtree.roots(active_collect_env_num, legal_actions)
-            roots.prepare(self._cfg.root_noise_weight, noises, reward_roots, policy_logits, to_play)
+            roots.prepare(self._cfg.root_noise_weight, noises, reward_roots, policy_logits_for_mcts, to_play)
             self._mcts_collect.search(roots, self._collect_model, latent_state_roots_np, to_play, timestep=timestep)
 
             roots_visit_count = roots.get_distributions()
@@ -372,8 +474,19 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     'visit_count_distribution_entropy': visit_count_distribution_entropy,
                     'searched_value': value,
                     'predicted_value': pred_values_np[i],
-                    'predicted_policy_logits': policy_logits[i],
+                    'predicted_policy_logits': policy_logits_for_mcts[i],
                     'timestep': timestep[i],
+                    # Add mixing metrics for logging
+                    'mixing_alpha': alpha,
+                    'network_policy_entropy': -torch.sum(
+                        F.softmax(network_policy_logits[i], dim=-1) * F.log_softmax(network_policy_logits[i], dim=-1)
+                    ).item(),
+                    'llm_policy_entropy': -torch.sum(
+                        F.softmax(policy_priors[i], dim=-1) * F.log_softmax(policy_priors[i], dim=-1)
+                    ).item(),
+                    'mixed_policy_entropy': -torch.sum(
+                        F.softmax(final_policy_logits[i], dim=-1) * F.log_softmax(final_policy_logits[i], dim=-1)
+                    ).item(),
                 }
                 batch_action.append(action)
             self.last_batch_obs = data

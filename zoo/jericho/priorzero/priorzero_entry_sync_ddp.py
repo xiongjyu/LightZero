@@ -170,12 +170,13 @@ def train_priorzero(
     print(f'[Rank {rank}] Vllm engine successfully created!')
     
     from priorzero_datafactory import DataProcessor
-    data_processor = DataProcessor(rank=rank, 
+    data_processor = DataProcessor(rank=rank,
                                    world_size=world_size,
-                                   vllm_engine=vllm_engine, 
-                                   strategy=strategy, 
+                                   vllm_engine=vllm_engine,
+                                   strategy=strategy,
                                    model_path=llm_cfg.model_name_or_path,
                                    exp_name=cfg.exp_name if rank == 0 else None,
+                                   tb_logger=tb_logger if rank == 0 else None,
                                 )
     # 在collector中初始化data_processor 和prof对象
     collector.data_processor = data_processor
@@ -205,7 +206,7 @@ def train_priorzero(
         cmd = 0 # 0 表示当前循环contiune, 1 表示继续，2 表示break
         priorzero_batch = None
         if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter):
-            logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
+            logger.info(f"\n[Evaluation] Rank {rank} | Iter {learner.train_iter}")
             stop, reward = evaluator.eval(
                 save_ckpt_fn=learner.save_checkpoint,
                 train_iter=learner.train_iter,
@@ -226,9 +227,13 @@ def train_priorzero(
         replay_buffer.push_game_segments(new_data)
         replay_buffer.remove_oldest_data_to_fit()
         
-        num_of_transitions = replay_buffer.get_num_of_transitions() 
+        num_of_transitions = replay_buffer.get_num_of_transitions()
         new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
-        logger.info(f"[Rank {rank}] Data collected, num_of_transitions: {num_of_transitions} transitions\tnew_num_of_transitions: {new_num_of_transitions}")
+        logger.info(
+            f"[Data Collection] Rank {rank} | "
+            f"Total transitions: {num_of_transitions} | "
+            f"New transitions: {new_num_of_transitions}"
+        )
     
         if not (num_of_transitions > batch_size):
             logger.warning(
@@ -242,7 +247,10 @@ def train_priorzero(
         if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
             continue
 
-        logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
+        logger.info(
+            f"[World Model Training] Rank {rank} | Iter {learner.train_iter} | "
+            f"Updates: {update_per_collect}"
+        )
         for i in range(update_per_collect):
             with prof.block("train_world_model", rank=rank):
                 train_data = replay_buffer.sample(batch_size, policy)
@@ -272,12 +280,24 @@ def train_priorzero(
             break
         elif min(all_cmd) == 1:
             with prof.block("fetch_latest_batch", rank=rank):
-                print(f"[Rank {rank}] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
+                if rank == 0:
+                    print(
+                        f"[Batch Fetch] Rank {rank} | WM Iter: {learner.train_iter} | "
+                        f"Required transitions: {llm_need_transition_cnt}"
+                    )
                 priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
-                print(f"[Rank {rank}] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
+                if rank == 0:
+                    print(
+                        f"[Batch Fetch] Complete | Type: {type(priorzero_batch)} | "
+                        f"Length: {len(priorzero_batch)}"
+                    )
                 
             with prof.block("train_llm", rank=rank):
-                logger.info(f"[Rank {rank}] train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'None'}. Starting LLM training...")
+                sample_count = len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 0
+                logger.info(
+                    f"[LLM Training] Rank {rank} | "
+                    f"Samples: {sample_count}"
+                )
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True)
                 trainer.train_batch(train_samples)
                 torch_dist_barrier_and_cuda_sync()
@@ -316,7 +336,8 @@ Examples:
     # Model selection
     parser.add_argument('--model', type=str, default="qwen2.5-3b", choices=get_available_models())
     parser.add_argument('--enable_profile', action='store_true', default=False)
-    parser.add_argument('--use_cot', action='store_true', default=False)
+    # parser.add_argument('--use_cot', action='store_true', default=False)
+    parser.add_argument('--use_cot', action='store_true', default=True)
     args = parser.parse_args()
 
     model_key = args.model if args.model else "qwen2.5-1.5b"
@@ -329,7 +350,7 @@ Examples:
     print(f"Quick Test: {args.quick_test}")
     print(f"{'='*80}\n")
 
-    # use_cot = True 
+    # use_cot = True
     if args.quick_test:
         logger.info("Using quick test configuration")
         main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(
@@ -338,9 +359,11 @@ Examples:
             model_key=model_key,
         )
     else:
+        # Generate exp_name with key configuration info
+        # This will be called after get_priorzero_config, so we'll modify it there
         main_cfg, create_cfg, llm_cfg = get_priorzero_config(
             args.env_id, args.seed, use_cot=args.use_cot,
-            exp_name=f'data_priorzero/priorzero_ddp_ppo_{args.env_id}_use_cot_{args.use_cot}_with_fmtReward_seed0',
+            exp_name=None,  # Will be auto-generated with config info
             model_key=model_key,
             multi_gpu=True
         )

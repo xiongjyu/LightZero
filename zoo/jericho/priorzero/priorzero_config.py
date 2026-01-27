@@ -21,14 +21,15 @@ MODEL_CONFIGS = {
         "description": "Qwen2.5-1.5B-Instruct (balanced performance)",
     },
     "qwen2.5-3b": {
-        "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-3B-Instruct",
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-3B-Instruct",
         "vllm_tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.25,
         "description": "Qwen2.5-3B-Instruct (better quality)",
     },
     "qwen2.5-7b": {
-        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct",
-        "vllm_tensor_parallel_size": 2,
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-7B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+        # "vllm_tensor_parallel_size": 2, # TODO
         "gpu_memory_utilization": 0.35,
         "description": "Qwen2.5-7B-Instruct (high quality, needs 2+ GPUs)",
     },
@@ -78,7 +79,8 @@ class PriorZeroLLMConfig:
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 5
-    use_cot: bool = False
+    # use_cot: bool = False
+    use_cot: bool = True
     prompt_max_len: int = 8192
     generate_max_len: int = 512
     bf16: bool = True
@@ -98,7 +100,48 @@ class PriorZeroLLMConfig:
     top_p: float = 1.0
     seed: int = 0
     reduction: str = "mean"
-    
+
+    # Prior temperature scheduling (for exploration-exploitation trade-off)
+    # prior_temp_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+    #     'enable': True,                          # Enable temperature scheduling
+    #     'init_temperature': 2.0,                 # Initial temperature (high for exploration)
+    #     'final_temperature': 1.0,                # Final temperature (low for exploitation)
+    #     'schedule_type': 'cosine',               # 'linear', 'cosine', 'exponential', 'step', 'adaptive'
+    #     'warmup_steps': 100,                     # Steps to keep at init_temperature
+    #     # Exponential schedule parameters
+    #     'decay_rate': 0.95,
+    #     # Step schedule parameters
+    #     'step_size': 1000,
+    #     'step_gamma': 0.8,
+    #     # Adaptive schedule parameters
+    #     'target_entropy': None,                  # None = auto-compute from early training
+    #     'entropy_window': 100,
+    #     'entropy_lr': 0.01,
+    #     # Numerical stability
+    #     'min_temperature': 0.1,
+    #     'max_temperature': 5.0,
+    # }))
+
+    prior_temp_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        'enable': True,                          # Enable temperature scheduling
+        'init_temperature': 3.0,                 # Initial temperature (high for exploration)
+        'final_temperature': 1.0,                # Final temperature (low for exploitation)
+        'schedule_type': 'cosine',               # 'linear', 'cosine', 'exponential', 'step', 'adaptive'
+        'warmup_steps': 100,                     # Steps to keep at init_temperature
+        # Exponential schedule parameters
+        'decay_rate': 0.95,
+        # Step schedule parameters
+        'step_size': 2000,
+        'step_gamma': 0.8,
+        # Adaptive schedule parameters
+        'target_entropy': None,                  # None = auto-compute from early training
+        'entropy_window': 100,
+        'entropy_lr': 0.01,
+        # Numerical stability
+        'min_temperature': 0.1,
+        'max_temperature': 5.0,
+    }))
+
     # 训练相关参数
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练
     policy_model_num_gpus: int = 1 # 需要训练的 llm 使用几张卡
@@ -113,7 +156,8 @@ class PriorZeroLLMConfig:
     
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 640 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    micro_train_batch_size: int = 16 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    # micro_train_batch_size: int = 16 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
     broadcast_every: int = 1 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
     learning_rate: float = 1e-6
@@ -131,11 +175,32 @@ class PriorZeroLLMConfig:
     }))
     # advantage = target_value - pred_value 
     advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    # TODO========
+    # advantage_type: str = "advantage_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     kl_estimator: str = "k3"
-    
-    train_llm_after_wm_warm_step: int = int(1e2)
+
+    # Entropy loss for exploration bonus
+    entropy_loss_coef: Optional[float] = 0.01  # None = disabled, typical values: 0.001-0.01
+    # entropy_loss_coef: Optional[float] = None  # None = disabled, typical values: 0.001-0.01  
+
+    # LLM Prior Mixing Configuration
+    prior_mixing_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        'enable_soft_mixing': True,              # Enable soft mixing instead of hard override
+        # 'mixing_alpha': 0.5,                     # Weight for LLM prior (0=network only, 1=LLM only)
+        'mixing_alpha': 0.,                     # Weight for LLM prior (0=network only, 1=LLM only)
+        'alpha_schedule': None,                  # 'linear', 'cosine', 'exponential', or None (fixed)
+        # 'alpha_schedule': 'cosine',  # Smooth decay          
+        'alpha_init': 0.8,                       # Initial alpha (high LLM influence)
+        'alpha_final': 0.2,                      # Final alpha (low LLM influence)
+        'alpha_decay_steps': 10000,              # Steps to decay from init to final
+        'enable_clip_prior': True,               # Enable clipping of LLM prior probabilities
+        'clip_prior_epsilon': 0.01,              # Minimum probability for each action (exploration)
+    }))
+
+    train_llm_after_wm_warm_step: int = int(1e2) # TODO
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         'enable_stability_optimizer': True,
         'value_norm_init_momentum': 0.9,        # Fast adaptation in early training
@@ -151,7 +216,8 @@ def get_priorzero_config(
     env_id: str = 'detective.z5',
     seed: int = 0,
     exp_name: str = None,
-    use_cot: bool = False,
+    # use_cot: bool = False,
+    use_cot: bool = True,
     model_key: Optional[str] = None,
     multi_gpu: bool = False
 ) -> Tuple[EasyDict, EasyDict]:
@@ -180,7 +246,8 @@ def get_priorzero_config(
     action_space_size, max_steps = env_configurations.get(env_id, (20, 100))
     wm_encoder_option = 'legacy' 
     # wm_model_name = 'BAAI/bge-base-en-v1.5'  
-    wm_model_name = '/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/bge-base-en-v1.5'  
+    # wm_model_name = '/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/bge-base-en-v1.5'  
+    wm_model_name = '/mnt/shared-storage-user/puyuan/xiongjyu/models/bge-base-en-v1.5'  
     
     collector_env_num = 1
     evaluator_env_num = 2
@@ -202,8 +269,8 @@ def get_priorzero_config(
         max_steps=max_steps,
         observation_shape=512,  
         env_id=env_id,
-        game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
-        # game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        # game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
         for_unizero=True,
         tokenizer_path=wm_model_name,
         max_action_num=action_space_size,
@@ -278,7 +345,9 @@ def get_priorzero_config(
         n_episode=n_episode,
         train_start_after_envsteps=0,
         replay_buffer_size=replay_buffer_size,
-        eval_freq=int(3e4),
+        # eval_freq=int(3e4),
+        eval_freq=int(1e3), # TODO
+        # eval_freq=int(2), # TODO
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         buffer_reanalyze_freq=1 / 1000000,
@@ -357,11 +426,76 @@ def get_priorzero_config(
     llm_config.vllm_tensor_parallel_size = model_config["vllm_tensor_parallel_size"]
     llm_config.gpu_memory_utilization = model_config["gpu_memory_utilization"]
 
+    # Add prior_mixing_cfg to policy config for access in policy
+    main_config.policy.prior_mixing_cfg = llm_config.prior_mixing_cfg
+
     print(f"[Config] Model configuration applied:")
     print(f"  - Model: {model_key}")
     print(f"  - Path: {llm_config.model_name_or_path}")
     print(f"  - Tensor Parallel Size: {llm_config.vllm_tensor_parallel_size}")
     print(f"  - GPU Memory Utilization: {llm_config.gpu_memory_utilization}")
+
+    # Auto-generate exp_name with key configuration info if not provided
+    if exp_name is None:
+        # Extract key configuration parameters
+        adv_type = llm_config.advantage_type
+        adv_type_short = {
+            'advantage': 'adv',
+            'target_reward': 'tgt-rew',
+            'advantage_batch_norm': 'adv-bn',
+            'advantage_running_norm': 'adv-rn',
+        }.get(adv_type, adv_type)
+
+        # Prior temperature schedule info
+        prior_temp_cfg = llm_config.prior_temp_schedule
+        if prior_temp_cfg.enable:
+            prior_temp_str = f"pt-{prior_temp_cfg.schedule_type[:3]}-{prior_temp_cfg.init_temperature:.1f}to{prior_temp_cfg.final_temperature:.1f}"
+        else:
+            prior_temp_str = "pt-off"
+
+        # CoT info
+        cot_str = "cot" if use_cot else "nocot"
+
+        # Format reward info
+        fmt_rew_str = "fmt" if llm_config.reward_func.format_reward else "nofmt"
+
+        # Entropy loss coefficient info
+        entropy_coef = llm_config.entropy_loss_coef
+        if entropy_coef is None:
+            entropy_str = "ent-off"
+        else:
+            entropy_str = f"ent{entropy_coef:.3f}".replace("0.", "")  # 0.01 -> ent01
+
+        # Prior mixing info
+        mixing_cfg = llm_config.prior_mixing_cfg
+        if mixing_cfg.get('enable_soft_mixing', False):
+            alpha = mixing_cfg.get('mixing_alpha', 0.5)
+            schedule = mixing_cfg.get('alpha_schedule', None)
+            if schedule:
+                schedule_short = {'linear': 'lin', 'cosine': 'cos', 'exponential': 'exp'}.get(schedule, schedule[:3])
+                mixing_str = f"mix-{schedule_short}-{alpha:.1f}"
+            else:
+                mixing_str = f"mix-fix-{alpha:.1f}"
+        else:
+            mixing_str = "mix-hard"
+
+        # Clip prior info
+        if mixing_cfg.get('enable_clip_prior', False):
+            clip_eps = mixing_cfg.get('clip_prior_epsilon', 0.01)
+            clip_str = f"clip{clip_eps:.2f}".replace("0.", "")  # 0.01 -> clip01
+        else:
+            clip_str = "noclip"
+
+        # Build exp_name
+        exp_name = (
+            f"data_priorzero/pz_{env_id}_{model_key}_"
+            f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_"
+            f"{entropy_str}_{mixing_str}_{clip_str}_seed{seed}"
+        )
+
+        # Update config with generated exp_name
+        main_config.exp_name = exp_name
+        print(f"\n[Config] Auto-generated exp_name: {exp_name}\n")
 
     return main_config, create_config, llm_config
 
@@ -370,7 +504,8 @@ def get_priorzero_debug_config(
     env_id: str = 'detective.z5',
     seed: int = 0,
     exp_name: str = None,
-    use_cot: bool = False,
+    # use_cot: bool = False,
+    use_cot: bool = True,
     model_key: Optional[str] = None,
 ) -> EasyDict:
 

@@ -140,8 +140,6 @@ class PriorZeroLLMTrainer:
                         continue
                     self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), int(tmp_dict['iter']))
         
-        
-        
 
     def get_state(self) -> Dict[str, Any]:
         kl_val = float(self.kl_ctl.value) if hasattr(self.kl_ctl, "value") else float(self.init_kl_coef)
@@ -150,10 +148,12 @@ class PriorZeroLLMTrainer:
     def _broadcast_to_vllm(self):
         if self.strategy.args.vllm_enable_sleep:
             self.vllm_engine.wake_up()
-        
-        print(f"[Rank {self.rank}]: vllm starting update weights....")
+
+        if self.rank == 0:
+            print(f"[vLLM Update] Rank {self.rank}: Broadcasting weights to vLLM...")
         self.policy_model.broadcast_to_vllm()
-        print(f"[Rank {self.rank}]: vllm has updating done.")
+        if self.rank == 0:
+            print(f"[vLLM Update] Rank {self.rank}: Weight broadcast complete")
 
         if self.strategy.args.vllm_enable_sleep:
             self.vllm_engine.sleep()
