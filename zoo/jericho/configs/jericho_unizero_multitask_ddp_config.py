@@ -266,7 +266,7 @@ if __name__ == "__main__":
 
     
     # Set NCCL timeout to prevent watchdog hang due to unbalanced data collection speeds
-    os.environ.setdefault('NCCL_TIMEOUT', '480')  # 60 minutes in seconds
+    os.environ.setdefault('NCCL_TIMEOUT', '480') 
     os.environ.setdefault('NCCL_BLOCKING_WAIT', '1')
     
     for seed in [0]:

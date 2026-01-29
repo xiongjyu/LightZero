@@ -498,12 +498,6 @@ class HFLanguageRepresentationNetwork(nn.Module):
             torch.distributed.barrier()
         if get_rank() != 0:
             self.pretrained_model = AutoModel.from_pretrained(model_path)
-
-        if get_rank() != 0:
-            logging.info(f"Worker process is loading model from cache: {model_path}")
-            self.model = AutoModel.from_pretrained(model_path)
-            if tokenizer is None:
-                self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         
         if tokenizer is None:
             # Only rank 0 downloads the tokenizer, and then other processes load it from cache.
