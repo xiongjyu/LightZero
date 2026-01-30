@@ -206,7 +206,7 @@ def train_unizero_multitask(
             if update_per_collect is None:
                 update_per_collect = 40
 
-            if learner.train_iter > 0 or evaluator.should_eval(learner.train_iter): # only for debug
+            if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter): # only for debug
                 print(f'Evaluating task_id: {current_task_id}...')
                 # Reset evaluator policy state
                 evaluator._policy.reset(reset_init_data=True, task_id=current_task_id)

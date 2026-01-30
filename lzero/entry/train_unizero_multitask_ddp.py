@@ -245,7 +245,7 @@ def train_unizero_multitask_ddp(
                 )
                 collect_kwargs['epsilon'] = epsilon_greedy_fn(collector.envstep)
 
-            if learner.train_iter > 10 or evaluator.should_eval(learner.train_iter):
+            if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter):
                 print('=' * 20)
                 print(f'Rank {rank} evaluating task_id: {cfg.policy.task_id}...')
                 evaluator._policy.reset(reset_init_data=True, task_id=cfg.policy.task_id)
