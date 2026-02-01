@@ -11,13 +11,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import transformers
-import transformers.modeling_flash_attention_utils
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from peft import PeftModel, get_peft_model_state_dict
 from torch import distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.optim import Optimizer
-from torchdata.stateful_dataloader import StatefulDataLoader
 
 from utils import torch_dist_barrier_and_cuda_sync
 from models.actor import Actor
@@ -275,10 +273,10 @@ class DeepspeedStrategy(ABC):
             torch.cuda.set_device(local_rank)
 
         # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
-        # deepspeed.init_distributed(dist_backend="nccl", timeout=timeout)
-        if not dist.is_initialized():
-            print(f"[System] Initializing Distributed Process Group via torch.distributed...")
-            dist.init_process_group(backend="nccl", timeout=timeout)
+        deepspeed.init_distributed(dist_backend="nccl", timeout=timeout)
+        # if not dist.is_initialized():
+        #     print(f"[System] Initializing Distributed Process Group via torch.distributed...")
+        #     dist.init_process_group(backend="nccl", timeout=timeout)
             
         # mesh
         self.world_size = dist.get_world_size()
@@ -319,7 +317,6 @@ class DeepspeedStrategy(ABC):
         if isinstance(model, Actor):
             model = model.model
         model.step()
-
 
 
     def _unwrap_model(self, model) -> nn.Module:

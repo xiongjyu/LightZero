@@ -244,6 +244,7 @@ class DataProcessor:
             raw_obs_list, history_obs_list, action_logprob_list, pred_value, target_value, cot_prefix_list
         )
         random.shuffle(samples)
+
         if ddp:
             print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")
             real_samples = samples
@@ -529,11 +530,12 @@ class DataProcessor:
 
         scores = []
         old_action_logprob = []
-        for out, ids, p_len, l_len, l_no_cots_len in zip(outs, full_ids, p_lens, l_lens, l_no_cots_lens):
+        nan_found = False
+        for i, (out, ids, p_len, l_len, l_no_cots_len) in enumerate(zip(outs, full_ids, p_lens, l_lens, l_no_cots_lens)):            
             prompt_logprobs = getattr(out, "prompt_logprobs", None)
-
             token_lps = []
-            for j in range(p_len, p_len + l_len):
+            
+            for j in range(1, len(ids)):
                 tok_id = ids[j]
                 lp_dict = prompt_logprobs[j]
                 if tok_id not in lp_dict:
@@ -547,10 +549,55 @@ class DataProcessor:
             else:
                 assert l_no_cots_len <= l_len
                 if self.llm_prior_with_cot:
-                    scores.append(sum(token_lps) if self.reduction == "sum" else sum(token_lps) / l_len)
+                    target_lps = token_lps[-l_len:]
                 else:
-                    scores.append(sum(token_lps[-l_no_cots_len:]) if self.reduction == "sum" else sum(token_lps[-l_no_cots_len:]) / l_no_cots_len)
+                    target_lps = token_lps[-l_no_cots_len:]
+                denom = len(target_lps)
+
+                score = sum(target_lps) if self.reduction == "sum" else sum(target_lps) / denom
+                scores.append(score)
+                
+                if (not nan_found) and math.isnan(score):
+                    vllm_returned_nan = any(math.isnan(x) for x in target_lps)
+                    token_level_debug = []
+                    for t_id, t_lp in zip(ids[1:], token_lps):
+                        token_level_debug.append(f"TokenID: {t_id} -> LogProb: {t_lp} {'(NaN HERE!)' if math.isnan(t_lp) else ''}")
+
+                    nan_found = True
+                    nan_debug_dump = (
+                        f"\n{'='*20} [NaN DEBUG REPORT] {'='*20}\n"
+                        f"Sample Index (i): {i}\n"
+                        f"Reason: {'vLLM returned NaN logprob' if vllm_returned_nan else 'Math error during sum/div'}\n\n"
+                        f"--- Text Info ---\n"
+                        f"Prompt: ...{repr(all_prompts[i])}\n"
+                        f"Label Action: {repr(all_labels[i])}\n"
+                        f"Prefix CoT: {repr(all_prefix_cots[i])}\n\n"
+                        f"--- Numerical Info (Copy this to reproduce) ---\n"
+                        f"Full Input Token IDs (full_ids[{i}]): {ids}\n"
+                        f"Context Length (p_len): {p_len}\n"
+                        f"Label Length (l_len): {l_len}\n"
+                        f"Target Length (l_no_cots_len): {l_no_cots_len}\n\n"
+                        f"--- Critical Calculation Data ---\n"
+                        f"Head 10 Token IDs: {ids[1:11]}\n"
+                        f"LogProbs List: {token_lps[:10]}\n"
+                        f"Detailed Mapping:\n" + "\n".join(token_level_debug[:10]) + "\n\n"
+                        
+                        f"Tail Token IDs: {ids[-l_len - 10: -l_len]}\n"
+                        f"LogProbs List: {token_lps[-l_len - 10: -l_len]}\n"
+                        f"Detailed Mapping:\n" + "\n".join(token_level_debug[-l_len - 10: -l_len]) + "\n\n"
+                        
+                        f"Target Token IDs: {ids[-l_no_cots_len:]}\n"
+                        f"LogProbs List: {target_lps}\n"
+                        f"Detailed Mapping:\n" + "\n".join(token_level_debug[-l_no_cots_len:]) + "\n"
+                        f"{'='*60}\n"
+                    )
                 old_action_logprob.append(token_lps)
+
+        if self.rank == 0:
+            if nan_found:
+                self._logger.info(nan_debug_dump)
+            else:
+                self._logger.info("[llm_prior] Finished scoring: no NaN in scores.")
             
         return scores, old_action_logprob
 

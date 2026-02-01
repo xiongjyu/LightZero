@@ -140,6 +140,7 @@ def train_priorzero(
     logger.info(f"[Rank {rank}] World Model components initialized")
     if rank == 0:
         dump_dataclass_cfg_py(llm_cfg, path=f"{cfg.exp_name}/llm_cfg.py")
+        llm_cfg.save_path = f'./{cfg.exp_name}/llm_ckpt/'
 
     from utils import Profiler
     prof = Profiler(log_interval=10, stats_file=f'./{cfg.exp_name}/log/profiler.txt', enable_profile=enable_profile)
@@ -197,6 +198,7 @@ def train_priorzero(
         reference_model=ref_model,
         exp_name=cfg.exp_name if rank == 0 else None,
         tb_logger=tb_logger if rank == 0 else None,
+        llm_save_freq=llm_cfg.llm_save_freq
     )
         
     torch_dist_barrier_and_cuda_sync()
@@ -257,7 +259,7 @@ def train_priorzero(
         # 一次参数更新是train_batch_size，off次数为broadcast_every，每个rank单独收集数据，所以需要除
         # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
         llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // world_size
-        llm_need_transition_cnt = llm_need_sample_cnt // cfg.policy.num_unroll_steps
+        llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps
         
         if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt:
             cmd = 1
@@ -327,6 +329,8 @@ Examples:
     print(f"Model: {model_key}")
     print(f"Seed: {args.seed}")
     print(f"Quick Test: {args.quick_test}")
+    print(f"use cot: {args.use_cot}")
+    print(f"enable_profile: {args.enable_profile}")
     print(f"{'='*80}\n")
 
     # use_cot = True 

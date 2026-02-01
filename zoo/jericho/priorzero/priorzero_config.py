@@ -21,7 +21,7 @@ MODEL_CONFIGS = {
         "description": "Qwen2.5-1.5B-Instruct (balanced performance)",
     },
     "qwen2.5-3b": {
-        "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-3B-Instruct",
+        "model_name_or_path": "/mnt/afs/niuyazhe/workspace/xiongjyu/models/Qwen2.5-3B-Instruct",
         "vllm_tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.25,
         "description": "Qwen2.5-3B-Instruct (better quality)",
@@ -73,7 +73,6 @@ class PriorZeroLLMConfig:
     # 训练指标的相关参数
     enable_sft: bool = False
     enable_rft: bool = True
-    sft_loss_weight: float = 1   # Weight of SFT loss in total loss
     rft_loss_weight: float = 1 
     
     attn_implementation: str = "flash_attention_2" 
@@ -113,10 +112,10 @@ class PriorZeroLLMConfig:
     
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 640 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    micro_train_batch_size: int = 16 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
     broadcast_every: int = 1 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
-    learning_rate: float = 1e-6
+    learning_rate: float = 5e-7
     adam_betas: Tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.01
     lr_scheduler: str = "cosine_with_min_lr"
@@ -136,6 +135,9 @@ class PriorZeroLLMConfig:
     kl_estimator: str = "k3"
     
     train_llm_after_wm_warm_step: int = int(1e2)
+    llm_save_freq: int = 500  # 每多少步保存一次 llm 模型,一步代表一次参数更新而不是梯度累积
+    save_path: str = "" # 该参数将被 exp_name 目录覆盖
+    
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         'enable_stability_optimizer': True,
         'value_norm_init_momentum': 0.9,        # Fast adaptation in early training
@@ -180,7 +182,7 @@ def get_priorzero_config(
     action_space_size, max_steps = env_configurations.get(env_id, (20, 100))
     wm_encoder_option = 'legacy' 
     # wm_model_name = 'BAAI/bge-base-en-v1.5'  
-    wm_model_name = '/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/bge-base-en-v1.5'  
+    wm_model_name = '/mnt/afs/niuyazhe/workspace/xiongjyu/models/bge-base-en-v1.5'  
     
     collector_env_num = 1
     evaluator_env_num = 2
@@ -202,7 +204,8 @@ def get_priorzero_config(
         max_steps=max_steps,
         observation_shape=512,  
         env_id=env_id,
-        game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        # game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        game_path=f"/mnt/afs/niuyazhe/workspace/xiongjyu/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
         # game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
         for_unizero=True,
         tokenizer_path=wm_model_name,
@@ -377,7 +380,7 @@ def get_priorzero_debug_config(
     main_config, create_config, llm_config = get_priorzero_config(
         env_id=env_id, seed=seed, exp_name=exp_name, use_cot=use_cot, model_key=model_key
     )
-    collector_env_num = 4
+    collector_env_num = 1
     evaluator_env_num = 1
     max_steps = 20
     
@@ -387,11 +390,8 @@ def get_priorzero_debug_config(
     num_layers=1
     game_segment_length = 50
 
-    llm_config.prompt_max_len = 512
-    llm_config.generate_max_len = 128
-    llm_config.llm_learn_num_samples = 16 # 每次取buffer中最新的256条轨迹训练
-    llm_config.train_batch_size = 16  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    llm_config.micro_train_batch_size = 2
+    llm_config.train_batch_size = 40  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    llm_config.micro_train_batch_size = 8
     llm_config.train_llm_after_wm_warm_step = 0
 
     create_config.collector_env_num = collector_env_num

@@ -1,4 +1,5 @@
 from typing import Optional, Union, List, Dict
+from collections import defaultdict
 import os
 import math
 from tqdm import tqdm
@@ -206,6 +207,10 @@ class BatchPPOTrainer:
             desc=f"PPO batch step={step_idx}",
             disable=not self.strategy.is_rank_0(),
         )
+        acc_grad_steps = self.strategy.accumulated_gradient 
+        steps_in_accum = 0 # 当前是第几次累积梯度
+        metrics_buffer = defaultdict(float) # 用于累积 micro_step 指标的缓冲区
+        
         for micro_step, start_idx in enumerate(pbar):
             end_idx = min(start_idx + self.micro_train_batch_size, all_samples_size)
             micro_batch = {
@@ -241,43 +246,52 @@ class BatchPPOTrainer:
                 )
                 kl_loss = masked_mean(kl, micro_batch["action_mask"])
             else:
-                kl_loss = 0.0
+                kl_loss = torch.tensor(0.0, device=device)
             
             loss = actor_loss + kl_loss * float(kl_ctl.value)
             
             self.strategy.backward(loss, self.actor, self.actor_optim)
             self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
-
-            status = {
-                "policy_loss": actor_loss.detach().float().mean().item(),
-                "lr": self.actor_scheduler.get_last_lr()[0],
-                "clipfrac": clipfrac.detach().float().mean().item(),
-                "clip_ratio": clip_ratio.detach().float().mean().item(),
-                "approx_kl": approx_kl.detach().float().mean().item(),
+            
+            policy_loss_item = actor_loss.detach().float().item()
+            clipfrac_item = clipfrac.detach().float().item()
+            clip_ratio_item = clip_ratio.detach().float().item()
+            approx_kl_item = approx_kl.detach().float().item()
+            kl_loss_item = kl_loss.detach().float().item()
+            
+            pbar.set_postfix({
+                "policy_loss": policy_loss_item,
+                "approx_kl": approx_kl_item,
+                "kl": kl_loss_item,
                 "iter": self.train_iter,
-            }
+            })
+            
+            metrics_buffer["policy_loss"] += policy_loss_item
+            metrics_buffer["clipfrac"] += clipfrac_item
+            metrics_buffer["clip_ratio"] += clip_ratio_item
+            metrics_buffer["approx_kl"] +=  approx_kl_item
+            metrics_buffer["kl"] += kl_loss_item
+            
             log_status = micro_batch["log_status"]
             other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}
             for k, v in other_status.items():
-                status[k] = sum(v) / len(v)
+                metrics_buffer[k] += sum(v) / len(v)
             
-            if isinstance(kl_loss, torch.Tensor):
-                status["kl"] = kl_loss.detach().float().mean().item()
-            else:
-                status["kl"] = float(kl_loss)
-            
-            status = self.strategy.all_reduce(status)
-            status_list.append(status)
+            steps_in_accum += 1
+        
+            if ((micro_step + 1) % acc_grad_steps == 0) or ((micro_step + 1) == pbar.total):
+                self.train_iter += 1
+                status = {k: v / steps_in_accum for k, v in metrics_buffer.items()}
+                metrics_buffer.clear()
+                steps_in_accum = 0
+                
+                status["lr"] = self.actor_scheduler.get_last_lr()[0]
+                status["iter"] = self.train_iter
+                status["global_grad_norm"] = self.actor_optim._global_grad_norm
+                
+                status = self.strategy.all_reduce(status)
+                status_list.append(status)
 
-            pbar.set_postfix({
-                "policy_loss": status["policy_loss"],
-                "approx_kl": status["approx_kl"],
-                "kl": status["kl"],
-                "clipfrac": status["clipfrac"],
-                "lr": status["lr"],
-                "iter": self.train_iter,
-            })
-            self.train_iter += 1
         return status_list
     
     def _deepspeed_broadcast(self):

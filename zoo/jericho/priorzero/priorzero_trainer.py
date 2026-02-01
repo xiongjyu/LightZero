@@ -65,7 +65,8 @@ class PriorZeroLLMTrainer:
         reference_model=None,  # RayActorGroup(ReferenceModelActor) or None
         exp_name: str = None,
         tb_logger = None,
-        instance_name: str = "llm_ppo"
+        instance_name: str = "llm_ppo",
+        llm_save_freq: int = 1000,
     ):
         self.cfg = cfg
         self.pretrain = pretrain
@@ -76,6 +77,7 @@ class PriorZeroLLMTrainer:
         self.reference_model = reference_model
         self.vllm_engine = vllm_engine
         self.global_step = 0
+        self.llm_save_freq = llm_save_freq
 
         self.tokenizer = get_tokenizer(self.pretrain)
 
@@ -125,8 +127,6 @@ class PriorZeroLLMTrainer:
             
         status = self.policy_model.fit(batch, self.kl_ctl)
         
-        self.global_step += 1
-        
         if self.vllm_engine is not None:
             self._broadcast_to_vllm()
         
@@ -139,9 +139,11 @@ class PriorZeroLLMTrainer:
                     if k == 'iter':
                         continue
                     self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), int(tmp_dict['iter']))
-        
-        
-        
+                    self.global_step = max(self.global_step, int(tmp_dict['iter']))
+                    
+        if self.strategy.is_rank_0():
+            if self.global_step > 0 and self.global_step % self.llm_save_freq == 0:
+                self.policy_model.save_model()
 
     def get_state(self) -> Dict[str, Any]:
         kl_val = float(self.kl_ctl.value) if hasattr(self.kl_ctl, "value") else float(self.init_kl_coef)
