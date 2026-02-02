@@ -101,49 +101,72 @@ class DataProcessor:
             )
         else:
             self.value_normalizer = None
-
-    def build_llm_prompt(self, current_obs: str, history: Optional[List[Tuple[str, str, float]]] = None) -> str:
-        prompt_parts = []
-        prompt_parts.append(
-            "You are an expert player in a text-based adventure game. "
-            "Your goal is to maximize the score by choosing the best possible next action. "
-            "You must choose exactly ONE best next action."
-        )
-        if history is not None and len(history) > 0:
-            history = list(history)
-            prompt_parts.append("=== Recent History ===")
-
-            for i, (obs, action, reward) in enumerate(history, start=1):  
-                obs_str = obs
-                prompt_parts.append(f"Step {i}:")
-                prompt_parts.append(f"  Observation: {obs_str.strip()}")
-                prompt_parts.append(f"  Action: {action.strip()}")
-                prompt_parts.append(f"  Reward: {reward}")
-
-        prompt_parts.append("=== Current Situation ===")
-        prompt_parts.append(current_obs.strip())
+    
+    def get_system_prompt(self):
+        """
+        系统提示词：纯文本指令，定义角色、目标和严格的输出协议。
+        """
+        parts = [
+            "You are an expert player in a text-based adventure game. Your goal is to maximize the score by choosing the optimal next action.",
+            "Please analyze the game history and current observation to decide the single best next action.",
+            "OUTPUT FORMAT:",
+        ]
 
         if self.use_cot:
+            parts.append(
+                "You MUST produce exactly TWO parts in the following order:\n"
+                "1. Reasoning: Analyze the current situation, available actions, constraints, and uncertainties. Do NOT reveal the final choice here.\n"
+                "2. Action: The final chosen action.\n"
+                "Strict Format Example:\n"
+                "Reasoning: <detailed_analysis>\n"
+                "Action: <single_action>"
+            )
+        else:
+            parts.append(
+                "Output exactly one line starting with 'Action:'.\n"
+                "Example:\n"
+                "Action: <your_action_here>"
+            )
+        return "\n".join(parts)
+
+    def get_user_prompt(self, history: Optional[List[Tuple[str, str, float]]] = None, current_obs: Optional[str] = None):
+        """
+        用户提示词：注入历史和当前状态，并触发输出。
+        """
+        prompt_parts = []
+
+        if history and len(history) > 0:
+            prompt_parts.append("=== GAME HISTORY ===")
+            for i, (obs, action, reward) in enumerate(history, start=1):
+                prompt_parts.append(f"Step {i}:")
+                prompt_parts.append(f"Observation: {obs.strip()}")
+                prompt_parts.append(f"Action: {action.strip()}")
+                prompt_parts.append(f"Reward: {reward}")
+            prompt_parts.append("") # 空行分隔
+
+        prompt_parts.append("=== CURRENT OBSERVATION ===")
+        prompt_parts.append(current_obs.strip())
+        
+        prompt_parts.append("\n=== INSTRUCTION ===")
+        if self.use_cot:
             prompt_parts.append(
-                "=== Task ==="
-                "You must produce TWO parts in order: (1) Reasoning, then (2) Action.\n"
-                "1) Reasoning:\n"
-                "Perform a detailed reasoning process based ONLY on the current state and the recent interaction history; first analyze what environment or situation you are currently in, then identify what actions are available at this step along with the relevant constraints, and you may also discuss key observations, uncertainties, and implications of different possibilities; however, do NOT state, imply, or reveal which action will be chosen, and the reasoning section MUST be output exactly in the format: Reasoning: <your reasoning content>.\n"
-                "2) Action:\n"
-                "After finishing the reasoning, output exactly ONE line in the following format: Action: <the chosen action>." 
-                "Your output MUST strictly follow this format: \nReasoning: <your reasoning content>\nAction: <the chosen action>"
+                "Please analyze the situation and provide your response in the following format:\n"
+                "Reasoning: <detailed_analysis>\n"
+                "Action: <single_action>"
             )
         else:
             prompt_parts.append(
-                "\n=== Task ===\n"
-                "Analyze the recent history and the current situation, and decide on the SINGLE best next action."
-                "Please keep the output concise, avoiding any other content.\n"
+                "Decide on the best next move and output it in the following format:\n"
+                "Action: <your_action_here>"
             )
         return "\n".join(prompt_parts)
 
     def build_chat_context(self, user_prompt: str) -> str:
         return self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": user_prompt}],
+            [
+                {"role": "system", "content": self.get_system_prompt()},
+                {"role": "user", "content": user_prompt}
+            ],
             tokenize=False,
             add_generation_prompt=True,
         )
@@ -185,9 +208,9 @@ class DataProcessor:
                 if not true_action:
                     continue
 
-                instruction = self.build_llm_prompt(
-                    current_obs=current_obs,
+                instruction = self.get_user_prompt(
                     history=current_hist,
+                    current_obs=current_obs,
                 )
                 prompt = self.build_chat_context(instruction)
                 old_logprob = None
@@ -406,22 +429,25 @@ class DataProcessor:
         cot_outputs = self.vllm_engine.get_responses()
 
         prefix_cot_list, full_output = [], []
+        reasoning_pattern = re.compile(r"Reasoning\s*:", re.IGNORECASE)
+        action_pattern = re.compile(r"Action\s*:", re.IGNORECASE)
+        
         for output in cot_outputs:
             gen_text = output.outputs[0].text
             full_output.append(gen_text)
-            
-            matches = list(re.finditer(r"(?mi)^\s*Action\s*:\s*", gen_text))
-            if not matches:
-                matches = list(re.finditer(r"action\s*:\s*", gen_text, flags=re.IGNORECASE))
-
-            if not matches:
-                prefix_cot_list.append("")
-                continue
-
-            m = matches[-1]
-            prefix_piece = gen_text[: m.end()].strip() 
-            
-            prefix_cot_list.append(prefix_piece)
+            # TODO 这里是否要清洗数据？清洗过后，计算prior先验的时候比较正常，但是format_reward几乎没用
+            # if not reasoning_pattern.search(gen_text):
+            #     prefix_cot_list.append("Action:")
+            #     continue
+            action_match = action_pattern.search(gen_text)
+            if action_match:
+                end_index = action_match.end()
+                prefix_piece = gen_text[:end_index].strip()
+                prefix_cot_list.append(prefix_piece)
+            # else:
+            #     prefix_piece = gen_text.strip() + "\nAction:"
+            #     prefix_cot_list.append(prefix_piece)
+            prefix_cot_list.append(gen_text.strip())
 
         return prefix_cot_list, full_output
     
@@ -449,7 +475,7 @@ class DataProcessor:
         prompt_list = []
         assert len(states) == len(histories) == len(valid_actions_list)
         for state, history in zip(states, histories):
-            prompt = self.build_llm_prompt(current_obs=state, history=history)
+            prompt = self.get_user_prompt(current_obs=state, history=history)
             prompt_list.append(prompt)
 
         if self.use_cot:
@@ -591,7 +617,7 @@ class DataProcessor:
                         f"Detailed Mapping:\n" + "\n".join(token_level_debug[-l_no_cots_len:]) + "\n"
                         f"{'='*60}\n"
                     )
-                old_action_logprob.append(token_lps[-l_len])
+                old_action_logprob.append(token_lps[-l_len:])
 
         if self.rank == 0:
             if nan_found:
@@ -619,7 +645,7 @@ class DataProcessor:
             all_prob = sum(action_probs.values())
             
             for action, prob in sorted(action_probs.items(), key=lambda x: x[1], reverse=True):
-                self._logger.info(f"  - {action}: unnorm_prob={prob:.2f}, norm_prob={(prob / all_prob):.2f}")
+                self._logger.info(f"  - {action}: unnorm_prob={prob:.4f}, norm_prob={(prob / all_prob):.4f}")
             self._logger.info(f"  - other: unnorm_prob={1-all_prob}")
         self.episode_output = []
 
