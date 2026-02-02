@@ -591,7 +591,7 @@ class DataProcessor:
                         f"Detailed Mapping:\n" + "\n".join(token_level_debug[-l_no_cots_len:]) + "\n"
                         f"{'='*60}\n"
                     )
-                old_action_logprob.append(token_lps)
+                old_action_logprob.append(token_lps[-l_len])
 
         if self.rank == 0:
             if nan_found:
