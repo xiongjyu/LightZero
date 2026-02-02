@@ -178,7 +178,7 @@ def generate_configs(env_id_list, env_configurations, collector_env_num, n_episo
           and its corresponding configuration objects.
     """
     configs = []
-    exp_name_prefix = f'data_scalezero/jericho_ddp_mt_moe8_{len(env_id_list)}games_tbs{total_batch_size}-nlayer{num_layers}-rr{replay_ratio}_not-share-head_encoder-final-ln_seed{seed}/'
+    exp_name_prefix = f'data_scalezero/jericho_ddp_mt_{len(env_id_list)}games_tbs{total_batch_size}-nlayer{num_layers}-rr{replay_ratio}_not-share-head_encoder-final-ln_seed{seed}/'
 
     action_space_size_list = [v[0] for _, v in env_configurations.items()]  
     max_action_space_size = max(action_space_size_list)
