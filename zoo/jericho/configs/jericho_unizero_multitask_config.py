@@ -241,7 +241,7 @@ if __name__ == "__main__":
     # Model name or path - configurable according to the predefined model paths or names
     model_name: str = 'BAAI/bge-base-en-v1.5'
     replay_ratio = 0.1
-    norm_type = 'LN'
+    norm_type = 'BN'
 
     collector_env_num = 4
     n_episode = 4

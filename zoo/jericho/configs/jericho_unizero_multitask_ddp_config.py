@@ -236,15 +236,15 @@ if __name__ == "__main__":
     env_configurations = {
         'detective.z5': (12, 100),
         'omniquest.z5': (25, 100),
-        # 'acorncourt.z5': (45, 50),
-        # 'zork1.z5': (55, 500),
+        'acorncourt.z5': (45, 50),
+        'zork1.z5': (55, 500),
     }
     env_id_list = list(env_configurations.keys())
     
     # Model name or path - configurable according to the predefined model paths or names
     model_name: str = 'BAAI/bge-base-en-v1.5'
     replay_ratio = 0.1
-    norm_type = 'LN'
+    norm_type = 'BN'
 
     collector_env_num = 4
     n_episode = 4
@@ -266,8 +266,9 @@ if __name__ == "__main__":
 
     
     # Set NCCL timeout to prevent watchdog hang due to unbalanced data collection speeds
-    os.environ.setdefault('NCCL_TIMEOUT', '480') 
-    os.environ.setdefault('NCCL_BLOCKING_WAIT', '1')
+    os.environ['NCCL_TIMEOUT'] = '600'                
+    os.environ['NCCL_BLOCKING_WAIT'] = '1'          
+    os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1' 
     
     for seed in [0]:
         configs = generate_configs( env_id_list=env_id_list, env_configurations=env_configurations, 

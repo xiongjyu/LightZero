@@ -87,7 +87,7 @@ class MuZeroCollector(ISerialCollector):
             self._logger, _ = build_logger(
                 path=f'./{self._exp_name}/log/{self._instance_name}', name=self._instance_name, need_tb=False
             )
-            self._tb_logger = None
+            self._tb_logger = tb_logger
 
         self.policy_config = policy_config
         self.collect_with_pure_policy = self.policy_config.collect_with_pure_policy
