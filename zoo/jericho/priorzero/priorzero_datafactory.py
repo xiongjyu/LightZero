@@ -717,6 +717,11 @@ class DataProcessor:
         """
         Get LLM prior scores for actions.
 
+        This function correctly applies temperature at the ACTION level (not token level):
+        1. Compute raw action scores (sum of token logprobs)
+        2. Apply temperature scaling across actions for the same state
+        3. Compute policy entropy (action-level entropy, not token-level)
+
         Args:
             states: List of current state observations
             valid_actions_list: List of valid actions for each state
@@ -750,19 +755,96 @@ class DataProcessor:
                 all_labels.append(action)
                 all_prefix_cots.append(prefix)
 
-        scores, old_action_logprob = self._score_labels_with_prompt_logprobs(all_prompts, all_labels, all_prefix_cots)
-        llm_prior_per_seq, llm_prior_per_tok, idx = [],[], 0
+        # Get raw scores (sum of token logprobs, no temperature/softmax yet)
+        raw_scores, old_action_logprob = self._score_labels_with_prompt_logprobs(all_prompts, all_labels, all_prefix_cots)
+
+        # Get current temperature from scheduler
+        current_temperature = self.temperature  # Default temperature
+        if self.prior_temp_scheduler is not None:
+            current_temperature = self.prior_temp_scheduler.get_temperature()
+
+        # Apply temperature and compute policy entropy at ACTION level
+        llm_prior_per_seq, llm_prior_per_tok = [], []
+        idx = 0
+        all_policy_entropies = []  # Track policy entropies for adaptive scheduling
 
         for prompt, actions, prefix in zip(prompt_list, valid_actions_list, prefix_cots):
             actions2 = actions if "go" in actions else (actions + ["go"])
+            num_actions = len(actions2)
+
+            # Get scores for this state's actions
+            state_raw_scores = raw_scores[idx : idx + num_actions]
+            state_old_logprobs = old_action_logprob[idx : idx + num_actions]
+
+            # Apply temperature scaling at ACTION level
+            if current_temperature != 1.0:
+                state_scores_tensor = torch.tensor(state_raw_scores, dtype=torch.float32)
+
+                # Apply temperature: logits / T
+                scaled_scores = state_scores_tensor / current_temperature
+
+                # Compute action probabilities via softmax
+                # This is the CORRECT level: softmax over actions, not tokens!
+                action_log_probs = torch.log_softmax(scaled_scores, dim=0)
+                action_probs = torch.exp(action_log_probs)
+
+                # Compute POLICY ENTROPY: H(π(·|s)) = -Σ π(a|s) log π(a|s)
+                # This measures the agent's uncertainty over action choices
+                policy_entropy = -(action_probs * action_log_probs).sum().item()
+                all_policy_entropies.append(policy_entropy)
+
+                # Use temperature-scaled scores for prior
+                state_scores = action_log_probs.tolist()
+            else:
+                # No temperature scaling: use raw scores
+                # Still need to normalize for proper probability distribution
+                state_scores_tensor = torch.tensor(state_raw_scores, dtype=torch.float32)
+                action_log_probs = torch.log_softmax(state_scores_tensor, dim=0)
+                action_probs = torch.exp(action_log_probs)
+
+                policy_entropy = -(action_probs * action_log_probs).sum().item()
+                all_policy_entropies.append(policy_entropy)
+
+                state_scores = action_log_probs.tolist()
+
+            # Build dictionaries for this state
             tmp_dict = {}
             tmp_dict2 = {}
-            for action in actions2:
-                tmp_dict[action] = scores[idx]
-                tmp_dict2[action] = old_action_logprob[idx]
-                idx = idx + 1
+            for i, action in enumerate(actions2):
+                tmp_dict[action] = state_scores[i]  # Temperature-scaled log prob
+                tmp_dict2[action] = state_old_logprobs[i]  # Original token logprobs for PPO
+
             llm_prior_per_seq.append(tmp_dict)
             llm_prior_per_tok.append(tmp_dict2)
+            idx += num_actions
+
+        # Update temperature scheduler with average POLICY entropy
+        if self.prior_temp_scheduler is not None and all_policy_entropies:
+            avg_policy_entropy = sum(all_policy_entropies) / len(all_policy_entropies)
+            new_temperature = self.prior_temp_scheduler.step(entropy=avg_policy_entropy)
+
+            # Log temperature and entropy statistics
+            if self.rank == 0 and self.prior_temp_scheduler.current_step % 10 == 0:
+                stats = self.prior_temp_scheduler.get_stats()
+                print(
+                    f"[Prior Temperature] step={stats['temperature_step']} | "
+                    f"temp={stats['prior_temperature']:.3f} | "
+                    f"policy_entropy={avg_policy_entropy:.3f} | "
+                    f"progress={stats['temperature_progress']:.2%}"
+                )
+
+                # Log to TensorBoard
+                if self.tb_logger is not None:
+                    step = stats['temperature_step']
+                    self.tb_logger.add_scalar("prior_temp/temperature", stats['prior_temperature'], step)
+                    self.tb_logger.add_scalar("prior_temp/policy_entropy", avg_policy_entropy, step)
+                    self.tb_logger.add_scalar("prior_temp/progress", stats['temperature_progress'], step)
+                    if 'prior_avg_entropy' in stats:
+                        self.tb_logger.add_scalar("prior_temp/avg_entropy", stats['prior_avg_entropy'], step)
+                    if 'prior_target_entropy' in stats:
+                        self.tb_logger.add_scalar("prior_temp/target_entropy", stats['prior_target_entropy'], step)
+                    if 'prior_entropy_gap' in stats:
+                        self.tb_logger.add_scalar("prior_temp/entropy_gap", stats['prior_entropy_gap'], step)
 
         if self.use_cot:
             self.episode_output.append({
@@ -777,13 +859,19 @@ class DataProcessor:
             return llm_prior_per_seq, llm_prior_per_tok
 
     @torch.no_grad()
-    def _score_labels_with_prompt_logprobs(self, all_prompts: List[str], all_labels: List[str], all_prefix_cots: List[str]) -> List[float]:
-        assert len(all_prompts) == len(all_labels) == len(all_prefix_cots)
+    def _score_labels_with_prompt_logprobs(self, all_prompts: List[str], all_labels: List[str], all_prefix_cots: List[str]) -> Tuple[List[float], List[List[float]]]:
+        """
+        Compute raw log probabilities for action sequences.
 
-        # Get current temperature from scheduler
-        current_temperature = self.temperature  # Default temperature
-        if self.prior_temp_scheduler is not None:
-            current_temperature = self.prior_temp_scheduler.get_temperature()
+        This function computes the original sequence log probabilities by summing token-level logprobs.
+        It does NOT apply temperature scaling or softmax normalization at the token level.
+        Temperature and softmax should be applied at the ACTION level in get_llm_prior.
+
+        Returns:
+            scores: List of raw log probabilities (sum of token logprobs)
+            old_action_logprob: List of token-level logprobs for PPO training
+        """
+        assert len(all_prompts) == len(all_labels) == len(all_prefix_cots)
 
         sampling_params = SamplingParams(
             temperature=self.temperature,  # Keep original for generation
@@ -817,7 +905,6 @@ class DataProcessor:
 
         scores = []
         old_action_logprob = []
-        all_entropies = []  # Track entropies for adaptive scheduling
 
         for out, ids, p_len, l_len, l_no_cots_len in zip(outs, full_ids, p_lens, l_lens, l_no_cots_lens):
             prompt_logprobs = getattr(out, "prompt_logprobs", None)
@@ -843,67 +930,17 @@ class DataProcessor:
             else:
                 assert l_no_cots_len <= l_len
 
-                # IMPORTANT: Keep original logprobs for PPO training
-                original_token_lps = token_lps.copy()
-
-                # Apply temperature scaling ONLY for prior scores (MCTS root)
-                if current_temperature != 1.0:
-                    import torch
-                    token_lps_tensor = torch.tensor(token_lps, dtype=torch.float32)
-
-                    # Apply temperature scaling
-                    scaled_lps = token_lps_tensor / current_temperature
-
-                    # Compute entropy before normalization (for adaptive scheduling)
-                    probs = torch.exp(scaled_lps)
-                    entropy = -(probs * scaled_lps).sum().item()
-                    all_entropies.append(entropy)
-
-                    # Renormalize to maintain valid probability distribution
-                    scaled_lps = torch.log_softmax(scaled_lps, dim=0)
-
-                    # Use scaled logprobs for prior scores
-                    scaled_token_lps = scaled_lps.tolist()
-                else:
-                    # No temperature scaling
-                    scaled_token_lps = token_lps
-
-                # Prior scores: use temperature-scaled logprobs for MCTS exploration
+                # Compute raw sequence log probability (sum of token logprobs)
+                # This is the correct action-level score: log P(action) = sum_i log P(token_i)
                 if self.llm_prior_with_cot:
-                    scores.append(sum(scaled_token_lps) if self.reduction == "sum" else sum(scaled_token_lps) / l_len)
+                    raw_score = sum(token_lps) if self.reduction == "sum" else sum(token_lps) / l_len
                 else:
-                    scores.append(sum(scaled_token_lps[-l_no_cots_len:]) if self.reduction == "sum" else sum(scaled_token_lps[-l_no_cots_len:]) / l_no_cots_len)
+                    raw_score = sum(token_lps[-l_no_cots_len:]) if self.reduction == "sum" else sum(token_lps[-l_no_cots_len:]) / l_no_cots_len
 
-                # Old action logprob: use ORIGINAL logprobs for PPO training
-                old_action_logprob.append(original_token_lps)
+                scores.append(raw_score)
 
-        # Update temperature scheduler with average entropy
-        if self.prior_temp_scheduler is not None and all_entropies:
-            avg_entropy = sum(all_entropies) / len(all_entropies)
-            new_temperature = self.prior_temp_scheduler.step(entropy=avg_entropy)
-
-            # Log temperature and entropy statistics
-            if self.rank == 0 and self.prior_temp_scheduler.current_step % 10 == 0:
-                stats = self.prior_temp_scheduler.get_stats()
-                print(
-                    f"[Prior Temperature] step={stats['temperature_step']} | "
-                    f"temp={stats['prior_temperature']:.3f} | "
-                    f"entropy={avg_entropy:.3f} | "
-                    f"progress={stats['temperature_progress']:.2%}"
-                )
-
-                # Log to TensorBoard
-                if self.tb_logger is not None:
-                    step = stats['temperature_step']
-                    self.tb_logger.add_scalar("prior_temp/temperature", stats['prior_temperature'], step)
-                    self.tb_logger.add_scalar("prior_temp/entropy", avg_entropy, step)
-                    self.tb_logger.add_scalar("prior_temp/progress", stats['temperature_progress'], step)
-                    if 'prior_avg_entropy' in stats:
-                        self.tb_logger.add_scalar("prior_temp/avg_entropy", stats['prior_avg_entropy'], step)
-                    if 'prior_target_entropy' in stats:
-                        self.tb_logger.add_scalar("prior_temp/target_entropy", stats['prior_target_entropy'], step)
-                    if 'prior_entropy_gap' in stats:
-                        self.tb_logger.add_scalar("prior_temp/entropy_gap", stats['prior_entropy_gap'], step)
+                # Keep original token-level logprobs for PPO training
+                old_action_logprob.append(token_lps)
 
         return scores, old_action_logprob
 

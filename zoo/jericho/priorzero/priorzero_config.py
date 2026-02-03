@@ -170,7 +170,8 @@ class PriorZeroLLMConfig:
     reward_func: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "format_reward": True,
         "format_param": EasyDict(
-            {"format_weight": 0.1, }
+            # {"format_weight": 0.1, }
+            {"format_weight": 0.5, }
         ),
     }))
     # advantage = target_value - pred_value 
@@ -183,12 +184,28 @@ class PriorZeroLLMConfig:
     kl_estimator: str = "k3"
 
     # Entropy loss for exploration bonus
-    entropy_loss_coef: Optional[float] = 0.01  # None = disabled, typical values: 0.001-0.01
-    # entropy_loss_coef: Optional[float] = None  # None = disabled, typical values: 0.001-0.01  
+    # entropy_loss_coef: Optional[float] = 0.01  # None = disabled, typical values: 0.001-0.01
+    entropy_loss_coef: Optional[float] = None  # None = disabled, typical values: 0.001-0.01  
 
     # LLM Prior Mixing Configuration
+    # ===== baseline root policy-head-logits =====
+    # prior_mixing_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+    #     'enable_soft_mixing': True,              # Enable soft mixing instead of hard override
+    #     # 'mixing_alpha': 0.5,                     # Weight for LLM prior (0=network only, 1=LLM only)
+    #     'mixing_alpha': 0.,                     # Weight for LLM prior (0=network only, 1=LLM only)
+    #     'alpha_schedule': None,                  # 'linear', 'cosine', 'exponential', or None (fixed)
+    #     # 'alpha_schedule': 'cosine',  # Smooth decay          
+    #     'alpha_init': 0.8,                       # Initial alpha (high LLM influence)
+    #     'alpha_final': 0.2,                      # Final alpha (low LLM influence)
+    #     'alpha_decay_steps': 10000,              # Steps to decay from init to final
+    #     'enable_clip_prior': True,               # Enable clipping of LLM prior probabilities
+    #     'clip_prior_epsilon': 0.01,              # Minimum probability for each action (exploration)
+    # }))
+
+    # =====llm prior as root policy-logits =====
     prior_mixing_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        'enable_soft_mixing': True,              # Enable soft mixing instead of hard override
+        # 'enable_soft_mixing': True,              # Enable soft mixing instead of hard override
+        'enable_soft_mixing': False,              # Enable soft mixing instead of hard override
         # 'mixing_alpha': 0.5,                     # Weight for LLM prior (0=network only, 1=LLM only)
         'mixing_alpha': 0.,                     # Weight for LLM prior (0=network only, 1=LLM only)
         'alpha_schedule': None,                  # 'linear', 'cosine', 'exponential', or None (fixed)
@@ -488,9 +505,9 @@ def get_priorzero_config(
 
         # Build exp_name
         exp_name = (
-            f"data_priorzero/pz_{env_id}_{model_key}_"
+            f"data_priorzero/0204/pz_{env_id}_{model_key}_"
             f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_"
-            f"{entropy_str}_{mixing_str}_{clip_str}_seed{seed}"
+            f"{entropy_str}_{mixing_str}_{clip_str}_frw05_seed{seed}"
         )
 
         # Update config with generated exp_name
