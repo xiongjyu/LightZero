@@ -184,8 +184,8 @@ class PriorZeroLLMConfig:
     kl_estimator: str = "k3"
 
     # Entropy loss for exploration bonus
-    # entropy_loss_coef: Optional[float] = 0.01  # None = disabled, typical values: 0.001-0.01
-    entropy_loss_coef: Optional[float] = None  # None = disabled, typical values: 0.001-0.01  
+    entropy_loss_coef: Optional[float] = 0.01  # None = disabled, typical values: 0.001-0.01
+    # entropy_loss_coef: Optional[float] = None  # None = disabled, typical values: 0.001-0.01  
 
     # LLM Prior Mixing Configuration
     # ===== baseline root policy-head-logits =====
@@ -476,6 +476,8 @@ def get_priorzero_config(
         # Format reward info
         fmt_rew_str = "fmt" if llm_config.reward_func.format_reward else "nofmt"
 
+        fmt_rew_str = fmt_rew_str + str(llm_config.reward_func.format_param.format_weight) # TODO
+
         # Entropy loss coefficient info
         entropy_coef = llm_config.entropy_loss_coef
         if entropy_coef is None:
@@ -507,7 +509,7 @@ def get_priorzero_config(
         exp_name = (
             f"data_priorzero/0204/pz_{env_id}_{model_key}_"
             f"{cot_str}_{adv_type_short}_{prior_temp_str}_{fmt_rew_str}_"
-            f"{entropy_str}_{mixing_str}_{clip_str}_frw05_seed{seed}"
+            f"{entropy_str}_{mixing_str}_{clip_str}_seed{seed}"
         )
 
         # Update config with generated exp_name
