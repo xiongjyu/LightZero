@@ -222,7 +222,9 @@ def train_unizero_multitask_ddp(
         # Perform data collection and evaluation for each task on this rank
         for idx, (cfg, collector, evaluator, replay_buffer) in enumerate(
                 zip(cfgs, collectors, evaluators, game_buffers)):
-
+            
+            policy_config = cfg.policy
+            
             # Log buffer memory usage
             log_buffer_memory_usage(learner.train_iter, replay_buffer, tb_logger, cfg.policy.task_id)
 

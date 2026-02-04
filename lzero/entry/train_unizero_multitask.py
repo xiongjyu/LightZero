@@ -233,6 +233,7 @@ def train_unizero_multitask(
             collector._policy.reset(reset_init_data=True, task_id=current_task_id)
             
             new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs=collect_kwargs)
+            logging.info(f'Finished data collection for task {cfg.policy.task_id}, collected {len(new_data[0]) if new_data else 0} segments')
 
             replay_buffer.push_game_segments(new_data)
             replay_buffer.remove_oldest_data_to_fit()
