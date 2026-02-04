@@ -3,7 +3,7 @@ from easydict import EasyDict
 def create_config(env_id, max_steps, max_action_num, action_space_size, collector_env_num, evaluator_env_num, n_episode,
                   reanalyze_ratio, batch_size, num_unroll_steps, infer_context_length,
                   buffer_reanalyze_freq, reanalyze_batch_size, reanalyze_partition, total_batch_size,
-                  num_layers, model_name, replay_ratio, norm_type, update_per_collect,  
+                  num_layers, model_name, replay_ratio, update_per_collect,  
                   collect_num_simulations, eval_num_simulations):
     return EasyDict(dict(
         env=dict(
@@ -47,7 +47,6 @@ def create_config(env_id, max_steps, max_action_num, action_space_size, collecto
                 action_space_size=action_space_size,
                 encoder_url=model_name,
                 model_type="mlp",
-                norm_type=norm_type,
                 continuous_action_space=False,
                 world_model_cfg=dict(
                     final_norm_option_in_obs_head='LayerNorm',
@@ -164,7 +163,7 @@ def create_config(env_id, max_steps, max_action_num, action_space_size, collecto
 def generate_configs(env_id_list, env_configurations, collector_env_num, n_episode, evaluator_env_num,
                      reanalyze_ratio, batch_size, num_unroll_steps, infer_context_length,
                      seed, buffer_reanalyze_freq, reanalyze_batch_size, reanalyze_partition,
-                     total_batch_size, num_layers, model_name, replay_ratio, norm_type, collect_num_simulations, eval_num_simulations):
+                     total_batch_size, num_layers, model_name, replay_ratio, collect_num_simulations, eval_num_simulations):
     """
     Overview:
         Generates a list of configurations for all specified tasks.
@@ -194,7 +193,7 @@ def generate_configs(env_id_list, env_configurations, collector_env_num, n_episo
             num_unroll_steps=num_unroll_steps, infer_context_length=infer_context_length, buffer_reanalyze_freq=buffer_reanalyze_freq,
             reanalyze_batch_size=reanalyze_batch_size, reanalyze_partition=reanalyze_partition, total_batch_size=total_batch_size,
             num_layers=num_layers, model_name=model_name, replay_ratio=replay_ratio,
-            norm_type=norm_type, update_per_collect=update_per_collect, collect_num_simulations=collect_num_simulations, eval_num_simulations=eval_num_simulations,
+            update_per_collect=update_per_collect, collect_num_simulations=collect_num_simulations, eval_num_simulations=eval_num_simulations,
         )
         config.policy.task_id = task_id
         config.exp_name = exp_name_prefix + f"{env_id.split('.z5')[0]}_seed{seed}"
@@ -244,7 +243,6 @@ if __name__ == "__main__":
     # Model name or path - configurable according to the predefined model paths or names
     model_name: str = 'BAAI/bge-base-en-v1.5'
     replay_ratio = 0.1
-    norm_type = 'BN'
 
     collector_env_num = 4
     n_episode = 4
@@ -279,8 +277,8 @@ if __name__ == "__main__":
                                     seed=seed, buffer_reanalyze_freq=buffer_reanalyze_freq,
                                     reanalyze_batch_size=reanalyze_batch_size, reanalyze_partition=reanalyze_partition,
                                     total_batch_size=total_batch_size, num_layers=num_layers, 
-                                    model_name=model_name, replay_ratio=replay_ratio, norm_type=norm_type,
-                                    collect_num_simulations=collect_num_simulations, eval_num_simulations=eval_num_simulations)
+                                    model_name=model_name, replay_ratio=replay_ratio, collect_num_simulations=collect_num_simulations, 
+                                    eval_num_simulations=eval_num_simulations)
 
         with DDPContext():
             train_unizero_multitask_ddp(configs, seed=seed, max_env_step=max_env_step) 
