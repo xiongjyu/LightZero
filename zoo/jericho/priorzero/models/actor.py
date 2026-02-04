@@ -258,6 +258,9 @@ class BatchPPOTrainer:
             clip_ratio_item = clip_ratio.detach().float().item()
             approx_kl_item = approx_kl.detach().float().item()
             kl_loss_item = kl_loss.detach().float().item()
+            input_response_length_item = micro_batch["attention_mask"].sum().detach().float().item() / micro_batch["attention_mask"].shape[0]
+            response_length_item = micro_batch["action_mask"].sum().detach().float().item() / micro_batch["action_mask"].shape[0]
+            input_length_item = input_response_length_item - response_length_item
             
             pbar.set_postfix({
                 "policy_loss": policy_loss_item,
@@ -271,6 +274,8 @@ class BatchPPOTrainer:
             metrics_buffer["clip_ratio"] += clip_ratio_item
             metrics_buffer["approx_kl"] +=  approx_kl_item
             metrics_buffer["kl"] += kl_loss_item
+            metrics_buffer["input_length"] += input_length_item
+            metrics_buffer["response_length"] += response_length_item
             
             log_status = micro_batch["log_status"]
             other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}

@@ -279,7 +279,7 @@ def train_priorzero(
                 priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
                 logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch)
-                trainer.train_batch(train_samples)
+                trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
                 torch_dist_barrier_and_cuda_sync()
             
 

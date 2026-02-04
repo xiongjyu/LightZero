@@ -281,7 +281,7 @@ def train_priorzero(
             with prof.block("train_llm", rank=rank):
                 logger.info(f"[Rank {rank}] train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'None'}. Starting LLM training...")
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True)
-                trainer.train_batch(train_samples)
+                trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
                 torch_dist_barrier_and_cuda_sync()
         else:
             continue

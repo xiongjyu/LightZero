@@ -97,7 +97,7 @@ class PriorZeroLLMTrainer:
             self._logger = None
             self._tb_logger = None
     
-    def train_batch(self, data) -> Dict[str, float]:
+    def train_batch(self, data, collect_env_steps) -> Dict[str, float]:
         if data is None:
             return {}
         input_ids, attention_mask, action_mask, advantage, old_lp, log_status = data
@@ -139,6 +139,7 @@ class PriorZeroLLMTrainer:
                     if k == 'iter':
                         continue
                     self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), int(tmp_dict['iter']))
+                    self._tb_logger.add_scalar(f"learner_llm_envstep/{k}", float(v), int(collect_env_steps))
                     self.global_step = max(self.global_step, int(tmp_dict['iter']))
                     
         if self.strategy.is_rank_0():
