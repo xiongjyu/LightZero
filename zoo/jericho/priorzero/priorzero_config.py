@@ -69,6 +69,7 @@ def print_available_models():
 
 @dataclass
 class PriorZeroLLMConfig:
+    model_name_or_path: str = "Qwen2.5-3B-Instruct"
     local_rank: int = -1
     # 训练指标的相关参数
     enable_sft: bool = False
@@ -97,6 +98,7 @@ class PriorZeroLLMConfig:
     top_p: float = 1.0
     seed: int = 0
     reduction: str = "mean"
+    llm_prior_temperature: float = 1.0  # LLM prior 分布的温度参数
     
     # 训练相关参数
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练
@@ -112,7 +114,7 @@ class PriorZeroLLMConfig:
     
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 640 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    micro_train_batch_size: int = 8 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
     broadcast_every: int = 1 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
     learning_rate: float = 5e-7

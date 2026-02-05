@@ -107,11 +107,7 @@ class PriorZeroCollector(OriginalCollector):
         self.history_buffers = defaultdict(
             lambda: deque(maxlen=self.llm_cfg.history_length)
         )
-
-        # Where to persist sampled LLM outputs during collect
-        self._llm_output_log_path = f"./{self._exp_name}/log/collector/llm_output.log"
-        self._llm_call_count = 0
-        self._llm_prior_req_counter = 0
+        self.llm_prior_temperature = llm_config.llm_prior_temperature
 
         self._logger.info("✓ PriorZeroCollector initialized with vLLM engine")
         self._logger.info(f"  - History length: {self.llm_cfg.history_length}")
@@ -321,7 +317,10 @@ class PriorZeroCollector(OriginalCollector):
                             histories=histories_list,
                             return_cot=True  # Request CoT prefixes for reuse in training
                         )
-
+                        for env_id, llm_prior in enumerate(llm_prior_per_seq):
+                            scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
+                            llm_prior_per_seq[env_id] = scaled_llm_prior
+                        
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
                     'valid_actions_list': valid_actions_list,
@@ -628,4 +627,29 @@ class PriorZeroCollector(OriginalCollector):
                 self._tb_logger.add_scalar(tb_prefix_iter + k, v, train_iter)
                 self._tb_logger.add_scalar(tb_prefix_step + k, v, self._total_envstep_count)
             
-    
+    def apply_temperature_scaling(self, logprobs_dict: dict, return_logprobs: bool = True) -> dict:
+        """
+        对 Logprobs 字典进行温度缩放，控制分布的平缓程度。
+        """
+        import math
+        T = self.llm_prior_temperature
+        if T <= 1e-8:
+            max_key = max(logprobs_dict, key=logprobs_dict.get)
+            return {k: (0.0 if k != max_key else 1.0) for k in logprobs_dict}
+
+        scaled_logits = {k: v / T for k, v in logprobs_dict.items()}
+
+        max_val = max(scaled_logits.values())
+        sum_exp = sum(math.exp(v - max_val) for v in scaled_logits.values())
+        log_sum_exp = math.log(sum_exp) + max_val
+
+        result = {}
+        for k, v in scaled_logits.items():
+            normalized_logprob = v - log_sum_exp
+            
+            if return_logprobs:
+                result[k] = normalized_logprob
+            else:
+                result[k] = math.exp(normalized_logprob)
+
+        return result
