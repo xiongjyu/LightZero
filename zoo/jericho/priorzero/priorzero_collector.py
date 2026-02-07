@@ -123,8 +123,9 @@ class PriorZeroCollector(OriginalCollector):
         pad_obs_lst = game_segments[i].obs_segment[beg_index:end_index]
         pad_raw_obs_lst = game_segments[i].raw_obs_segment[beg_index:end_index]
         pad_history_obs_lst = game_segments[i].history_obs_segment[beg_index:end_index]
-        pad_action_logprob_lst = game_segments[i].action_logprob_segment[beg_index:end_index]
+        pad_llm_prior_per_tok_lst = game_segments[i].llm_prior_per_tok_segment[beg_index:end_index]
         pad_cot_prefix_lst = game_segments[i].cot_prefix_segment[beg_index:end_index]  # CoT reuse
+        pad_llm_action_lst = game_segments[i].llm_action_segment[beg_index:end_index] 
 
         # NOTE: Specific padding logic for UniZero.
         pad_action_lst = game_segments[i].action_segment[:self.policy_config.num_unroll_steps + self.policy_config.td_steps]
@@ -149,22 +150,25 @@ class PriorZeroCollector(OriginalCollector):
             last_game_segments[i].pad_over(
                 pad_obs_lst, pad_reward_lst, pad_action_lst, pad_root_values_lst, pad_child_visits_lst,
                 next_segment_improved_policy=pad_improved_policy_prob,
-                next_segment_cot_prefix=pad_cot_prefix_lst  # CoT reuse
+                next_segment_cot_prefix=pad_cot_prefix_lst,  # CoT reuse
+                next_segment_llm_action=pad_llm_action_lst
             )
         else:
             if self.policy_config.use_ture_chance_label_in_chance_encoder:
                 last_game_segments[i].pad_over(
                     pad_obs_lst, pad_reward_lst, pad_action_lst, pad_root_values_lst, pad_child_visits_lst,
                     next_chances=chance_lst, next_segment_raw_obs=pad_raw_obs_lst,
-                    next_segment_history_obs=pad_history_obs_lst, next_segment_action_logprob=pad_action_logprob_lst,
-                    next_segment_cot_prefix=pad_cot_prefix_lst  # CoT reuse
+                    next_segment_history_obs=pad_history_obs_lst, next_segment_llm_prior_per_tok=pad_llm_prior_per_tok_lst,
+                    next_segment_cot_prefix=pad_cot_prefix_lst,  # CoT reuse
+                    next_segment_llm_action=pad_llm_action_lst
                 )
             else:
                 last_game_segments[i].pad_over(
                     pad_obs_lst, pad_reward_lst, pad_action_lst, pad_root_values_lst, pad_child_visits_lst,
                     next_segment_raw_obs=pad_raw_obs_lst, next_segment_history_obs=pad_history_obs_lst,
-                    next_segment_action_logprob=pad_action_logprob_lst,
-                    next_segment_cot_prefix=pad_cot_prefix_lst  # CoT reuse
+                    next_segment_llm_prior_per_tok=pad_llm_prior_per_tok_lst,
+                    next_segment_cot_prefix=pad_cot_prefix_lst,  # CoT reuse
+                    next_segment_llm_action=pad_llm_action_lst
                 )
 
         last_game_segments[i].game_segment_to_array()
@@ -256,7 +260,7 @@ class PriorZeroCollector(OriginalCollector):
             ]
             observation_window_stack[env_id].extend(initial_frames)
             game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(init_obs[env_id]), 
-                                        init_history_obs=list(self.history_buffers[env_id]), init_action_logprob=None, init_cot_prefix=None)
+                                        init_history_obs=list(self.history_buffers[env_id]))
 
         search_values_lst = [[] for _ in range(env_nums)]
         pred_values_lst = [[] for _ in range(env_nums)]
@@ -396,8 +400,9 @@ class PriorZeroCollector(OriginalCollector):
                         timestep=to_ndarray(obs_new.get('timestep', -1)),
                         raw_obs_text=extract_raw_obs_text(obs_new),
                         history_obs=list(self.history_buffers[env_id]),
-                        action_logprob=llm_prior_per_tok[env_id],
-                        cot_prefix=cot_prefixes[env_id]
+                        llm_prior_per_tok=llm_prior_per_tok[env_id],
+                        cot_prefix=cot_prefixes[env_id],
+                        llm_action=action
                     )
 
                     # Update state
@@ -450,7 +455,7 @@ class PriorZeroCollector(OriginalCollector):
                             config=self.policy_config,
                             task_id=self.task_id
                         )
-                        game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(obs_new), init_history_obs=list(self.history_buffers[env_id]), init_action_logprob=None)
+                        game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(obs_new), init_history_obs=list(self.history_buffers[env_id]))
 
                     self._env_info[env_id]['step'] += 1
                     if llm_prior_per_seq[env_id] is not None:
@@ -517,7 +522,7 @@ class PriorZeroCollector(OriginalCollector):
                         config=self.policy_config,
                         task_id=self.task_id
                     )
-                    game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(init_obs[env_id]), init_history_obs=list(self.history_buffers[env_id]), init_action_logprob=None)
+                    game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(init_obs[env_id]), init_history_obs=list(self.history_buffers[env_id]))
                     last_game_segments[env_id] = None
                     last_game_priorities[env_id] = None
 

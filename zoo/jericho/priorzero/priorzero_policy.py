@@ -40,7 +40,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         current_batch, target_batch, train_iter = data
 
         # CoT reuse optimization: unpack cot_prefix_list (12 elements total)
-        obs_batch_ori, action_batch, target_action_batch, mask_batch, batch_index_tensor, weights, make_time, timestep_batch, raw_obs_list, history_obs_list, action_logprob_list, cot_prefix_list = current_batch
+        obs_batch_ori, action_batch, target_action_batch, mask_batch, batch_index_tensor, weights, make_time, timestep_batch, raw_obs_list, history_obs_list, llm_prior_per_tok_list, cot_prefix_list, llm_action_list = current_batch
         target_reward, target_value, target_policy = target_batch
         
         obs_batch, obs_target_batch = prepare_obs(obs_batch_ori, self._cfg)

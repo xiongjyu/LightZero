@@ -7,12 +7,6 @@ import torch
 
 
 class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
-    """
-    [PRIORZERO-OPTIMIZED]
-    More efficient version that avoids double sampling by modifying _make_batch minimally.
-
-    This version uses a monkey-patch approach to intercept orig_data during parent's _make_batch call.
-    """
 
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -23,7 +17,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         Fetch latest batch for LLM training.
 
         Returns:
-            [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values, cot_prefix_list]
+            [raw_obs_list, history_obs_list, llm_prior_per_tok_list, batch_target_values, cot_prefix_list, llm_action]
             CoT prefix list is added for CoT reuse optimization.
         """
         policy._target_model.to(self._cfg.device)
@@ -33,7 +27,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             batch_size, self._cfg.reanalyze_ratio, fetch_latest=True
         )
 
-        obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, action_logprob_list, cot_prefix_list = current_batch
+        obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, llm_prior_per_tok_list, cot_prefix_list, llm_action_list = current_batch
 
         # Standard processing
         batch_rewards, batch_target_values, batch_pred_values = self._compute_target_reward_value_and_pred_value(
@@ -46,7 +40,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
 
         # CoT reuse optimization: return cot_prefix_list
         # IMPORTANT: Validate return value before returning to ensure broadcast compatibility
-        result = [raw_obs_list, history_obs_list, action_logprob_list, batch_target_values, batch_pred_values, cot_prefix_list]
+        result = [raw_obs_list, history_obs_list, llm_prior_per_tok_list, batch_target_values, batch_pred_values, cot_prefix_list, llm_action_list]
 
         return result
     
@@ -55,13 +49,11 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         policy._target_model.to(self._cfg.device)
         policy._target_model.eval()
 
-        # Call parent's _make_batch (which will trigger our hook)
         reward_value_context, policy_re_context, policy_non_re_context, current_batch = self._make_batch(
             batch_size, self._cfg.reanalyze_ratio
         )
 
-        # CoT reuse optimization: unpack cot_prefix_list (12 elements total)
-        obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, action_logprob_list, cot_prefix_list = current_batch
+        obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, llm_prior_per_tok_list, cot_prefix_list, llm_action_list = current_batch
         # Standard processing
         batch_rewards, batch_target_values = self._compute_target_reward_value(
             reward_value_context, policy._target_model, current_batch[2], timestep_list
@@ -86,13 +78,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         return [current_batch, target_batch]
 
     def _make_batch(self, batch_size: int, reanalyze_ratio: float, fetch_latest: bool = False) -> Tuple[Any]:
-        """
-        [PRIORZERO-OPTIMIZED]
-        Minimally modified to cache game_segment_list during sampling.
 
-        This is a full override of parent's _make_batch to avoid double sampling.
-        Code is mostly copied from parent, with one key addition: caching game_segments.
-        """
         # Sample original data
         if not fetch_latest:
             if self.sample_type == 'transition':
@@ -111,8 +97,9 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         batch_size = len(batch_index_list)
         obs_list, action_list, mask_list = [], [], []
         raw_obs_list, history_obs_list = [], []
-        action_logprob_list = []
+        llm_prior_per_tok_list = []
         cot_prefix_list = []  # CoT reuse optimization
+        llm_action_list = []
         timestep_list = []
         bootstrap_action_list = []
 
@@ -148,14 +135,16 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             history_obs_list.append(game_segment_list[i].get_unroll_histroy_obs(
                 pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
             ))
-            action_logprob_list.append(game_segment_list[i].get_unroll_action_logprob(
+            llm_prior_per_tok_list.append(game_segment_list[i].get_unroll_llm_prior_per_tok(
                 pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
             ))
-            cot_prefix = game_segment_list[i].get_unroll_cot_prefix(
+            cot_prefix_list.append(game_segment_list[i].get_unroll_cot_prefix(
                 pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
-            )
-            cot_prefix_list.append(cot_prefix)
-
+            ))
+            llm_action_list.append(game_segment_list[i].get_unroll_llm_action(
+                pos_in_game_segment_list[i], num_unroll_steps=self._cfg.num_unroll_steps, padding=True
+            ))
+            
             action_list.append(actions_tmp)
             mask_list.append(mask_tmp)
             timestep_list.append(timestep_tmp)
@@ -175,15 +164,30 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         current_batch = [obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list]
         for i in range(len(current_batch)):
             current_batch[i] = np.asarray(current_batch[i])
+        # 检查 vllm和policy_model的输入上下文是否一致
+        assert len(raw_obs_list) == len(history_obs_list) == len(llm_prior_per_tok_list) == len(cot_prefix_list) == len(llm_action_list)
+        B, T = len(raw_obs_list), len(raw_obs_list[0])
+        for b in range(B):
+            for t in range(T - 1):
+                current_obs = raw_obs_list[b][t]
+                current_hist = history_obs_list[b][t]
+                
+                old_prefix_cot = llm_prior_per_tok_list[b][t+1]['prefix_cot']
+                old_current_obs = llm_prior_per_tok_list[b][t+1]['current_obs']
+                old_history = llm_prior_per_tok_list[b][t+1]['history']
+                old_logprob = llm_prior_per_tok_list[b][t+1]['old_action_logprob']
+                cot_prefix = cot_prefix_list[b][t+1]
+                llm_action = llm_action_list[b][t+1]
+                
+                assert llm_action in old_logprob
+                assert old_current_obs == current_obs and old_history == current_hist and old_prefix_cot == cot_prefix           
 
         current_batch.append(raw_obs_list)
         current_batch.append(history_obs_list)
-        current_batch.append(action_logprob_list)
+        current_batch.append(llm_prior_per_tok_list)
         current_batch.append(cot_prefix_list)  # CoT reuse optimization
+        current_batch.append(llm_action_list)
 
-        # Validate current_batch has exactly 12 elements before returning
-        # assert len(current_batch) == 12, f"current_batch must have 12 elements, got {len(current_batch)}. Missing: {12 - len(current_batch)} elements"
-        # print(f"[DEBUG] _make_batch created current_batch with {len(current_batch)} elements (expected 12)")
         total_transitions = self.get_num_of_transitions()
 
         if not fetch_latest:
