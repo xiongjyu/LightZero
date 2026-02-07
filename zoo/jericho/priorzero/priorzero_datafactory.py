@@ -529,7 +529,45 @@ class DataProcessor:
             raw_obs_list, history_obs_list, action_logprob_list, pred_value, target_value, cot_prefix_list
         )
         random.shuffle(samples)
+
         if ddp:
+            # [CRITICAL FIX] DDP模式下需要同步样本数，确保所有rank的迭代数一致
+            # 否则会导致NCCL collective timeout
+            local_num_samples = len(samples)
+
+            if self.world_size > 1 and dist.is_initialized():
+                # 收集所有rank的样本数
+                num_samples_tensor = torch.tensor([local_num_samples], dtype=torch.long, device='cuda')
+                gathered_nums = [torch.zeros_like(num_samples_tensor) for _ in range(self.world_size)]
+                dist.all_gather(gathered_nums, num_samples_tensor)
+
+                # 转换为Python list
+                all_num_samples = [int(t.item()) for t in gathered_nums]
+                min_num_samples = min(all_num_samples)
+                max_num_samples = max(all_num_samples)
+
+                if self.rank == 0:
+                    print(f"[DDP Sample Sync] Samples per rank: {all_num_samples}")
+                    print(f"[DDP Sample Sync] Min: {min_num_samples}, Max: {max_num_samples}, Diff: {max_num_samples - min_num_samples}")
+
+                # 如果样本数不一致，截断到最小值以确保一致性
+                if max_num_samples != min_num_samples:
+                    if local_num_samples > min_num_samples:
+                        samples = samples[:min_num_samples]
+                        print(f"[DDP Sample Sync] Truncating Rank {self.rank} from {local_num_samples} to {min_num_samples} samples")
+                    elif local_num_samples < min_num_samples:
+                        # 理论上不应该到这里，因为我们截断到最小值
+                        # 但为了安全，如果某个rank样本太少，用padding补齐（复制最后一个样本）
+                        if len(samples) > 0:
+                            while len(samples) < min_num_samples:
+                                samples.append(samples[-1])
+                            print(f"[DDP Sample Sync] Padding Rank {self.rank} from {local_num_samples} to {min_num_samples} samples")
+
+                # 同步后的样本数
+                final_num_samples = len(samples)
+                if self.rank == 0:
+                    print(f"[DDP Sample Sync] Final: All ranks have {final_num_samples} samples")
+
             print(f"[Rank {self.rank}] Processing {len(samples)} samples collected by Rank {self.rank}")
             real_samples = samples
         else:
