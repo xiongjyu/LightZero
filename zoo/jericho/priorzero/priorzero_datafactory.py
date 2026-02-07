@@ -297,16 +297,65 @@ class DataProcessor:
             add_generation_prompt=True,
         )
 
+    def _detect_padding_sample(self, raw_obs_list, cot_prefix_list, action_logprob_list, b, t):
+        """
+        [LAYER 3 DEFENSE] Detect if a sample contains padding data.
+
+        Padding detection heuristics:
+        1. Check for consecutive duplicate observations (unlikely in real gameplay)
+        2. Check for None values in cot_prefix (initial state marker)
+        3. Check for duplicate cot_prefix with different obs (clear misalignment)
+
+        Args:
+            raw_obs_list: List of raw observations
+            cot_prefix_list: List of CoT prefixes
+            action_logprob_list: List of action logprobs
+            b: Batch index
+            t: Time index
+
+        Returns:
+            True if padding is detected, False otherwise
+        """
+        T = len(raw_obs_list[b])
+
+        # Heuristic 1: Check for consecutive duplicates (strong padding indicator)
+        # If both obs and cot_prefix are duplicated at the same time, very likely padding
+        if t + 1 < T and raw_obs_list[b][t] == raw_obs_list[b][t + 1]:
+            # Check if cot_prefix is also duplicated
+            if cot_prefix_list is not None and t + 2 < len(cot_prefix_list[b]):
+                if cot_prefix_list[b][t + 1] == cot_prefix_list[b][t + 2]:
+                    # Double duplication is a strong signal of padding
+                    return True
+
+        # Heuristic 2: Check for None cot_prefix (should only be at t=0)
+        if t > 0 and cot_prefix_list is not None and t + 1 < len(cot_prefix_list[b]):
+            if cot_prefix_list[b][t + 1] is None:
+                return True
+
+        # Heuristic 3: Check if action_logprob is empty or None
+        if action_logprob_list is not None and t + 1 < len(action_logprob_list[b]):
+            logprob = action_logprob_list[b][t + 1]
+            if logprob is None or (isinstance(logprob, dict) and len(logprob) == 0):
+                return True
+
+        # Heuristic 4: Check for triple+ consecutive duplicates (very strong signal)
+        if t + 2 < T:
+            if (raw_obs_list[b][t] == raw_obs_list[b][t + 1] == raw_obs_list[b][t + 2]):
+                return True
+
+        return False
+
+
     def build_llm_samples(self,
         raw_obs_list: List[List[str]],
         history_obs_list: List[List[List[Tuple[str, str, float]]]],
         action_logprob_list: Optional[List[List[Any]]] = None,
-        pred_values: Optional[torch.Tensor] = None,   # [B, T-1] 
-        target_values: Optional[torch.Tensor] = None,   # [B, T-1] 
+        pred_values: Optional[torch.Tensor] = None,   # [B, T-1]
+        target_values: Optional[torch.Tensor] = None,   # [B, T-1]
         cot_prefix_list: Optional[List[List[str]]] = None,  # CoT reuse optimization
     ) -> List[Dict[str, Any]]:
         """
-        Build training samples from collected data.
+        [ENHANCED] Build training samples with padding detection and filtering.
 
         Args:
             raw_obs_list: Raw observations
@@ -324,14 +373,48 @@ class DataProcessor:
             return samples
         T = len(raw_obs_list[0])
 
+        # [LAYER 3] Statistics for monitoring
+        total_samples = 0
+        filtered_samples = 0
+        filtered_reasons = {
+            'padding': 0,
+            'empty_action': 0,
+            'extreme_logprob': 0,
+            'nan_value': 0,
+        }
+
         for b in range(B):
             for t in range(T - 1):
+                total_samples += 1
+
+                # [LAYER 3 DEFENSE] Detect and skip padding samples
+                if self._detect_padding_sample(raw_obs_list, cot_prefix_list, action_logprob_list, b, t):
+                    filtered_samples += 1
+                    filtered_reasons['padding'] += 1
+                    continue
+
                 current_obs = raw_obs_list[b][t]
                 current_hist = history_obs_list[b][t]
                 next_hist = history_obs_list[b][t + 1]
 
-                _, true_action, reward_value = next_hist[-1]
+                # Validate history structure
+                if not next_hist or len(next_hist) == 0:
+                    filtered_samples += 1
+                    filtered_reasons['empty_action'] += 1
+                    continue
+
+                try:
+                    _, true_action, reward_value = next_hist[-1]
+                except (ValueError, IndexError) as e:
+                    if self.rank == 0:
+                        self._logger.warning(f"Unexpected history structure at b={b}, t={t}: {next_hist[-1]}")
+                    filtered_samples += 1
+                    filtered_reasons['empty_action'] += 1
+                    continue
+
                 if not true_action:
+                    filtered_samples += 1
+                    filtered_reasons['empty_action'] += 1
                     continue
 
                 instruction = self.build_llm_prompt(
@@ -341,18 +424,28 @@ class DataProcessor:
                 prompt = self.build_chat_context(instruction)
                 old_logprob = None
                 if action_logprob_list is not None:
-                    old_logprob = action_logprob_list[b][t + 1][true_action]
+                    logprob_dict = action_logprob_list[b][t + 1]
+                    if isinstance(logprob_dict, dict):
+                        old_logprob = logprob_dict.get(true_action, None)
+                    else:
+                        old_logprob = None
 
                 # FIX: Filter samples with extreme logprobs to prevent ratio explosion
                 if old_logprob is not None:
                     # Skip if empty
                     if len(old_logprob) == 0:
+                        filtered_samples += 1
+                        filtered_reasons['extreme_logprob'] += 1
                         continue
                     # Skip if contains extreme values (< -50 indicates very low probability)
                     if min(old_logprob) < -50.0:
+                        filtered_samples += 1
+                        filtered_reasons['extreme_logprob'] += 1
                         continue
                     # Skip if contains NaN/Inf
                     if any(math.isnan(x) or math.isinf(x) for x in old_logprob):
+                        filtered_samples += 1
+                        filtered_reasons['nan_value'] += 1
                         continue
 
                 target_value = None
@@ -365,8 +458,12 @@ class DataProcessor:
 
                 # FIX: Skip samples with NaN/Inf values
                 if target_value is not None and (math.isnan(target_value) or math.isinf(target_value)):
+                    filtered_samples += 1
+                    filtered_reasons['nan_value'] += 1
                     continue
                 if pred_value is not None and (math.isnan(pred_value) or math.isinf(pred_value)):
+                    filtered_samples += 1
+                    filtered_reasons['nan_value'] += 1
                     continue
 
                 # CoT reuse optimization: get CoT prefix from stored data
@@ -375,6 +472,9 @@ class DataProcessor:
                 prefix_cot = None
                 if self.use_cot and cot_prefix_list is not None:
                     prefix_cot = cot_prefix_list[b][t+1]
+                    # [FIX] Handle None prefix (initial state or padding)
+                    if prefix_cot is None:
+                        prefix_cot = ""
 
                 samples.append(
                     {
@@ -388,6 +488,24 @@ class DataProcessor:
                         "prefix_cot": prefix_cot,  # CoT reuse optimization
                     }
                 )
+
+        # [LAYER 3 MONITORING] Log filtering statistics
+        if self.rank == 0 and total_samples > 0:
+            filter_rate = (filtered_samples / total_samples) * 100
+            self._logger.info(
+                f"[Sample Filtering] Total: {total_samples} | Filtered: {filtered_samples} ({filter_rate:.2f}%) | "
+                f"padding={filtered_reasons['padding']}, empty={filtered_reasons['empty_action']}, "
+                f"extreme_logprob={filtered_reasons['extreme_logprob']}, nan={filtered_reasons['nan_value']}"
+            )
+
+            # WARNING: If too many samples are filtered due to padding, something is wrong
+            if filtered_reasons['padding'] > total_samples * 0.1:  # >10% padding
+                self._logger.warning(
+                    f"⚠️  High padding rate detected ({filtered_reasons['padding']}/{total_samples} = "
+                    f"{filtered_reasons['padding']/total_samples*100:.1f}%)! "
+                    f"Check sampling strategy in game buffer."
+                )
+
         return samples
 
     def make_llm_train_samples(self, priorzero_batch, ddp: bool = False) -> List[Dict[str, Any]]:

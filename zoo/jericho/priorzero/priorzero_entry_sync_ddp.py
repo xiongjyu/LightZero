@@ -205,13 +205,15 @@ def train_priorzero(
     while True:
         cmd = 0 # 0 表示当前循环contiune, 1 表示继续，2 表示break
         priorzero_batch = None
-        if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter):
-            logger.info(f"\n[Evaluation] Rank {rank} | Iter {learner.train_iter}")
-            stop, reward = evaluator.eval(
-                save_ckpt_fn=learner.save_checkpoint,
-                train_iter=learner.train_iter,
-                envstep=collector.envstep
-            )
+        
+        # TODO: priorzero evaluator
+        # if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter):
+        #     logger.info(f"\n[Evaluation] Rank {rank} | Iter {learner.train_iter}")
+        #     stop, reward = evaluator.eval(
+        #         save_ckpt_fn=learner.save_checkpoint,
+        #         train_iter=learner.train_iter,
+        #         envstep=collector.envstep
+        #     )
                     
         if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
             vllm_engine.wake_up()

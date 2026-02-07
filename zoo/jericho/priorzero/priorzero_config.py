@@ -157,7 +157,11 @@ class PriorZeroLLMConfig:
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 640 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     # micro_train_batch_size: int = 16 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
-    micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    # micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    
+    # 2卡 1.5b mbs=2
+    micro_train_batch_size: int = 2 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+
     broadcast_every: int = 1 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
     learning_rate: float = 1e-6
@@ -188,6 +192,7 @@ class PriorZeroLLMConfig:
     # entropy_loss_coef: Optional[float] = None  # None = disabled, typical values: 0.001-0.01  
 
     # LLM Prior Mixing Configuration
+
     # ===== baseline root policy-head-logits =====
     # prior_mixing_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
     #     'enable_soft_mixing': True,              # Enable soft mixing instead of hard override
@@ -207,7 +212,7 @@ class PriorZeroLLMConfig:
         # 'enable_soft_mixing': True,              # Enable soft mixing instead of hard override
         'enable_soft_mixing': False,              # Enable soft mixing instead of hard override
         # 'mixing_alpha': 0.5,                     # Weight for LLM prior (0=network only, 1=LLM only)
-        'mixing_alpha': 0.,                     # Weight for LLM prior (0=network only, 1=LLM only)
+        'mixing_alpha': 1.,                     # Weight for LLM prior (0=network only, 1=LLM only)
         'alpha_schedule': None,                  # 'linear', 'cosine', 'exponential', or None (fixed)
         # 'alpha_schedule': 'cosine',  # Smooth decay          
         'alpha_init': 0.8,                       # Initial alpha (high LLM influence)

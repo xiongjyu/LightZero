@@ -214,12 +214,65 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         else:
             policy_non_re_context = None
 
+        # [LAYER 4 MONITORING] Track padding statistics
+        if not fetch_latest and hasattr(self, '_padding_warning_count') and self._padding_warning_count > 0:
+            print(
+                f"[Padding Monitor] {self._padding_warning_count} segments required padding adjustment in this batch. "
+                f"Consider increasing game_segment_length or reducing num_unroll_steps."
+            )
+            self._padding_warning_count = 0  # Reset counter
+
         return reward_value_context, policy_re_context, policy_non_re_context, current_batch
 
     def _clear(self):
         self.game_pos_priorities = []
         self.game_segment_buffer = []
         self.game_segment_game_pos_look_up = []
+
+    def _adjust_pos_to_avoid_padding(self, game_segment, pos_in_game_segment):
+        """
+        [CRITICAL FIX] Adjust position to ensure no padding is needed.
+
+        This prevents misalignment between raw_obs and cot_prefix caused by padding.
+
+        Args:
+            game_segment: The game segment to sample from
+            pos_in_game_segment: The initial sampled position
+
+        Returns:
+            Adjusted position that guarantees sufficient data length
+        """
+        # Calculate required length for unrolling
+        required_len = self._cfg.model.frame_stack_num + self._cfg.num_unroll_steps
+
+        # Check actual available data length
+        # CRITICAL: Must check raw_obs_segment, not action_segment!
+        # Because cot_prefix aligns with raw_obs in structure
+        actual_obs_len = len(game_segment.raw_obs_segment)
+        actual_cot_len = len(game_segment.cot_prefix_segment)
+
+        # Use the minimum of both to be safe
+        actual_len = min(actual_obs_len, actual_cot_len)
+
+        # If segment is too short, we can't avoid padding entirely
+        if actual_len < required_len:
+            # Log warning for monitoring
+            if not hasattr(self, '_padding_warning_count'):
+                self._padding_warning_count = 0
+            self._padding_warning_count += 1
+
+            # Return position 0 and accept minimal padding
+            # This is better than random position with more padding
+            return 0
+
+        # Ensure position doesn't exceed safe range
+        max_safe_pos = actual_len - required_len
+
+        if pos_in_game_segment > max_safe_pos:
+            # Clamp to safe range
+            pos_in_game_segment = np.random.randint(0, max_safe_pos + 1)
+
+        return pos_in_game_segment
     
     
     def _fetch_latest_orig_data(self, batch_size: int) -> Tuple:
@@ -271,7 +324,10 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             # Indices exceeding `game_segment_length` are padded with the next segment and are not updated
             # in the current implementation. Therefore, we need to sample `pos_in_game_segment` within
             # [0, game_segment_length - num_unroll_steps] to avoid padded data.
-            
+
+            # [LAYER 1 FIX] Adjust position to avoid padding-induced misalignment
+            pos_in_game_segment = self._adjust_pos_to_avoid_padding(game_segment, pos_in_game_segment)
+
             if self._cfg.action_type == 'varied_action_space':
                 # For some environments (e.g., Jericho), the action space size may be different.
                 # To ensure we can always unroll `num_unroll_steps` steps starting from the sampled position (without exceeding segment length),
