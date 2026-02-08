@@ -134,6 +134,7 @@ class PriorZeroLLMConfig:
     advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
+    entropy_loss_coef: float = 0.0
     kl_estimator: str = "k3"
     
     train_llm_after_wm_warm_step: int = int(1e2)

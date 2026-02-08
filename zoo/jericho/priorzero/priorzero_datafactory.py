@@ -573,10 +573,9 @@ class DataProcessor:
             for j in range(1, len(ids)):
                 tok_id = ids[j]
                 lp_dict = prompt_logprobs[j]
-                if tok_id not in lp_dict:
-                    token_lps.append(float("-inf"))
-                else:
-                    token_lps.append(lp_dict[tok_id].logprob)
+                
+                assert tok_id in lp_dict
+                token_lps.append(lp_dict[tok_id].logprob)
 
             if not token_lps:
                 scores.append(float("-inf"))

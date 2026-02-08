@@ -267,7 +267,11 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             game_segment = self.game_segment_buffer[game_segment_idx]
 
             game_segment_list.append(game_segment)
-
+            assert len(game_segment.obs_segment) == len(game_segment.raw_obs_segment) == len(game_segment.cot_prefix_segment)
+            if pos_in_game_segment + self._cfg.num_unroll_steps + self._cfg.model.frame_stack_num > len(game_segment.obs_segment):
+                max_safe_pos = max(0, len(game_segment.obs_segment) - self._cfg.num_unroll_steps - self._cfg.model.frame_stack_num)
+                pos_in_game_segment = np.random.randint(0, max_safe_pos + 1)
+            
             # print(f'len(game_segment)=:len(game_segment.action_segment): {len(game_segment)}')
             # print(f'len(game_segment.obs_segment): {game_segment.obs_segment.shape[0]}')
 

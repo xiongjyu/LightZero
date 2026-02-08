@@ -116,7 +116,6 @@ class PriorZeroLLMTrainer:
                 sequences = batch['input_ids'],
                 action_mask = batch['action_mask'],
                 attention_mask=batch['attention_mask'],
-                logits_to_keep=batch['action_mask'].size(1) + 1
             )
             batch["ref_action_log_probs"] = base_action_log_probs
         else:

@@ -3,7 +3,7 @@ from collections import defaultdict
 import os
 import math
 from tqdm import tqdm
-
+import numpy as np
 import deepspeed
 from torch.optim import Optimizer
 import torch
@@ -59,29 +59,21 @@ class Actor(nn.Module):
         )
         self.model.config.use_cache = False
 
-
     def forward(
         self,
         sequences: torch.LongTensor,
         action_mask: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         return_output=False,
-        return_logprobs=False,
         return_entropy=False,
-        logits_to_keep=None
     ) -> torch.Tensor:
-        """Returns action log probs"""
-        batch, seqlen = sequences.size()
-        foward_attention_mask = attention_mask
 
+        foward_attention_mask = attention_mask
         rolled_sequences = torch.roll(sequences, shifts=-1, dims=1)
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
-        if logits_to_keep is not None:
-            output = self.model(sequences, attention_mask=foward_attention_mask, position_ids=position_ids, logits_to_keep=logits_to_keep)
-        else:
-            output = self.model(sequences, attention_mask=foward_attention_mask, position_ids=position_ids)
-            
+
+        output = self.model(sequences, attention_mask=foward_attention_mask, position_ids=position_ids)
         output["logits"] = output["logits"].to(torch.float32)
 
         if return_entropy:
@@ -89,24 +81,12 @@ class Actor(nn.Module):
             entropy = compute_entropy(output["logits"])
             setattr(output, "entropy", entropy[:, :-1])
 
-        return_action_log_probs = action_mask is not None
-        if logits_to_keep is not None:
-            logits_pred = output["logits"][:, :-1, :] 
-            labels_tail = sequences[:, -action_mask.shape[1]:]
-            log_probs = log_probs_from_logits(logits_pred.float(), labels_tail, temperature=self.temperature) 
-            action_log_probs = log_probs * action_mask.float()
-        else:
-            log_probs = log_probs_from_logits(output["logits"], rolled_sequences, temperature=self.temperature)
-            log_probs = log_probs[:, :-1]
-            if not return_action_log_probs and return_logprobs:
-                return (log_probs, output) if return_output else log_probs
+        log_probs = log_probs_from_logits(output["logits"], rolled_sequences, temperature=self.temperature)
 
-            action_log_probs = log_probs[:, -action_mask.shape[1] :] * action_mask.float()
-            
-        if return_output:
-            return action_log_probs, output 
-        else:
-            return action_log_probs
+        log_probs = log_probs[:, :-1]
+
+        action_log_probs = log_probs[:, -action_mask.shape[1] :] * action_mask.float()
+        return (action_log_probs, output) if return_output else action_log_probs
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={"use_reentrant": False}):
         self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
@@ -132,14 +112,13 @@ class ReferenceModel:
         self.model = strategy.prepare(model, is_rlhf=True)
         self.model.eval()
         self.micro_train_batch_size = self.strategy.args.micro_train_batch_size
-
+    
     @torch.no_grad()
     def forward(
         self,
         sequences: torch.LongTensor,
         action_mask: torch.Tensor,
         attention_mask: torch.Tensor,
-        logits_to_keep: int = None
     ) -> torch.Tensor:
         """
         Return: action_log_probs [B, T_action]
@@ -161,7 +140,6 @@ class ReferenceModel:
                 s,
                 action_mask=am,
                 attention_mask=attn,
-                logits_to_keep=logits_to_keep,
             )  
             outs.append(out)
         return torch.cat(outs, dim=0)
@@ -208,8 +186,7 @@ class BatchPPOTrainer:
             disable=not self.strategy.is_rank_0(),
         )
         acc_grad_steps = self.strategy.accumulated_gradient 
-        steps_in_accum = 0 # 当前是第几次累积梯度
-        metrics_buffer = defaultdict(float) # 用于累积 micro_step 指标的缓冲区
+        metrics_buffer = defaultdict(list) # 用于累积 micro_step 指标的缓冲区
         
         for micro_step, start_idx in enumerate(pbar):
             end_idx = min(start_idx + self.micro_train_batch_size, all_samples_size)
@@ -223,13 +200,12 @@ class BatchPPOTrainer:
             }
             micro_batch['ref_action_log_probs'] = batch_data['ref_action_log_probs'][start_idx:end_idx] if batch_data['ref_action_log_probs'] is not None else None
 
-            logits_to_keep = micro_batch['action_mask'].size(1) + 1
             action_log_probs, output = self.actor(
                 micro_batch['input_ids'],
                 micro_batch['action_mask'],
                 attention_mask=micro_batch['attention_mask'],
                 return_output=True,
-                logits_to_keep=logits_to_keep, 
+                return_entropy=True,
             )
             actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
                 action_log_probs,
@@ -250,6 +226,11 @@ class BatchPPOTrainer:
             
             loss = actor_loss + kl_loss * float(kl_ctl.value)
             
+            if self.args.entropy_loss_coef is not None:
+                entropy_loss = masked_mean(output.entropy[:, -micro_batch["action_mask"].shape[1] :], micro_batch["action_mask"])
+                if self.args.entropy_loss_coef != 0:
+                    loss -= entropy_loss * self.args.entropy_loss_coef  
+            
             self.strategy.backward(loss, self.actor, self.actor_optim)
             self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
             
@@ -261,39 +242,58 @@ class BatchPPOTrainer:
             input_response_length_item = micro_batch["attention_mask"].sum().detach().float().item() / micro_batch["attention_mask"].shape[0]
             response_length_item = micro_batch["action_mask"].sum().detach().float().item() / micro_batch["action_mask"].shape[0]
             input_length_item = input_response_length_item - response_length_item
+            entropy_loss_item = entropy_loss.detach().float().item() if self.args.entropy_loss_coef is not None else None
             
             pbar.set_postfix({
                 "policy_loss": policy_loss_item,
+                "clipfrac": clipfrac_item,
                 "approx_kl": approx_kl_item,
-                "kl": kl_loss_item,
                 "iter": self.train_iter,
             })
             
-            metrics_buffer["policy_loss"] += policy_loss_item
-            metrics_buffer["clipfrac"] += clipfrac_item
-            metrics_buffer["clip_ratio"] += clip_ratio_item
-            metrics_buffer["approx_kl"] +=  approx_kl_item
-            metrics_buffer["kl"] += kl_loss_item
-            metrics_buffer["input_length"] += input_length_item
-            metrics_buffer["response_length"] += response_length_item
-            
+            metrics_buffer["policy_loss"].append(policy_loss_item)
+            metrics_buffer["clipfrac"].append(clipfrac_item)
+            metrics_buffer["clip_ratio"].append(clip_ratio_item)
+            metrics_buffer["approx_kl"].append(approx_kl_item)
+            metrics_buffer["ref_kl"].append(kl_loss_item)
+            metrics_buffer["input_length"].append(input_length_item)
+            metrics_buffer["response_length"].append(response_length_item)
+            metrics_buffer['entropy'].append(entropy_loss_item)
+
             log_status = micro_batch["log_status"]
             other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}
             for k, v in other_status.items():
-                metrics_buffer[k] += sum(v) / len(v)
-            
-            steps_in_accum += 1
+                metrics_buffer[k] = v
         
             if ((micro_step + 1) % acc_grad_steps == 0) or ((micro_step + 1) == pbar.total):
                 self.train_iter += 1
-                status = {k: v / steps_in_accum for k, v in metrics_buffer.items()}
+                status = {
+                    "policy_loss": np.mean(metrics_buffer['policy_loss']),
+                    "clipfrac": np.mean(metrics_buffer['clipfrac']),
+                    "clip_ratio": np.mean(metrics_buffer['clip_ratio']),
+                    "approx_kl": np.mean(metrics_buffer['approx_kl']),
+                    "ref_kl": np.mean(metrics_buffer['ref_kl']),
+                    "entropy": np.mean(metrics_buffer['entropy']) if self.args.entropy_loss_coef is not None else None,
+                    
+                    "iter": self.train_iter,
+                    "lr": self.actor_scheduler.get_last_lr()[0],
+                    "global_grad_norm": self.actor_optim._global_grad_norm,
+
+                    "input_length_max": np.max(metrics_buffer['input_length']),
+                    "input_length_mean": np.mean(metrics_buffer['input_length']),
+                    "input_length_min": np.min(metrics_buffer['input_length']),
+
+                    "prompt_length_max": np.max(metrics_buffer['response_length']),
+                    "prompt_length_mean": np.mean(metrics_buffer['response_length']),
+                    "prompt_length_min": np.min(metrics_buffer['response_length']),
+                    
+                    "fmt_rewards": np.mean(metrics_buffer['fmt_rewards']) if "fmt_rewards" in metrics_buffer else None,
+                    "advantage_max": np.max(metrics_buffer['advantage']),
+                    "advantage_mean": np.max(metrics_buffer['advantage']),
+                    "advantage_min": np.max(metrics_buffer['advantage']),
+                }
                 metrics_buffer.clear()
-                steps_in_accum = 0
-                
-                status["lr"] = self.actor_scheduler.get_last_lr()[0]
-                status["iter"] = self.train_iter
-                status["global_grad_norm"] = self.actor_optim._global_grad_norm
-                
+
                 status = self.strategy.all_reduce(status)
                 status_list.append(status)
 
@@ -470,7 +470,6 @@ class PolicyModel:
         sequences: torch.LongTensor,
         action_mask: Optional[Union[int, list[int], torch.Tensor]] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        packed_seq_lens=None,
         to_cpu: bool = False,
     ) -> torch.Tensor:
         self.actor.eval()
