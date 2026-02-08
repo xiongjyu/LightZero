@@ -137,6 +137,10 @@ class PriorZeroLLMTrainer:
                 for k, v in tmp_dict.items():
                     if k == 'iter':
                         continue
+                    # [FIX] Skip None values (e.g., entropy, fmt_rewards when disabled)
+                    # TensorBoard cannot handle None values
+                    if v is None:
+                        continue
                     self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), int(tmp_dict['iter']))
                     self._tb_logger.add_scalar(f"learner_llm_envstep/{k}", float(v), int(collect_env_steps))
                     self.global_step = max(self.global_step, int(tmp_dict['iter']))

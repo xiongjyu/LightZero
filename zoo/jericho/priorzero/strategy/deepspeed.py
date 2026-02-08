@@ -538,6 +538,11 @@ class DeepspeedStrategy(ABC):
                 ret[k] = self.all_reduce(v, op)
             return ret
         else:
+            # [FIX] Handle None values gracefully
+            # Some metrics (e.g., entropy, fmt_rewards) may be None when disabled
+            if data is None:
+                return None
+
             is_tensor = True
             if not isinstance(data, torch.Tensor):
                 data = torch.Tensor([data])
@@ -560,6 +565,10 @@ class DeepspeedStrategy(ABC):
                 ret[k] = self.all_gather(v)
             return ret
         else:
+            # [FIX] Handle None values gracefully
+            if data is None:
+                return None
+
             if not isinstance(data, torch.Tensor):
                 data = torch.Tensor([data])
             is_cpu_tensor = data.device.type == "cpu"

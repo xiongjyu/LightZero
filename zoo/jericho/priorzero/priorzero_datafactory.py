@@ -326,21 +326,42 @@ class DataProcessor:
 
         elif self.args.advantage_type == "advantage_running_norm":
             if self.value_normalizer is not None:
+                # Store raw statistics before normalization
+                raw_mean = advantage.mean().item()
+                raw_std = advantage.std().item()
+                raw_min = advantage.min().item()
+                raw_max = advantage.max().item()
+                batch_size = advantage.numel()
+
                 advantage, norm_stats = self.value_normalizer.normalize(
                     advantage,
                     clip_values=True,
                     return_stats=True
                 )
+
+                # Calculate normalized statistics
+                norm_min = advantage.min().item()
+                norm_max = advantage.max().item()
+                norm_mean = advantage.mean().item()
+                norm_std = advantage.std().item()
+
                 if self.rank == 0 and self.value_normalizer.update_count % 10 == 0:
-                    print(f"[Adaptive Value Norm] step={self.value_normalizer.update_count}, "
-                          f"running_mean={norm_stats['running_mean']:.3f}, "
-                          f"running_std={norm_stats['running_std']:.3f}, "
-                          f"batch_mean={norm_stats['batch_mean']:.3f}, "
-                          f"batch_std={norm_stats['batch_std']:.3f}, "
-                          f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']}")
+                    print(
+                        f"[Value Norm] step={self.value_normalizer.update_count} | "
+                        f"batch_size={batch_size} | "
+                        f"running: mean={norm_stats['running_mean']:.3f}, std={norm_stats['running_std']:.3f} | "
+                        f"batch: mean={norm_stats['batch_mean']:.3f}, std={norm_stats['batch_std']:.3f} | "
+                        f"raw: min={raw_min:.3f}, max={raw_max:.3f} | "
+                        f"norm: min={norm_min:.3f}, max={norm_max:.3f} | "
+                        f"clipped={norm_stats['clipped_count']}/{norm_stats['total_count']} | "
+                        f"momentum={norm_stats['momentum']:.3f}"
+                    )
             else:
                 batch_mean = advantage.mean().item()
                 batch_std = advantage.std().item()
+                batch_min = advantage.min().item()
+                batch_max = advantage.max().item()
+                batch_size = advantage.numel()
 
                 if self.value_count == 0:
                     self.value_running_mean = batch_mean
@@ -356,14 +377,25 @@ class DataProcessor:
                     )
 
                 self.value_count += 1
-                advantage = (advantage - self.value_running_mean) / (self.value_running_std + 1e-8)
+                # FIX: Increase epsilon for numerical stability
+                advantage = (advantage - self.value_running_mean) / (self.value_running_std + 1e-4)
+
+                # Calculate normalized statistics
+                norm_min = advantage.min().item()
+                norm_max = advantage.max().item()
+                norm_mean = advantage.mean().item()
+                norm_std = advantage.std().item()
 
                 if self.rank == 0 and self.value_count % 10 == 0:
-                    print(f"[Advantage Running Stats] count={self.value_count}, "
-                        f"running_mean={self.value_running_mean:.3f}, "
-                        f"running_std={self.value_running_std:.3f}, "
-                        f"batch_mean={batch_mean:.3f}, batch_std={batch_std:.3f}")
-                    
+                    print(
+                        f"[Advantage Running Norm] step={self.value_count} | "
+                        f"batch_size={batch_size} | "
+                        f"running: mean={self.value_running_mean:.3f}, std={self.value_running_std:.3f} | "
+                        f"batch: mean={batch_mean:.3f}, std={batch_std:.3f} | "
+                        f"raw: min={batch_min:.3f}, max={batch_max:.3f} | "
+                        f"norm: min={norm_min:.3f}, max={norm_max:.3f}"
+                    )
+
             log_status_tmp["advantage"] = advantage.tolist()
             if fmt_rewards is not None:
                 advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
@@ -638,23 +670,37 @@ class DataProcessor:
     @torch.no_grad()
     def get_llm_output_log(self, wm_train_iter: int = 0, llm_train_iter: int = 0):
         if self.rank != 0:
-            return 
-        self._logger.info(f"===========================================\n"
-                          f"[LLM_OUTPUT] wm_train_iter={wm_train_iter}, llm_train_iter={llm_train_iter}\n"
-                          f"===========================================")
-        
+            return
+
+        # Structured LLM output log header
+        self._logger.info(
+            f"\n{'='*80}\n"
+            f"[LLM Output Log] WM Iter: {wm_train_iter} | LLM Iter: {llm_train_iter}\n"
+            f"{'='*80}"
+        )
+
         for i, tmp_dict in enumerate(self.episode_output[:15]):
             instruction = tmp_dict["Instruction"]
             response = tmp_dict["Response"]
             llm_prior = tmp_dict["llm_prior_per_seq"]
-            
-            self._logger.info(f"[STEP {i}][Instruction]:\n{instruction} \n\n\n [Response]:\n{response}\n\n[LLM_PROABILITY]\n")
+
+            # Structured step log
+            self._logger.info(
+                f"\n{'-'*80}\n"
+                f"[Step {i}]\n"
+                f"{'-'*80}\n"
+                f"Instruction:\n{instruction}\n\n"
+                f"Response:\n{response}\n\n"
+                f"Action Probabilities:"
+            )
+
             action_probs = {a: math.exp(float(lp)) for a, lp in llm_prior.items() if lp is not None and math.isfinite(float(lp))}
             all_prob = sum(action_probs.values())
-            
+
             for action, prob in sorted(action_probs.items(), key=lambda x: x[1], reverse=True):
-                self._logger.info(f"  - {action}: unnorm_prob={prob:.4f}, norm_prob={(prob / all_prob):.4f}")
-            self._logger.info(f"  - other: unnorm_prob={1-all_prob}")
+                self._logger.info(f"  {action:30s} | unnorm={prob:.6f} | norm={(prob / all_prob):.6f}")
+            self._logger.info(f"  {'<other>':30s} | unnorm={1-all_prob:.6f}")
+
         self.episode_output = []
 
         
