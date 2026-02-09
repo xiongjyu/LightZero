@@ -283,14 +283,14 @@ class BatchPPOTrainer:
                     "input_length_mean": np.mean(metrics_buffer['input_length']),
                     "input_length_min": np.min(metrics_buffer['input_length']),
 
-                    "prompt_length_max": np.max(metrics_buffer['response_length']),
-                    "prompt_length_mean": np.mean(metrics_buffer['response_length']),
-                    "prompt_length_min": np.min(metrics_buffer['response_length']),
+                    "response_length_max": np.max(metrics_buffer['response_length']),
+                    "response_length_mean": np.mean(metrics_buffer['response_length']),
+                    "response_length_min": np.min(metrics_buffer['response_length']),
                     
                     "fmt_rewards": np.mean(metrics_buffer['fmt_rewards']) if "fmt_rewards" in metrics_buffer else None,
                     "advantage_max": np.max(metrics_buffer['advantage']),
-                    "advantage_mean": np.max(metrics_buffer['advantage']),
-                    "advantage_min": np.max(metrics_buffer['advantage']),
+                    "advantage_mean": np.mean(metrics_buffer['advantage']),
+                    "advantage_min": np.min(metrics_buffer['advantage']),
                 }
                 metrics_buffer.clear()
 

@@ -480,6 +480,15 @@ class PriorZeroCollector(OriginalCollector):
                         'time': self._env_info[env_id]['time'],
                         'step': self._env_info[env_id]['step'],
                         'llm_prior_entropy': sum(llm_prior_entropy[env_id])/len(llm_prior_entropy[env_id])}
+                    
+                    self._logger.info(
+                        f"[Episode Complete] Env={env_id} | "
+                        f"Reward={info_log['reward']:.2f} | "
+                        f"Steps={info_log['step']} | "
+                        f"Time={info_log['time']:.2f}s | "
+                        f"LLM_Entropy={info_log['llm_prior_entropy']:.3f}"
+                    )
+                    
                     if not collect_with_pure_policy:
                         info_log['visit_entropy'] = (
                             visit_entropies_lst[env_id] / eps_steps_lst[env_id]
@@ -557,13 +566,16 @@ class PriorZeroCollector(OriginalCollector):
 
         if self._world_size > 1:
             # Before allreduce
-            self._logger.info(f"Rank {self._rank} before allreduce: collected_step={collected_step}, collected_episode={collected_episode}")
+            local_step, local_episode = collected_step, collected_episode
             collected_step = allreduce_data(collected_step, 'sum')
             collected_episode = allreduce_data(collected_episode, 'sum')
             collected_duration = allreduce_data(collected_duration, 'sum')
             # After allreduce
-            self._logger.info(f"Rank {self._rank} after allreduce: collected_step={collected_step}, collected_episode={collected_episode}")
-
+            self._logger.info(
+                f"[Rank {self._rank} Aggregation] "
+                f"Local: steps={local_step}, episodes={local_episode} | "
+                f"Global: steps={collected_step}, episodes={collected_episode}"
+            )
         
         self._total_envstep_count += collected_step
         self._total_episode_count += collected_episode
@@ -616,6 +628,25 @@ class PriorZeroCollector(OriginalCollector):
                 info['completed_value_mean'] = np.mean(completed_value)
 
             self._episode_info.clear()
+            
+            self._logger.info(
+                f"\n{'='*80}\n"
+                f"[Collector Summary] Train Iter: {train_iter}\n"
+                f"{'-'*80}\n"
+                f"Episodes:     {info['episode_count']} (Total: {info['total_episode_count']})\n"
+                f"Steps:        {info['envstep_count']} (Total: {info['total_envstep_count']})\n"
+                f"Avg Steps/Ep: {info['avg_envstep_per_episode']:.1f}\n"
+                f"Throughput:   {info['avg_envstep_per_sec']:.2f} steps/s, {info['avg_episode_per_sec']:.3f} eps/s\n"
+                f"Duration:     {info['collect_time']:.2f}s (Total: {info['total_duration']:.2f}s)\n"
+                f"{'-'*80}\n"
+                f"Reward:       mean={info['reward_mean']:.2f}, std={info['reward_std']:.2f}, "
+                f"min={info['reward_min']:.2f}, max={info['reward_max']:.2f}\n"
+                f"LLM Entropy:  mean={info['llm_prior_entropy_mean']:.3f}, "
+                f"min={info['llm_prior_entropy_min']:.3f}, max={info['llm_prior_entropy_max']:.3f}\n"
+                + (f"Visit Entropy: {info.get('visit_entropy_mean', 0):.3f}\n" if not self.collect_with_pure_policy else "")
+                + (f"Completed Val: {info.get('completed_value_mean', 0):.3f}\n" if self.policy_config.gumbel_algo else "")
+                + f"{'='*80}"
+            )
             
             # Log to console
             self._logger.info("Collector Training Summary:\n{}".format('\n'.join([f'  {k}: {v}' for k, v in info.items()])))

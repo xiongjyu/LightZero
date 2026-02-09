@@ -230,8 +230,11 @@ def train_priorzero(
         
         num_of_transitions = replay_buffer.get_num_of_transitions() 
         new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
-        logger.info(f"[Rank {rank}] Data collected, num_of_transitions: {num_of_transitions} transitions\tnew_num_of_transitions: {new_num_of_transitions}")
-    
+        logger.info(
+            f"[Data Collection] Rank {rank} | "
+            f"Total transitions: {num_of_transitions} | "
+            f"New transitions: {new_num_of_transitions}"
+        )
         if not (num_of_transitions > batch_size):
             logger.warning(
                 f'  ⚠ Data in replay_buffer is not sufficient: '
@@ -244,7 +247,11 @@ def train_priorzero(
         if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
             continue
 
-        logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
+        logger.info(
+            f"[World Model Training] Rank {rank} | Iter {learner.train_iter} | "
+            f"Updates: {update_per_collect}"
+        )
+        
         for i in range(update_per_collect):
             with prof.block("train_world_model", rank=rank):
                 train_data = replay_buffer.sample(batch_size, policy)
@@ -274,14 +281,17 @@ def train_priorzero(
             break
         elif min(all_cmd) == 1:
             with prof.block("fetch_latest_batch", rank=rank):
-                print(f"[Rank {rank}] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
+                print(f"[Batch Fetch] Rank {rank}] | WM Iter: {learner.train_iter} |  Required transitions: {llm_need_transition_cnt}")
                 priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
-                print(f"[Rank {rank}] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
+                print(f"[Batch Fetch] Rank {rank}] completed.")
                 
             with prof.block("train_llm", rank=rank):
-                logger.info(f"[Rank {rank}] train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'None'}. Starting LLM training...")
+                sample_count = len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 0
+                logger.info(f"[LLM Training] Rank {rank} | Samples: {sample_count}")
+                
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True)
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
+                
                 torch_dist_barrier_and_cuda_sync()
         else:
             continue
@@ -318,7 +328,7 @@ Examples:
     # Model selection
     parser.add_argument('--model', type=str, default="qwen2.5-3b", choices=get_available_models())
     parser.add_argument('--enable_profile', action='store_true', default=False)
-    parser.add_argument('--use_cot', action='store_true', default=False)
+    parser.add_argument('--use_cot', action='store_true', default=True)
     args = parser.parse_args()
 
     model_key = args.model if args.model else "qwen2.5-1.5b"

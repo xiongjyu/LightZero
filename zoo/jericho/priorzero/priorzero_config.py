@@ -78,7 +78,7 @@ class PriorZeroLLMConfig:
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 5
-    use_cot: bool = False
+    use_cot: bool = True
     prompt_max_len: int = 8192
     generate_max_len: int = 512
     bf16: bool = True

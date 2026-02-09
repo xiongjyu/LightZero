@@ -40,7 +40,11 @@ class LLMActor:
         """
         Return the responses for the actor with the given rank
         """
-        responses = self.llm.generate(prompts=self.requests, sampling_params=self.sampling_params)
+        responses = self.llm.generate(
+            prompts=self.requests, 
+            sampling_params=self.sampling_params,
+            use_tqdm=False
+        )
         self.requests = {}
         return responses
 
