@@ -109,7 +109,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
                     ),
                 ),
             ),
-            accumulation_steps=1,  # TODO: Accumulated gradient steps (currently default)
+            accumulation_steps=1, 
             model=dict(
                 observation_shape=512,
                 action_space_size=action_space_size,

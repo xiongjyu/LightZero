@@ -45,10 +45,7 @@ def train_unizero_multitask_ddp(
 ) -> 'Policy':
     """
     Overview:
-        Entry point for UniZero training. The goal is to improve the planning ability 
-        of reinforcement learning agents by addressing the limitations of MuZero-like 
-        algorithms in environments that require capturing long-term dependencies.
-        For more details, refer to https://arxiv.org/abs/2406.10667.
+        Entry point for UniZero multi-task training (DDP version).
     Args:
         - input_cfg_list (:obj:`List[Tuple[int, Tuple[dict, dict]]]`): Configuration list for different tasks.
         - seed (:obj:`int`): Random seed.

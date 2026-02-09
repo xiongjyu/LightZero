@@ -91,43 +91,25 @@ def create_config(env_id, max_steps, max_action_num, action_space_size, collecto
                 ),
             ),
             optim_type='AdamW',
-            # (bool) 是否启用自适应策略熵权重 (alpha)
+            
+            # (bool) whether enable adaptive policy entropy weights 
             use_adaptive_entropy_weight=False,
-
-            # (float) 自适应alpha优化器的学习率
+            # (float) learning rate of adaptive alpha optimizer
             adaptive_entropy_alpha_lr=1e-4,
             target_entropy_start_ratio =0.98,
-            # target_entropy_end_ratio =0.9, # TODO=====
-            # target_entropy_end_ratio =0.7,
-            # target_entropy_decay_steps = 100000, # 例如，在100k次迭代后达到最终值
+            target_entropy_end_ratio =0.5, 
+            target_entropy_decay_steps = 100000, 
 
-            target_entropy_end_ratio =0.5, # for action_space=18
-            target_entropy_decay_steps = 100000, # 例如，在150k次迭代 300k envsteps后达到最终值
-            # target_entropy_decay_steps = 150000, # 例如，在150k次迭代 300k envsteps后达到最终值
-
-            # ==================== START: Encoder-Clip Annealing Config ====================
-            # (bool) 是否启用 encoder-clip 值的退火。
             use_encoder_clip_annealing=False,
-            # (str) 退火类型。可选 'linear' 或 'cosine'。
             encoder_clip_anneal_type='cosine',
-            # (float) 退火的起始 clip 值 (训练初期，较宽松)。
             encoder_clip_start_value=30.0,
-            # (float) 退火的结束 clip 值 (训练后期，较严格)。
             encoder_clip_end_value=10.0,
-            # (int) 完成从起始值到结束值的退火所需的训练迭代步数。
-            encoder_clip_anneal_steps=30000,  # 例如，在30k次迭代后达到最终值
+            encoder_clip_anneal_steps=30000,  
 
-
-            # ==================== START: label smooth ====================
-            policy_ls_eps_start=0.05, #TODO============= good start in Pong and MsPacman
+            policy_ls_eps_start=0.05, 
             policy_ls_eps_end=0.01,
-            policy_ls_eps_decay_steps=50000, # 50k
-            label_smoothing_eps=0,  #TODO============= for value
-
-            # ==================== [新增] 范数监控频率 ====================
-            # 每隔多少个训练迭代步数，监控一次模型参数的范数。设置为0则禁用。
-            monitor_norm_freq=10000,
-            
+            policy_ls_eps_decay_steps=50000, 
+            label_smoothing_eps=0,  
             
             use_task_exploitation_weight=False, 
             task_complexity_weight=False,
