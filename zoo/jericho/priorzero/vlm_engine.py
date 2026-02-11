@@ -1,0 +1,424 @@
+"""
+Vision-Language Model (VLM) Engine
+
+This module provides a unified interface for various VLM models
+to generate action priors from image observations.
+
+Supported models:
+- Qwen-VL / Qwen2-VL
+- LLaVA-1.5 / LLaVA-1.6
+- InternVL
+"""
+import os
+from typing import List, Union, Optional, Dict, Any
+from pathlib import Path
+from PIL import Image
+import numpy as np
+import torch
+from loguru import logger
+
+
+class VLMEngine:
+    """
+    Base VLM Engine class.
+
+    Provides a unified interface for different VLM implementations.
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        model_path: str,
+        device: str = "cuda",
+        tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float = 0.3,
+        **kwargs
+    ):
+        """
+        Args:
+            model_name: Model identifier (e.g., 'qwen-vl', 'llava-1.5')
+            model_path: Path to model weights
+            device: Device to run on
+            tensor_parallel_size: Number of GPUs for tensor parallelism
+            gpu_memory_utilization: GPU memory utilization ratio
+        """
+        self.model_name = model_name
+        self.model_path = model_path
+        self.device = device
+        self.tensor_parallel_size = tensor_parallel_size
+        self.gpu_memory_utilization = gpu_memory_utilization
+
+        self.model = None
+        self.tokenizer = None
+        self.processor = None
+
+        logger.info(f"Initializing VLM Engine: {model_name}")
+        self._load_model()
+
+    def _load_model(self):
+        """Load the VLM model. To be implemented by subclasses."""
+        raise NotImplementedError("Subclasses must implement _load_model()")
+
+    def generate(
+        self,
+        image: Union[Image.Image, np.ndarray],
+        prompt: str,
+        temperature: float = 1.0,
+        max_new_tokens: int = 512,
+        **kwargs
+    ) -> str:
+        """
+        Generate text response from image and prompt.
+
+        Args:
+            image: Input image (PIL Image or numpy array)
+            prompt: Text prompt
+            temperature: Sampling temperature
+            max_new_tokens: Maximum number of tokens to generate
+
+        Returns:
+            Generated text response
+        """
+        raise NotImplementedError("Subclasses must implement generate()")
+
+    def batch_generate(
+        self,
+        images: List[Union[Image.Image, np.ndarray]],
+        prompts: List[str],
+        temperature: float = 1.0,
+        max_new_tokens: int = 512,
+        **kwargs
+    ) -> List[str]:
+        """
+        Batch generate text responses.
+
+        Args:
+            images: List of input images
+            prompts: List of text prompts
+            temperature: Sampling temperature
+            max_new_tokens: Maximum number of tokens to generate
+
+        Returns:
+            List of generated text responses
+        """
+        # Default implementation: sequential generation
+        results = []
+        for image, prompt in zip(images, prompts):
+            result = self.generate(image, prompt, temperature, max_new_tokens, **kwargs)
+            results.append(result)
+        return results
+
+
+class QwenVLEngine(VLMEngine):
+    """
+    Qwen-VL / Qwen2-VL Engine
+
+    Supports:
+    - Qwen-VL-Chat
+    - Qwen2-VL-2B-Instruct
+    - Qwen2-VL-7B-Instruct
+    """
+
+    def _load_model(self):
+        """Load Qwen-VL model."""
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers.generation import GenerationConfig
+
+            logger.info(f"Loading Qwen-VL from {self.model_path}")
+
+            # Load tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_path,
+                trust_remote_code=True
+            )
+
+            # Load model
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_path,
+                device_map="auto" if self.tensor_parallel_size > 1 else self.device,
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+            ).eval()
+
+            # Set generation config
+            self.model.generation_config = GenerationConfig.from_pretrained(
+                self.model_path,
+                trust_remote_code=True
+            )
+
+            logger.info("✓ Qwen-VL model loaded successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to load Qwen-VL: {e}")
+            raise
+
+    def generate(
+        self,
+        image: Union[Image.Image, np.ndarray],
+        prompt: str,
+        temperature: float = 1.0,
+        max_new_tokens: int = 512,
+        **kwargs
+    ) -> str:
+        """Generate response using Qwen-VL."""
+        # Convert numpy array to PIL Image if needed
+        if isinstance(image, np.ndarray):
+            if image.dtype != np.uint8:
+                image = (image * 255).astype(np.uint8)
+            image = Image.fromarray(image)
+
+        # Save image temporarily (Qwen-VL requires image path)
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+            image.save(f.name)
+            image_path = f.name
+
+        try:
+            # Build query with image
+            query = self.tokenizer.from_list_format([
+                {'image': image_path},
+                {'text': prompt},
+            ])
+
+            # Generate
+            response, history = self.model.chat(
+                self.tokenizer,
+                query=query,
+                history=None,
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+            )
+
+            return response
+
+        finally:
+            # Clean up temp file
+            os.unlink(image_path)
+
+
+class LLaVAEngine(VLMEngine):
+    """
+    LLaVA Engine
+
+    Supports:
+    - LLaVA-1.5-7B
+    - LLaVA-1.5-13B
+    - LLaVA-1.6-7B
+    """
+
+    def _load_model(self):
+        """Load LLaVA model."""
+        try:
+            from transformers import AutoProcessor, LlavaForConditionalGeneration
+
+            logger.info(f"Loading LLaVA from {self.model_path}")
+
+            # Load processor and model
+            self.processor = AutoProcessor.from_pretrained(self.model_path)
+            self.model = LlavaForConditionalGeneration.from_pretrained(
+                self.model_path,
+                device_map="auto" if self.tensor_parallel_size > 1 else self.device,
+                torch_dtype=torch.float16,
+            ).eval()
+
+            logger.info("✓ LLaVA model loaded successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to load LLaVA: {e}")
+            raise
+
+    def generate(
+        self,
+        image: Union[Image.Image, np.ndarray],
+        prompt: str,
+        temperature: float = 1.0,
+        max_new_tokens: int = 512,
+        **kwargs
+    ) -> str:
+        """Generate response using LLaVA."""
+        # Convert numpy array to PIL Image if needed
+        if isinstance(image, np.ndarray):
+            if image.dtype != np.uint8:
+                image = (image * 255).astype(np.uint8)
+            image = Image.fromarray(image)
+
+        # Prepare inputs
+        conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ]
+
+        prompt_text = self.processor.apply_chat_template(
+            conversation, add_generation_prompt=True
+        )
+
+        inputs = self.processor(
+            images=image,
+            text=prompt_text,
+            return_tensors="pt"
+        ).to(self.device)
+
+        # Generate
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=temperature > 0,
+            )
+
+        # Decode
+        response = self.processor.decode(
+            output_ids[0][inputs['input_ids'].shape[1]:],
+            skip_special_tokens=True
+        )
+
+        return response
+
+
+class InternVLEngine(VLMEngine):
+    """
+    InternVL Engine
+
+    Supports:
+    - InternVL-Chat-V1.5
+    - InternVL2-2B
+    - InternVL2-8B
+    """
+
+    def _load_model(self):
+        """Load InternVL model."""
+        try:
+            from transformers import AutoModel, AutoTokenizer
+
+            logger.info(f"Loading InternVL from {self.model_path}")
+
+            # Load tokenizer and model
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_path,
+                trust_remote_code=True
+            )
+
+            self.model = AutoModel.from_pretrained(
+                self.model_path,
+                device_map="auto" if self.tensor_parallel_size > 1 else self.device,
+                trust_remote_code=True,
+                torch_dtype=torch.bfloat16,
+            ).eval()
+
+            logger.info("✓ InternVL model loaded successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to load InternVL: {e}")
+            raise
+
+    def generate(
+        self,
+        image: Union[Image.Image, np.ndarray],
+        prompt: str,
+        temperature: float = 1.0,
+        max_new_tokens: int = 512,
+        **kwargs
+    ) -> str:
+        """Generate response using InternVL."""
+        # Convert numpy array to PIL Image if needed
+        if isinstance(image, np.ndarray):
+            if image.dtype != np.uint8:
+                image = (image * 255).astype(np.uint8)
+            image = Image.fromarray(image)
+
+        # Generate
+        response = self.model.chat(
+            self.tokenizer,
+            pixel_values=None,
+            question=prompt,
+            generation_config={
+                'max_new_tokens': max_new_tokens,
+                'temperature': temperature,
+                'do_sample': temperature > 0,
+            },
+            image=image,
+        )
+
+        return response
+
+
+# VLM Model Registry
+VLM_MODEL_REGISTRY = {
+    'qwen-vl': QwenVLEngine,
+    'qwen2-vl': QwenVLEngine,
+    'llava': LLaVAEngine,
+    'llava-1.5': LLaVAEngine,
+    'llava-1.6': LLaVAEngine,
+    'internvl': InternVLEngine,
+    'internvl2': InternVLEngine,
+}
+
+
+def create_vlm_engine(
+    model_name: str,
+    model_path: str,
+    device: str = "cuda",
+    tensor_parallel_size: int = 1,
+    gpu_memory_utilization: float = 0.3,
+    **kwargs
+) -> VLMEngine:
+    """
+    Factory function to create VLM engine.
+
+    Args:
+        model_name: Model identifier (e.g., 'qwen-vl', 'llava-1.5')
+        model_path: Path to model weights
+        device: Device to run on
+        tensor_parallel_size: Number of GPUs for tensor parallelism
+        gpu_memory_utilization: GPU memory utilization ratio
+
+    Returns:
+        VLMEngine instance
+    """
+    # Normalize model name
+    model_name_lower = model_name.lower()
+
+    # Find matching engine class
+    engine_class = None
+    for key, cls in VLM_MODEL_REGISTRY.items():
+        if key in model_name_lower:
+            engine_class = cls
+            break
+
+    if engine_class is None:
+        raise ValueError(
+            f"Unknown VLM model: {model_name}. "
+            f"Supported models: {list(VLM_MODEL_REGISTRY.keys())}"
+        )
+
+    # Create engine
+    engine = engine_class(
+        model_name=model_name,
+        model_path=model_path,
+        device=device,
+        tensor_parallel_size=tensor_parallel_size,
+        gpu_memory_utilization=gpu_memory_utilization,
+        **kwargs
+    )
+
+    return engine
+
+
+if __name__ == "__main__":
+    # Example usage
+    print("VLM Engine Module")
+    print("=" * 80)
+    print("\nSupported VLM models:")
+    for model_name in VLM_MODEL_REGISTRY.keys():
+        print(f"  - {model_name}")
+
+    print("\nUsage:")
+    print("  engine = create_vlm_engine('qwen-vl', '/path/to/model')")
+    print("  response = engine.generate(image, prompt)")
