@@ -9,7 +9,7 @@ from torch.optim import Optimizer
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoModelForVision2Seq, AutoConfig, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from transformers.trainer import get_scheduler
 
@@ -50,13 +50,28 @@ class Actor(nn.Module):
         else:
             _ = None
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            pretrain_or_model,
-            trust_remote_code=True,
-            attn_implementation=attn_impl,
-            torch_dtype=torch.bfloat16 if bf16 else "auto",
-            device_map=device_map,
-        )
+        # Detect if model is VLM (Vision-Language Model) or LLM (Language Model)
+        config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
+        is_vlm = hasattr(config, 'vision_config') or 'VL' in config.__class__.__name__
+
+        if is_vlm:
+            # Use AutoModelForVision2Seq for VLM models (e.g., Qwen2.5-VL, Qwen3-VL)
+            self.model = AutoModelForVision2Seq.from_pretrained(
+                pretrain_or_model,
+                trust_remote_code=True,
+                attn_implementation=attn_impl,
+                torch_dtype=torch.bfloat16 if bf16 else "auto",
+                device_map=device_map,
+            )
+        else:
+            # Use AutoModelForCausalLM for text-only LLM models
+            self.model = AutoModelForCausalLM.from_pretrained(
+                pretrain_or_model,
+                trust_remote_code=True,
+                attn_implementation=attn_impl,
+                torch_dtype=torch.bfloat16 if bf16 else "auto",
+                device_map=device_map,
+            )
         self.model.config.use_cache = False
 
     def forward(

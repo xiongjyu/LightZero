@@ -87,6 +87,21 @@ class PriorZeroVLMConfig:
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
 
+    # vLLM engines 
+    enable_vllm: bool = True
+    enable_prefix_caching: bool = True
+    use_cuda_ipc: bool = False
+    vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
+    vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
+    vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行 (Fixed: 1.5B model should use 1 GPU)
+
+    vllm_enable_sleep: bool = True # 是否可以休眠
+    top_p: float = 1.0
+    seed: int = 0
+    reduction: str = "mean"
+    
+
+
     # Prior generation settings
     use_prior: bool = True  # Whether to use VLM prior
     llm_prior_temperature: float = 1.0  # Temperature for prior distribution
