@@ -354,7 +354,6 @@ Examples:
     else:
         main_cfg, create_cfg, llm_cfg = get_priorzero_config(
             args.env_id, args.seed, use_cot=args.use_cot,
-            exp_name=f'data_priorzero/priorzero_ddp_ppo_{args.env_id}_use_cot_{args.use_cot}_with_fmtReward_seed0',
             model_key=model_key,
             multi_gpu=True
         )

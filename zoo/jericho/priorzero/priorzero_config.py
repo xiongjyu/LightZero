@@ -71,10 +71,8 @@ def print_available_models():
 class PriorZeroLLMConfig:
     model_name_or_path: str = "Qwen2.5-3B-Instruct"
     local_rank: int = -1
-    # 训练指标的相关参数
-    enable_sft: bool = False
     enable_rft: bool = True
-    rft_loss_weight: float = 1 
+    enable_world_model: bool = True
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 5
@@ -94,11 +92,11 @@ class PriorZeroLLMConfig:
 
     gpu_memory_utilization: float = 0.3
     vllm_enable_sleep: bool = True # 是否可以休眠
-    temperature: float = 1.0
-    top_p: float = 1.0
+    temperature: float = 0.6
+    top_p: float = 0.95
     seed: int = 0
     reduction: str = "mean"
-    llm_prior_temperature: float = 1.0  # LLM prior 分布的温度参数
+    llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
     
     # 训练相关参数
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练
@@ -113,11 +111,11 @@ class PriorZeroLLMConfig:
     ring_attn_size: int = 1
     
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
-    train_batch_size: int = 640 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    micro_train_batch_size: int = 8 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
-    broadcast_every: int = 1 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
+    train_batch_size: int = 320 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    micro_train_batch_size: int = 2 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    broadcast_every: int = 4 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
-    learning_rate: float = 5e-7
+    learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.01
     lr_scheduler: str = "cosine_with_min_lr"
@@ -127,7 +125,7 @@ class PriorZeroLLMConfig:
     reward_func: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "format_reward": True,
         "format_param": EasyDict(
-            {"format_weight": 0.1, }
+            {"format_weight": 1.0, }
         ),
     }))
     # advantage = target_value - pred_value 
@@ -137,7 +135,7 @@ class PriorZeroLLMConfig:
     entropy_loss_coef: float = 0.0
     kl_estimator: str = "k3"
     
-    train_llm_after_wm_warm_step: int = int(1e2)
+    train_llm_after_wm_warm_step: int = int(2e2)
     llm_save_freq: int = 500  # 每多少步保存一次 llm 模型,一步代表一次参数更新而不是梯度累积
     save_path: str = "" # 该参数将被 exp_name 目录覆盖
     
@@ -157,7 +155,7 @@ def get_priorzero_config(
     seed: int = 0,
     exp_name: str = None,
     use_cot: bool = False,
-    model_key: Optional[str] = None,
+    model_key: Optional[str] = "qwen2.5-3b",
     multi_gpu: bool = False
 ) -> Tuple[EasyDict, EasyDict]:
     """
@@ -315,13 +313,25 @@ def get_priorzero_config(
         priority_prob_alpha=0.6,
         priority_prob_beta=0.4,
     )
+
+    llm_config = PriorZeroLLMConfig(use_cot=use_cot) # 需要修改 llm 相关的参数，修改以上类即可
+
+    # Apply model configuration
+    model_config = get_model_config(model_key)
+    llm_config.model_name_or_path = model_config["model_name_or_path"]
+    llm_config.vllm_tensor_parallel_size = model_config["vllm_tensor_parallel_size"]
+    llm_config.gpu_memory_utilization = model_config["gpu_memory_utilization"]
+
+    if exp_name is None:
+        env_name = env_id.replace(".z5", "")
+        exp_name = f"priorzero_{env_name}_{model_key}_{llm_config.policy_loss_type}_WM_{llm_config.enable_world_model}_useCot_{llm_config.use_cot}_seed{seed}"
+    
     priorzero_config = dict(
         env=env_config,
         policy=policy_config,
         exp_name=exp_name,
         seed=seed
     )
-
     create_config = dict(
         env=dict(
             type="jericho",
@@ -347,21 +357,8 @@ def get_priorzero_config(
             import_names=['lzero.mcts.buffer.game_buffer_muzero'],
         ),
     )
-
     main_config = EasyDict(priorzero_config)
     create_config = EasyDict(create_config)
-    llm_config = PriorZeroLLMConfig(use_cot=use_cot) # 需要修改 llm 相关的参数，修改以上类即可
-
-    # Auto-configure model settings based on model_key
-    if model_key is None:
-        model_key = "qwen2.5-1.5b"  # Default model
-        print(f"[Config] Using default model: {model_key}")
-
-    # Apply model configuration
-    model_config = get_model_config(model_key)
-    llm_config.model_name_or_path = model_config["model_name_or_path"]
-    llm_config.vllm_tensor_parallel_size = model_config["vllm_tensor_parallel_size"]
-    llm_config.gpu_memory_utilization = model_config["gpu_memory_utilization"]
 
     print(f"[Config] Model configuration applied:")
     print(f"  - Model: {model_key}")
@@ -377,7 +374,7 @@ def get_priorzero_debug_config(
     seed: int = 0,
     exp_name: str = None,
     use_cot: bool = False,
-    model_key: Optional[str] = None,
+    model_key: Optional[str] = "qwen2.5-3b",
 ) -> EasyDict:
 
     main_config, create_config, llm_config = get_priorzero_config(
