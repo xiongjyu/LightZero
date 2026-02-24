@@ -244,38 +244,6 @@ class BatchPPOTrainer:
             input_length_item = input_response_length_item - response_length_item
             entropy_loss_item = entropy_loss.detach().float().item() if self.args.entropy_loss_coef is not None else None
             
-            # ==========================================
-            if abs(policy_loss_item - (-1.0)) < 1e-4:
-                print(f"\n[DEBUG 预警] policy_loss 触发 -1.0 异常! (iter: {self.train_iter}, micro_step: {micro_step})")
-                
-                adv_tensor = micro_batch['advantages']
-                print(f"  -> 输入 Advantage: mean={adv_tensor.mean().item():.6f}, "
-                      f"std={adv_tensor.std().item():.6f}, "
-                      f"max={adv_tensor.max().item():.6f}, min={adv_tensor.min().item():.6f}")
-                
-                with torch.no_grad():
-                    mask = micro_batch['action_mask'].bool()
-                    old_logp_masked = micro_batch['old_action_logprob'][mask]
-                    new_logp_masked = action_log_probs[mask]
-                    print(f"  -> old_log_prob: mean={old_logp_masked.mean().item():.6f}, "
-                          f"max={old_logp_masked.max().item():.6f}, min={old_logp_masked.min().item():.6f}")
-                    
-                    print(f"  -> new_log_prob: mean={new_logp_masked.mean().item():.6f}, "
-                          f"max={new_logp_masked.max().item():.6f}, min={new_logp_masked.min().item():.6f}")
-                    
-                    diff = torch.abs(new_logp_masked - old_logp_masked).mean().item()
-                    print(f"  -> 绝对差值 (new - old) mean: {diff:.8f}")
-
-                    log_ratio = action_log_probs - micro_batch['old_action_logprob']
-                    ratio = torch.exp(log_ratio)
-                    masked_ratio = ratio[mask].mean()
-                    
-                    print(f"  -> 策略更新比例 (Ratio mean): {masked_ratio.item():.6f}")
-                    print(f"  -> Approx KL: {approx_kl_item:.6f} (如果不为0，说明策略在更新)")
-                
-                print(f"  -> 裁剪比例 (clipfrac): {clipfrac_item:.6f}")
-                print("=" * 60)
-            
             pbar.set_postfix({
                 "policy_loss": policy_loss_item,
                 "clipfrac": clipfrac_item,
@@ -320,9 +288,12 @@ class BatchPPOTrainer:
                     "response_length_min": np.min(metrics_buffer['response_length']),
                     
                     "fmt_rewards": np.mean(metrics_buffer['fmt_rewards']) if "fmt_rewards" in metrics_buffer else None,
-                    "advantage_max": np.max(metrics_buffer['advantage']),
-                    "advantage_mean": np.mean(metrics_buffer['advantage']),
-                    "advantage_min": np.min(metrics_buffer['advantage']),
+                    "value_advantage_max": np.max(metrics_buffer['value_advantage']),
+                    "value_advantage_mean": np.mean(metrics_buffer['value_advantage']),
+                    "value_advantage_min": np.min(metrics_buffer['value_advantage']),
+                    "final_advantage_max": np.max(metrics_buffer['final_advantage']),
+                    "final_advantage_mean": np.mean(metrics_buffer['final_advantage']),
+                    "final_advantage_min": np.min(metrics_buffer['final_advantage']),
                 }
                 metrics_buffer.clear()
 

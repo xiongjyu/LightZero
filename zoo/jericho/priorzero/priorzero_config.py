@@ -125,7 +125,7 @@ class PriorZeroLLMConfig:
     reward_func: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "format_reward": True,
         "format_param": EasyDict(
-            {"format_weight": 1.0, }
+            {"format_weight": 0.5, } # fmt_reward 的权重，应该在 [0, 1) 之间，因为advantage的权重是 1 - format_weight
         ),
     }))
     # advantage = target_value - pred_value 

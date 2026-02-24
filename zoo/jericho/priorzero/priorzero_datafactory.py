@@ -302,6 +302,7 @@ class DataProcessor:
         
         if fmt_rewards is not None:
             fmt_weight = self.args.reward_func.format_param.format_weight
+            assert 0.0 <= fmt_weight < 1.0, f"format_weight should be in [0, 1), but got {fmt_weight}"
             log_status_tmp['fmt_rewards'] = fmt_rewards.tolist()
         
         # t 时刻的 target_value = td_step 步真实 r 的折扣和 + boostrap( t + td_step) 的 v
@@ -312,17 +313,20 @@ class DataProcessor:
         
         if self.args.advantage_type == "advantage":
             advantage = advantage
-            log_status_tmp["advantage"] = advantage.tolist()
+            log_status_tmp["value_advantage"] = advantage.tolist()
             if fmt_rewards is not None:
                 advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
+                log_status_tmp["final_advantage"] = advantage.tolist()
+                
 
         elif self.args.advantage_type == "advantage_batch_norm":
             # Legacy implementation: batch normalization (not recommended)
             advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
-            log_status_tmp["advantage"] = advantage.tolist()
+            log_status_tmp["value_advantage"] = advantage.tolist()
             
             if fmt_rewards is not None:
                 advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
+                log_status_tmp["final_advantage"] = advantage.tolist()
 
         elif self.args.advantage_type == "advantage_running_norm":
             if self.value_normalizer is not None:
@@ -393,14 +397,15 @@ class DataProcessor:
                     )
 
                     
-            log_status_tmp["advantage"] = advantage.tolist()
+            log_status_tmp["value_advantage"] = advantage.tolist()
             if fmt_rewards is not None:
                 advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
+                log_status_tmp["final_advantage"] = advantage.tolist()
         else:
             raise ValueError(f"Unknown advantage_type: {self.args.advantage_type}")
         
         log_status = [
-            {k: log_status_tmp[k][i] for k in log_status_tmp.keys()} for i in range(len(log_status_tmp['advantage']))
+            {k: log_status_tmp[k][i] for k in log_status_tmp.keys()} for i in range(len(log_status_tmp['value_advantage']))
         ]
         
         old_seq_max_len = max([len(s['old_logprob']) for s in real_samples])
