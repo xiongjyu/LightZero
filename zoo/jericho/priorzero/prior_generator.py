@@ -199,6 +199,101 @@ class VLMPriorGenerator(PriorGenerator):
             "Make sure probabilities sum to 1.0."
         )
 
+    def _convert_obs_to_pil_image(self, obs: np.ndarray) -> Image.Image:
+        """
+        Robustly convert observation array to PIL Image.
+
+        Handles various input formats:
+        - CHW format (C, H, W): channels first, e.g., (3, 64, 64)
+        - HWC format (H, W, C): channels last, e.g., (64, 64, 3)
+        - Grayscale (H, W): single channel, e.g., (64, 64)
+        - Stacked frames (N, H, W): takes the last frame
+
+        Args:
+            obs: Observation array
+
+        Returns:
+            PIL Image in RGB format
+
+        Raises:
+            ValueError: If observation shape is invalid
+        """
+        if not isinstance(obs, np.ndarray):
+            raise TypeError(f"Expected np.ndarray, got {type(obs)}")
+
+        # Ensure uint8 dtype
+        if obs.dtype != np.uint8:
+            # Normalize to [0, 255] if needed
+            if obs.max() <= 1.0:
+                obs = (obs * 255).astype(np.uint8)
+            else:
+                obs = obs.astype(np.uint8)
+
+        # Handle different shapes
+        if obs.ndim == 2:
+            # Grayscale (H, W) -> convert to RGB
+            return Image.fromarray(obs, mode='L').convert('RGB')
+
+        elif obs.ndim == 3:
+            # Determine if CHW or HWC format
+            c, h, w = obs.shape
+
+            # If first dimension is small (1-4), likely CHW format
+            if c <= 4 and h > c and w > c:
+                # CHW format -> transpose to HWC
+                if c == 1:
+                    # Single channel (1, H, W) -> (H, W)
+                    obs = obs[0]
+                    return Image.fromarray(obs, mode='L').convert('RGB')
+                elif c == 3:
+                    # RGB (3, H, W) -> (H, W, 3)
+                    obs = np.transpose(obs, (1, 2, 0))
+                    return Image.fromarray(obs, mode='RGB')
+                elif c == 4:
+                    # RGBA or stacked frames
+                    # Take last 3 channels as RGB
+                    obs = np.transpose(obs[-3:], (1, 2, 0))
+                    return Image.fromarray(obs, mode='RGB')
+                else:
+                    # Stacked grayscale frames (N, H, W) -> take last frame
+                    obs = obs[-1]
+                    return Image.fromarray(obs, mode='L').convert('RGB')
+
+            # Otherwise, assume HWC format
+            elif w <= 4 and h > w and c > w:
+                # HWC format
+                if w == 1:
+                    # Single channel (H, W, 1) -> (H, W)
+                    obs = obs[:, :, 0]
+                    return Image.fromarray(obs, mode='L').convert('RGB')
+                elif w == 3:
+                    # RGB (H, W, 3)
+                    return Image.fromarray(obs, mode='RGB')
+                elif w == 4:
+                    # RGBA (H, W, 4) -> take first 3 channels
+                    obs = obs[:, :, :3]
+                    return Image.fromarray(obs, mode='RGB')
+
+            # Ambiguous shape - provide detailed error
+            raise ValueError(
+                f"Cannot determine image format from shape {obs.shape}. "
+                f"Expected CHW (C, H, W) with C<=4 or HWC (H, W, C) with C<=4. "
+                f"Please ensure observation is in correct format."
+            )
+
+        elif obs.ndim == 4:
+            # Batch dimension (B, C, H, W) or (B, H, W, C) -> take first image
+            raise ValueError(
+                f"Observation has batch dimension {obs.shape}. "
+                f"Please pass individual observations, not batches."
+            )
+
+        else:
+            raise ValueError(
+                f"Invalid observation shape {obs.shape}. "
+                f"Expected 2D (H, W) or 3D (C, H, W) or (H, W, C)."
+            )
+
     def _build_prompt(
         self,
         action_candidates: List[str],
@@ -343,15 +438,25 @@ class VLMPriorGenerator(PriorGenerator):
         if histories is None:
             histories = [None] * len(observations)
 
-        # Convert all observations to PIL Images
+        # Convert all observations to PIL Images using robust conversion
         images = []
-        for obs in observations:
-            if isinstance(obs, np.ndarray):
-                if obs.dtype != np.uint8:
-                    obs = (obs * 255).astype(np.uint8)
-                images.append(Image.fromarray(obs))
-            else:
-                images.append(obs)
+        for i, obs in enumerate(observations):
+            try:
+                if isinstance(obs, Image.Image):
+                    # Already a PIL Image
+                    images.append(obs)
+                elif isinstance(obs, np.ndarray):
+                    # Convert numpy array to PIL Image
+                    pil_image = self._convert_obs_to_pil_image(obs)
+                    images.append(pil_image)
+                else:
+                    raise TypeError(f"Unsupported observation type: {type(obs)}")
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to convert observation {i} with shape "
+                    f"{obs.shape if isinstance(obs, np.ndarray) else 'N/A'} "
+                    f"to PIL Image: {e}"
+                ) from e
 
         # Build prompts
         prompts = [
