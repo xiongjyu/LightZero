@@ -92,14 +92,10 @@ class MuZeroEvaluator(ISerialEvaluator):
                     f'./{self._exp_name}/log/{self._instance_name}', self._instance_name
                 )
         else:
-            # TODO(username): Refine logger setup for UniZero multitask with DDP v2.
-            if tb_logger is not None:
-                self._logger, _ = build_logger(
-                    f'./{self._exp_name}/log/{self._instance_name}', self._instance_name, need_tb=False
-                )
-                self._tb_logger = tb_logger
-            else:
-                self._tb_logger = None
+            self._logger, _ = build_logger(
+                f'./{self._exp_name}/log/{self._instance_name}', self._instance_name, need_tb=False
+            )
+            self._tb_logger = tb_logger
 
         self._rank = get_rank()
         print(f'rank {self._rank}, self.task_id: {self.task_id}')
@@ -201,7 +197,7 @@ class MuZeroEvaluator(ISerialEvaluator):
             envstep: int = -1,
             n_episode: Optional[int] = None,
             return_trajectory: bool = False,
-    ) -> Tuple[bool, Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Overview:
             Run a full evaluation process. It will evaluate the current policy, log the results,
@@ -360,8 +356,8 @@ class MuZeroEvaluator(ISerialEvaluator):
                         dones[env_id] = done
                         if episode_timestep.done:
                             self._policy.reset([env_id])
-                            reward = episode_timestep.info['eval_episode_return']
-                            saved_info = {'eval_episode_return': episode_timestep.info['eval_episode_return']}
+                            reward = episode_timestep.info['score']
+                            saved_info = {'eval_episode_return': episode_timestep.info['score']}
                             if 'episode_info' in episode_timestep.info:
                                 saved_info.update(episode_timestep.info['episode_info'])
                             eval_monitor.update_info(env_id, saved_info)
@@ -409,64 +405,10 @@ class MuZeroEvaluator(ISerialEvaluator):
             duration = self._timer.value
             episode_return = eval_monitor.get_episode_return()
             info = {
-                'train_iter': train_iter,
-                'ckpt_name': f'iteration_{train_iter}.pth.tar',
-                'episode_count': n_episode,
-                'envstep_count': envstep_count,
                 'avg_envstep_per_episode': envstep_count / n_episode if n_episode > 0 else 0,
-                'evaluate_time': duration,
-                'avg_envstep_per_sec': envstep_count / duration if duration > 0 else 0,
-                'avg_time_per_episode': n_episode / duration if duration > 0 else 0,
                 'reward_mean': np.mean(episode_return),
                 'reward_std': np.std(episode_return),
                 'reward_max': np.max(episode_return),
                 'reward_min': np.min(episode_return),
             }
-            episode_info = eval_monitor.get_episode_info()
-            if episode_info is not None:
-                info.update(episode_info)
-
-            print(f'rank {self._rank}, self.task_id: {self.task_id}')
-            self._logger.info(self._logger.get_tabulate_vars_hor(info))
-
-            # Log to TensorBoard and WandB.
-            for k, v in info.items():
-                if k in ['train_iter', 'ckpt_name', 'each_reward'] or not np.isscalar(v):
-                    continue
-                if self.task_id is None:
-                    self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}', v, train_iter)
-                    self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}', v, envstep)
-                else:
-                    self._tb_logger.add_scalar(f'{self._instance_name}_iter_task{self.task_id}/{k}', v, train_iter)
-                    self._tb_logger.add_scalar(f'{self._instance_name}_step_task{self.task_id}/{k}', v, envstep)
-                if self.policy_config.use_wandb:
-                    wandb.log({f'{self._instance_name}_step/{k}': v}, step=envstep)
-
-            # Check for new best performance and save checkpoint.
-            mean_episode_return = np.mean(episode_return)
-            if mean_episode_return > self._max_episode_return:
-                if save_ckpt_fn:
-                    save_ckpt_fn('ckpt_best.pth.tar')
-                self._max_episode_return = mean_episode_return
-
-            # Check if the stop condition is met.
-            stop_flag = mean_episode_return >= self._stop_value and train_iter > 0
-            if stop_flag:
-                self._logger.info(
-                    f"[LightZero serial pipeline] Current episode_return: {mean_episode_return} is greater than "
-                    f"stop_value: {self._stop_value}. The agent is considered converged."
-                )
-
-        # TODO(username): Finalize DDP synchronization for evaluation results.
-        # if get_world_size() > 1:
-        #     objects = [stop_flag, episode_info]
-        #     print(f'rank {self._rank}, self.task_id: {self.task_id}')
-        #     print('before broadcast_object_list')
-        #     broadcast_object_list(objects, src=0)
-        #     print('evaluator after broadcast_object_list')
-        #     stop_flag, episode_info = objects
-
-        episode_info = to_item(episode_info)
-        if return_trajectory:
-            episode_info['trajectory'] = game_segments
-        return stop_flag, episode_info
+        return info

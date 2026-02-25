@@ -75,7 +75,7 @@ class PriorZeroLLMConfig:
     enable_world_model: bool = True
     
     attn_implementation: str = "flash_attention_2" 
-    history_length: int = 5
+    history_length: int = 10
     use_cot: bool = True
     prompt_max_len: int = 8192
     generate_max_len: int = 512
@@ -92,11 +92,17 @@ class PriorZeroLLMConfig:
 
     gpu_memory_utilization: float = 0.3
     vllm_enable_sleep: bool = True # 是否可以休眠
-    temperature: float = 0.6
+    temperature: float = 1.0
     top_p: float = 0.95
     seed: int = 0
     reduction: str = "mean"
     llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
+    eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "world_model": True,
+        "world_model_llm_prior": True,
+        "llm_prior": True,
+        "eval_freq": int(500),
+    }))
     
     # 训练相关参数
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练
@@ -113,7 +119,7 @@ class PriorZeroLLMConfig:
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 320 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     micro_train_batch_size: int = 2 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
-    broadcast_every: int = 4 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
+    broadcast_every: int = 2 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
     learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
@@ -380,8 +386,6 @@ def get_priorzero_debug_config(
     main_config, create_config, llm_config = get_priorzero_config(
         env_id=env_id, seed=seed, exp_name=exp_name, use_cot=use_cot, model_key=model_key
     )
-    collector_env_num = 1
-    evaluator_env_num = 1
     max_steps = 20
     
     batch_size = 8
@@ -394,8 +398,6 @@ def get_priorzero_debug_config(
     llm_config.micro_train_batch_size = 8
     llm_config.train_llm_after_wm_warm_step = 0
 
-    create_config.collector_env_num = collector_env_num
-    create_config.evaluator_env_num = evaluator_env_num
     create_config.max_steps = max_steps
     
     main_config.policy.model.world_model_cfg.num_layers = num_layers
@@ -403,9 +405,6 @@ def get_priorzero_debug_config(
     main_config.policy.batch_size = batch_size
     main_config.policy.collect_num_simulations = collect_num_simulations
     main_config.policy.eval_num_simulations = eval_num_simulations
-    main_config.policy.model.world_model_cfg.env_num = collector_env_num
-    main_config.policy.num_segments = collector_env_num
-    main_config.policy.collector_env_num = collector_env_num
     main_config.policy.update_per_collect = 2
     main_config.policy.game_segment_length = game_segment_length
     

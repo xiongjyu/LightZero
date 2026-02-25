@@ -321,9 +321,10 @@ class PriorZeroCollector(OriginalCollector):
                             histories=histories_list,
                             return_cot=True  # Request CoT prefixes for reuse in training
                         )
-                        for env_id, llm_prior in enumerate(llm_prior_per_seq):
+                        assert len(llm_prior_per_seq) == len(ready_env_id) == len(valid_actions_list)
+                        for idx, llm_prior in enumerate(llm_prior_per_seq):
                             scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
-                            llm_prior_per_seq[env_id] = scaled_llm_prior
+                            llm_prior_per_seq[idx] = scaled_llm_prior
                         
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
@@ -383,11 +384,7 @@ class PriorZeroCollector(OriginalCollector):
                     # [PRIORZERO-NEW] Update History Buffer
                     # ===========================================================
                     raw_obs_text = extract_raw_obs_text(obs[env_id])
-                    if env_id < len(valid_actions_list) and actions[env_id] < len(valid_actions_list[env_id]):  
-                        action = valid_actions_list[env_id][actions[env_id]]
-                    else:
-                        action = info.get('action_str', "go")
-                        
+                    action = info['action_str']
                     self.history_buffers[env_id].append((raw_obs_text, action, float(reward)))
                     
                     # Append transition to game segment (including CoT prefix for reuse optimization)
@@ -397,7 +394,7 @@ class PriorZeroCollector(OriginalCollector):
                         reward,
                         self.action_mask_dict[env_id],
                         self.to_play_dict[env_id],
-                        timestep=to_ndarray(obs_new.get('timestep', -1)),
+                        timestep=to_ndarray(self.timestep_dict[env_id]),
                         raw_obs_text=extract_raw_obs_text(obs_new),
                         history_obs=list(self.history_buffers[env_id]),
                         llm_prior_per_tok=llm_prior_per_tok[env_id],
@@ -476,7 +473,7 @@ class PriorZeroCollector(OriginalCollector):
                     self._total_episode_count += 1
                     # Logging
                     info_log = {
-                        'reward': episode_timestep.info['eval_episode_return'],
+                        'reward': episode_timestep.info['score'],
                         'time': self._env_info[env_id]['time'],
                         'step': self._env_info[env_id]['step'],
                         'llm_prior_entropy': sum(llm_prior_entropy[env_id])/len(llm_prior_entropy[env_id])}

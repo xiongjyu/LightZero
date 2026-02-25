@@ -556,7 +556,7 @@ class MuZeroSegmentCollector(ISerialCollector):
                     self._total_episode_count += 1
 
                     info = {
-                        'reward': episode_timestep.info['eval_episode_return'],
+                        'reward': episode_timestep.info['score'],
                         'time': self._env_info[env_id]['time'],
                         'step': self._env_info[env_id]['step'],
                     }
