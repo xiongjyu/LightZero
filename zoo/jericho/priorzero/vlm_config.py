@@ -268,8 +268,8 @@ def get_priorzero_vlm_config(
         model=dict(
             observation_shape=(3, 64, 64),
             action_space_size=action_space_size,
-            reward_support_range=(-300., 301., 1.),
-            value_support_range=(-300., 301., 1.),
+            reward_support_range=(-50., 51., 1.),
+            value_support_range=(-50., 51., 1.),
             norm_type="LN",
             num_res_blocks=1,
             num_channels=64,

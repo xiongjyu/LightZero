@@ -5,7 +5,7 @@ This module provides a unified interface for generating action priors
 from different types of observations (text or image).
 """
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 import numpy as np
 import torch
 from PIL import Image
@@ -167,6 +167,8 @@ class VLMPriorGenerator(PriorGenerator):
     Prior generator using Vision-Language Models for image observations.
 
     Supports models like Qwen-VL, LLaVA, InternVL, etc.
+
+    Includes training sample construction for PPO optimization with advantages.
     """
 
     def __init__(
@@ -174,6 +176,8 @@ class VLMPriorGenerator(PriorGenerator):
         vlm_engine,
         model_name: str,
         prompt_template: Optional[str] = None,
+        use_cot: bool = True,
+        tokenizer=None,
         **kwargs
     ):
         """
@@ -181,24 +185,47 @@ class VLMPriorGenerator(PriorGenerator):
             vlm_engine: VLM engine instance (to be implemented)
             model_name: VLM model name
             prompt_template: Optional custom prompt template
+            use_cot: Whether to use Chain-of-Thought reasoning
+            tokenizer: Tokenizer for building training samples
         """
         super().__init__(model_name, obs_type='image')
         self.vlm_engine = vlm_engine
         self.prompt_template = prompt_template or self._default_prompt_template()
+        self.use_cot = use_cot
+        self.tokenizer = tokenizer
+
+        # For logging VLM outputs
+        self.episode_output = []
 
     def _default_prompt_template(self) -> str:
         """Default prompt template for Atari games with Qwen-VL format."""
-        return (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "You are an expert Atari game player. "
-            "Based on the current game screen shown in the image above, "
-            "choose the best action from the following options:\n"
-            "{action_list}\n\n"
-            "Provide a probability distribution over these actions. "
-            "Consider the game state, positions of objects, and your goal. "
-            "Output format: {{'action_name': probability, ...}}\n"
-            "Make sure probabilities sum to 1.0."
-        )
+        if self.use_cot:
+            return (
+                "<|vision_start|><|image_pad|><|vision_end|>"
+                "You are an expert Atari game player. "
+                "Based on the current game screen shown in the image above, "
+                "analyze the situation and choose the best action.\n\n"
+                "Available actions:\n{action_list}\n\n"
+                "OUTPUT FORMAT:\n"
+                "You MUST produce exactly TWO parts in the following order:\n"
+                "1. Reasoning: Analyze the current game state, positions of objects, "
+                "available actions, and your strategy. Do NOT reveal the final choice here.\n"
+                "2. Action: The final chosen action.\n\n"
+                "Strict Format Example:\n"
+                "Reasoning: <detailed_analysis>\n"
+                "Action: <single_action>"
+            )
+        else:
+            return (
+                "<|vision_start|><|image_pad|><|vision_end|>"
+                "You are an expert Atari game player. "
+                "Based on the current game screen shown in the image above, "
+                "choose the best action from the following options:\n"
+                "{action_list}\n\n"
+                "Output exactly one line starting with 'Action:'.\n"
+                "Example:\n"
+                "Action: <your_action_here>"
+            )
 
     def _convert_obs_to_pil_image(self, obs: np.ndarray) -> Image.Image:
         """
@@ -301,16 +328,16 @@ class VLMPriorGenerator(PriorGenerator):
         history: Optional[List] = None
     ) -> str:
         """
-        Build prompt for VLM.
+        Build prompt for VLM with CoT support.
 
         Args:
-            action_candidates: List of valid actions
+            action_candidates: List of valid action names (e.g., ['NOOP', 'FIRE', 'RIGHT'])
             history: Optional history (for context)
 
         Returns:
             Formatted prompt string
         """
-        # Format action list
+        # Format action list with semantic names
         action_list = "\n".join([f"- {action}" for action in action_candidates])
 
         # Build base prompt (already contains vision tokens at the start)
@@ -326,6 +353,175 @@ class VLMPriorGenerator(PriorGenerator):
 
         return prompt
 
+    def get_system_prompt(self) -> str:
+        """
+        System prompt for VLM (similar to LLM version).
+        Defines role, goal, and output protocol.
+        """
+        parts = [
+            "You are an expert Atari game player. Your goal is to maximize the score by choosing the optimal next action.",
+            "Please analyze the game screen and history to decide the single best next action.",
+            "OUTPUT FORMAT:",
+        ]
+
+        if self.use_cot:
+            parts.append(
+                "You MUST produce exactly TWO parts in the following order:\n"
+                "1. Reasoning: Analyze the current game state, positions of objects, available actions, and your strategy. Do NOT reveal the final choice here.\n"
+                "2. Action: The final chosen action.\n"
+                "Strict Format Example:\n"
+                "Reasoning: <detailed_analysis>\n"
+                "Action: <single_action>"
+            )
+        else:
+            parts.append(
+                "Output exactly one line starting with 'Action:'.\n"
+                "Example:\n"
+                "Action: <your_action_here>"
+            )
+        return "\n".join(parts)
+
+    def get_user_prompt(
+        self,
+        action_candidates: List[str],
+        history: Optional[List[Tuple[str, str, float]]] = None
+    ) -> str:
+        """
+        User prompt for VLM: inject history and trigger output.
+
+        Args:
+            action_candidates: List of valid action names
+            history: Optional history of (obs, action, reward) tuples
+
+        Returns:
+            Formatted user prompt
+        """
+        prompt_parts = []
+
+        # Add vision tokens at the start
+        prompt_parts.append("<|vision_start|><|image_pad|><|vision_end|>")
+
+        if history and len(history) > 0:
+            prompt_parts.append("\n=== GAME HISTORY ===")
+            for i, (obs, action, reward) in enumerate(history[-3:], start=1):
+                prompt_parts.append(f"Step {i}:")
+                prompt_parts.append(f"Action: {action}")
+                prompt_parts.append(f"Reward: {reward}")
+            prompt_parts.append("")  # Empty line separator
+
+        prompt_parts.append("=== CURRENT GAME SCREEN ===")
+        prompt_parts.append("(See image above)")
+
+        prompt_parts.append("\n=== AVAILABLE ACTIONS ===")
+        for action in action_candidates:
+            prompt_parts.append(f"- {action}")
+
+        prompt_parts.append("\n=== INSTRUCTION ===")
+        if self.use_cot:
+            prompt_parts.append(
+                "Please analyze the situation and provide your response in the following format:\n"
+                "Reasoning: <detailed_analysis>\n"
+                "Action: <single_action>"
+            )
+        else:
+            prompt_parts.append(
+                "Decide on the best next move and output it in the following format:\n"
+                "Action: <your_action_here>"
+            )
+
+        return "\n".join(prompt_parts)
+
+    def _parse_vlm_output_with_cot(
+        self,
+        raw_output: str,
+        action_candidates: List[str]
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Parse VLM output to extract action and optional CoT reasoning.
+
+        Args:
+            raw_output: Raw VLM output string
+            action_candidates: List of valid action names
+
+        Returns:
+            Tuple of (chosen_action, cot_prefix)
+            - chosen_action: The selected action name
+            - cot_prefix: The reasoning part (if use_cot=True), else None
+        """
+        import re
+
+        cot_prefix = None
+        chosen_action = None
+
+        if self.use_cot:
+            # Parse CoT format: "Reasoning: ... Action: ..."
+            reasoning_match = re.search(r'Reasoning:\s*(.+?)(?=Action:|$)', raw_output, re.DOTALL | re.IGNORECASE)
+            action_match = re.search(r'Action:\s*(\S+)', raw_output, re.IGNORECASE)
+
+            if reasoning_match:
+                cot_prefix = reasoning_match.group(1).strip()
+
+            if action_match:
+                action_str = action_match.group(1).strip()
+                # Match against valid actions (case-insensitive)
+                for candidate in action_candidates:
+                    if candidate.upper() == action_str.upper():
+                        chosen_action = candidate
+                        break
+        else:
+            # Parse simple format: "Action: ..."
+            action_match = re.search(r'Action:\s*(\S+)', raw_output, re.IGNORECASE)
+            if action_match:
+                action_str = action_match.group(1).strip()
+                for candidate in action_candidates:
+                    if candidate.upper() == action_str.upper():
+                        chosen_action = candidate
+                        break
+
+        # Fallback: if no valid action found, use first candidate
+        if chosen_action is None:
+            chosen_action = action_candidates[0] if action_candidates else "NOOP"
+
+        return chosen_action, cot_prefix
+
+    def _action_to_logprob(
+        self,
+        chosen_action: str,
+        action_candidates: List[str],
+        temperature: float = 1.0
+    ) -> np.ndarray:
+        """
+        Convert chosen action to log probability distribution.
+
+        For training, we need to store the "old" log probabilities that were used
+        to select the action. This creates a peaked distribution around the chosen action.
+
+        Args:
+            chosen_action: The action selected by VLM
+            action_candidates: List of all valid actions
+            temperature: Temperature for softening the distribution
+
+        Returns:
+            Log probability array of shape (num_actions,)
+        """
+        num_actions = len(action_candidates)
+
+        # Create peaked distribution: high prob for chosen action, low for others
+        logits = np.ones(num_actions) * (-10.0)  # Very low logit for non-chosen
+
+        try:
+            chosen_idx = action_candidates.index(chosen_action)
+            logits[chosen_idx] = 10.0  # High logit for chosen action
+        except ValueError:
+            # If chosen action not in candidates, uniform distribution
+            logits = np.zeros(num_actions)
+
+        # Apply temperature and convert to log probabilities
+        logits = logits / temperature
+        log_probs = logits - np.log(np.sum(np.exp(logits)))
+
+        return log_probs
+
     def _parse_vlm_output(
         self,
         raw_output: str,
@@ -336,7 +532,7 @@ class VLMPriorGenerator(PriorGenerator):
 
         Args:
             raw_output: Raw text output from VLM
-            action_candidates: List of valid actions
+            action_candidates: List of valid action names (e.g., ['NOOP', 'FIRE', 'RIGHT'])
 
         Returns:
             Action probabilities as numpy array
@@ -354,23 +550,30 @@ class VLMPriorGenerator(PriorGenerator):
                 # Convert to array aligned with action_candidates
                 probs = []
                 for action in action_candidates:
-                    probs.append(action_probs_dict.get(action, 0.0))
+                    # Try exact match and case-insensitive match
+                    prob = action_probs_dict.get(action,
+                           action_probs_dict.get(action.upper(),
+                           action_probs_dict.get(action.lower(), 0.0)))
+                    probs.append(prob)
 
-                probs = np.array(probs)
+                probs = np.array(probs, dtype=np.float32)
 
                 # Normalize
                 if probs.sum() > 0:
                     probs = probs / probs.sum()
                 else:
                     # Fallback to uniform
-                    probs = np.ones(len(action_candidates)) / len(action_candidates)
+                    probs = np.ones(len(action_candidates), dtype=np.float32) / len(action_candidates)
 
                 return probs
-        except:
-            pass
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to parse VLM output: {e}. Using uniform prior.")
+            logger.debug(f"Raw output: {raw_output}")
 
         # Fallback: uniform distribution
-        return np.ones(len(action_candidates)) / len(action_candidates)
+        return np.ones(len(action_candidates), dtype=np.float32) / len(action_candidates)
 
     def generate_prior(
         self,
@@ -381,7 +584,7 @@ class VLMPriorGenerator(PriorGenerator):
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Generate prior from image observation using VLM.
+        Generate prior from image observation using VLM with CoT support.
 
         Args:
             observation: Image observation (numpy array or PIL Image)
@@ -390,19 +593,19 @@ class VLMPriorGenerator(PriorGenerator):
             temperature: Sampling temperature
 
         Returns:
-            Prior dictionary with action_probs, action_logits, raw_output
+            Prior dictionary with action_probs, action_logits, raw_output, cot_prefix
         """
         # Convert observation to PIL Image if needed
         if isinstance(observation, np.ndarray):
-            # Assume (H, W, C) format
-            if observation.dtype != np.uint8:
-                observation = (observation * 255).astype(np.uint8)
-            image = Image.fromarray(observation)
+            image = self._convert_obs_to_pil_image(observation)
         else:
             image = observation
 
-        # Build prompt
-        prompt = self._build_prompt(action_candidates, history)
+        # Build prompt (with CoT if enabled)
+        if self.use_cot:
+            prompt = self.get_user_prompt(action_candidates, history)
+        else:
+            prompt = self._build_prompt(action_candidates, history)
 
         # Generate with VLM
         raw_output = self.vlm_engine.generate(
@@ -412,17 +615,32 @@ class VLMPriorGenerator(PriorGenerator):
             **kwargs
         )
 
-        # Parse output to get probabilities
-        action_probs = self._parse_vlm_output(raw_output, action_candidates)
+        # Parse output
+        if self.use_cot:
+            # Extract action and CoT reasoning
+            chosen_action, cot_prefix = self._parse_vlm_output_with_cot(raw_output, action_candidates)
 
-        # Compute logits (inverse of softmax with temperature)
-        action_logits = np.log(action_probs + 1e-10) * temperature
+            # Convert chosen action to log probability distribution
+            action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
+            action_probs = np.exp(action_log_probs)
 
-        return {
-            'action_probs': action_probs,
-            'action_logits': action_logits,
-            'raw_output': raw_output,
-        }
+            return {
+                'action_probs': action_probs,
+                'action_logits': action_log_probs,  # Store log probs for training
+                'raw_output': raw_output,
+                'cot_prefix': cot_prefix,
+                'chosen_action': chosen_action,
+            }
+        else:
+            # Legacy: parse as probability distribution
+            action_probs = self._parse_vlm_output(raw_output, action_candidates)
+            action_logits = np.log(action_probs + 1e-10) * temperature
+
+            return {
+                'action_probs': action_probs,
+                'action_logits': action_logits,
+                'raw_output': raw_output,
+            }
 
     def batch_generate_prior(
         self,
@@ -496,6 +714,140 @@ class VLMPriorGenerator(PriorGenerator):
             })
 
         return results
+
+    def build_vlm_train_samples(
+        self,
+        game_segments: List,
+        advantages: np.ndarray,
+        old_action_log_probs: np.ndarray,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build training samples for VLM from game segments with advantages.
+
+        This is the VLM equivalent of LLM's build_llm_samples in datafactory.
+
+        Args:
+            game_segments: List of game segments from replay buffer
+            advantages: Advantage values (target_value - pred_value) for each step
+            old_action_log_probs: Old action log probabilities from collection
+
+        Returns:
+            List of training samples, each containing:
+            - image: PIL Image
+            - prompt: Full prompt with history and actions
+            - target_action: The action that was taken
+            - old_log_prob: Old log probability of the action
+            - advantage: Advantage value for PPO loss
+            - cot_prefix: CoT reasoning (if use_cot=True)
+        """
+        train_samples = []
+
+        for seg_idx, segment in enumerate(game_segments):
+            # Extract segment data
+            raw_obs_list = segment.raw_obs_segment  # List of image observations
+            history_list = segment.history_obs_segment  # List of history tuples
+            action_list = segment.action_segment  # List of action indices
+            llm_action_list = segment.llm_action_segment  # List of action names
+            cot_prefix_list = segment.cot_prefix_segment if hasattr(segment, 'cot_prefix_segment') else [None] * len(action_list)
+
+            # Get valid actions for this environment
+            # Assume all steps have same action space
+            if hasattr(segment, 'valid_actions'):
+                valid_actions = segment.valid_actions
+            else:
+                # Fallback: extract from first history or use generic
+                valid_actions = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHTFIRE', 'LEFTFIRE']
+
+            # Build samples for each step in segment
+            for step_idx in range(len(action_list)):
+                # Get observation (image)
+                obs = raw_obs_list[step_idx]
+                if isinstance(obs, np.ndarray):
+                    image = self._convert_obs_to_pil_image(obs)
+                else:
+                    image = obs
+
+                # Get history
+                history = history_list[step_idx] if step_idx < len(history_list) else []
+
+                # Get action
+                action_idx = action_list[step_idx]
+                action_name = llm_action_list[step_idx] if step_idx < len(llm_action_list) else valid_actions[action_idx]
+
+                # Get advantage and old log prob
+                advantage = advantages[seg_idx, step_idx] if seg_idx < len(advantages) else 0.0
+                old_log_prob = old_action_log_probs[seg_idx, step_idx] if seg_idx < len(old_action_log_probs) else 0.0
+
+                # Get CoT prefix (if available)
+                cot_prefix = cot_prefix_list[step_idx] if step_idx < len(cot_prefix_list) else None
+
+                # Build prompt
+                if self.use_cot:
+                    prompt = self.get_user_prompt(valid_actions, history)
+                else:
+                    prompt = self._build_prompt(valid_actions, history)
+
+                # Create training sample
+                sample = {
+                    'image': image,
+                    'prompt': prompt,
+                    'target_action': action_name,
+                    'old_log_prob': float(old_log_prob),
+                    'advantage': float(advantage),
+                    'cot_prefix': cot_prefix,
+                    'valid_actions': valid_actions,
+                }
+
+                train_samples.append(sample)
+
+        return train_samples
+
+    def compute_action_log_prob(
+        self,
+        vlm_output: str,
+        target_action: str,
+        valid_actions: List[str],
+        temperature: float = 1.0
+    ) -> float:
+        """
+        Compute log probability of target action from VLM output.
+
+        This is used during training to compute the new log probability
+        for PPO ratio calculation.
+
+        Args:
+            vlm_output: Raw VLM output string
+            target_action: The action that was actually taken
+            valid_actions: List of valid action names
+            temperature: Temperature for scaling
+
+        Returns:
+            Log probability of target action
+        """
+        if self.use_cot:
+            # Parse CoT output to get chosen action
+            chosen_action, _ = self._parse_vlm_output_with_cot(vlm_output, valid_actions)
+
+            # Get log prob distribution
+            log_probs = self._action_to_logprob(chosen_action, valid_actions, temperature)
+
+            # Return log prob of target action
+            try:
+                target_idx = valid_actions.index(target_action)
+                return float(log_probs[target_idx])
+            except ValueError:
+                # Target action not in valid actions
+                return -10.0  # Very low log prob
+        else:
+            # Parse probability distribution
+            probs = self._parse_vlm_output(vlm_output, valid_actions)
+            log_probs = np.log(probs + 1e-10)
+
+            try:
+                target_idx = valid_actions.index(target_action)
+                return float(log_probs[target_idx])
+            except ValueError:
+                return -10.0
 
 
 def create_prior_generator(

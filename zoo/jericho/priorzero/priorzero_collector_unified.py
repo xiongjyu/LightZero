@@ -85,6 +85,7 @@ class PriorZeroCollector(OriginalCollector):
         prior_generator=None,  # NEW: Unified prior generator
         prof=None,
         obs_type: str = 'text',  # NEW: 'text' or 'image'
+        env_id: str = None,  # NEW: Environment ID for action mapping
         **kwargs
     ):
         """
@@ -97,6 +98,7 @@ class PriorZeroCollector(OriginalCollector):
             prior_generator: Unified PriorGenerator instance (NEW)
             prof: Profiler
             obs_type: Observation type ('text' or 'image')
+            env_id: Environment ID (e.g., 'PongNoFrameskip-v4')
             **kwargs: Additional arguments for parent class
         """
         kwargs['policy_config'] = policy_config
@@ -108,6 +110,7 @@ class PriorZeroCollector(OriginalCollector):
         self.prof = prof
         self.llm_cfg = llm_config
         self.obs_type = obs_type  # NEW: Track observation type
+        self.env_id = env_id or 'PongNoFrameskip-v4'  # NEW: Store env_id
 
         # History buffers
         history_length = getattr(llm_config, 'history_length', 5)
@@ -118,6 +121,8 @@ class PriorZeroCollector(OriginalCollector):
         prior_type = "VLM" if obs_type == 'image' else "LLM"
         self._logger.info(f"✓ PriorZeroCollector initialized with {prior_type} prior")
         self._logger.info(f"  - Observation type: {obs_type}")
+        if obs_type == 'image':
+            self._logger.info(f"  - Environment: {self.env_id}")
         self._logger.info(f"  - History length: {history_length}")
         self._logger.info(f"  - Prior generator: {type(prior_generator).__name__ if prior_generator else 'None'}")
 
@@ -329,7 +334,19 @@ class PriorZeroCollector(OriginalCollector):
 
                         observations_list.append(raw_obs)
                         histories_list.append(list(self.history_buffers[env_id]))
-                        valid_actions_list.append(obs[env_id].get('valid_actions', []))
+
+                        # Get valid actions
+                        # For text games: use valid_actions from obs
+                        # For Atari: convert integer indices to semantic action names
+                        valid_actions = obs[env_id].get('valid_actions', [])
+                        if len(valid_actions) == 0 and self.obs_type == 'image':
+                            # Atari: convert integer action indices to semantic names
+                            from zoo.jericho.priorzero.atari_action_meanings import get_action_meanings
+                            action_space_size = self.policy_config.model.action_space_size
+                            action_meanings = get_action_meanings(self.env_id, action_space_size)
+                            # Use semantic names instead of integers
+                            valid_actions = [action_meanings[i] for i in range(action_space_size)]
+                        valid_actions_list.append(valid_actions)
 
                     # Get priors using unified interface
                     with self.prof.block("collect_step_get_prior", rank=self._rank):
@@ -435,9 +452,16 @@ class PriorZeroCollector(OriginalCollector):
                         raw_obs = extract_raw_obs_image(obs[env_id])
 
                     # Get action string
-                    if env_id < len(valid_actions_list) and actions[env_id] < len(valid_actions_list[env_id]):
+                    # For Atari: convert integer action index to semantic name
+                    if self.obs_type == 'image':
+                        from zoo.jericho.priorzero.atari_action_meanings import action_index_to_name
+                        action_space_size = self.policy_config.model.action_space_size
+                        action_str = action_index_to_name(self.env_id, actions[env_id], action_space_size)
+                    elif env_id < len(valid_actions_list) and actions[env_id] < len(valid_actions_list[env_id]):
+                        # Text games: use action name from valid_actions_list
                         action_str = valid_actions_list[env_id][actions[env_id]]
                     else:
+                        # Fallback
                         action_str = info.get('action_str', str(actions[env_id]))
 
                     self.history_buffers[env_id].append((raw_obs, action_str, float(reward)))
@@ -477,7 +501,7 @@ class PriorZeroCollector(OriginalCollector):
                         if last_game_segments[env_id] is not None:
                             self.pad_and_save_last_trajectory(
                                 env_id, last_game_segments, last_game_priorities,
-                                game_segments, np.array([done])
+                                game_segments, done
                             )
 
                         last_game_segments[env_id] = game_segments[env_id]
@@ -511,7 +535,7 @@ class PriorZeroCollector(OriginalCollector):
                         if last_game_segments[env_id] is not None:
                             self.pad_and_save_last_trajectory(
                                 env_id, last_game_segments, last_game_priorities,
-                                game_segments, np.array([done])
+                                game_segments, done
                             )
 
                         # Log episode statistics
@@ -539,7 +563,7 @@ class PriorZeroCollector(OriginalCollector):
 
     def pad_and_save_last_trajectory(
         self, i: int, last_game_segments: List[GameSegment], last_game_priorities: List[np.ndarray],
-        game_segments: List[GameSegment], done: np.ndarray
+        game_segments: List[GameSegment], done: bool
     ) -> None:
         """Pad and save the last trajectory (same as original)."""
         beg_index = self.policy_config.model.frame_stack_num
@@ -596,7 +620,7 @@ class PriorZeroCollector(OriginalCollector):
                 )
 
         last_game_segments[i].game_segment_to_array()
-        self.game_segment_pool.append((last_game_segments[i], last_game_priorities[i], done[i]))
+        self.game_segment_pool.append((last_game_segments[i], last_game_priorities[i], done))
 
         last_game_segments[i] = None
         last_game_priorities[i] = None

@@ -245,6 +245,9 @@ def get_priorzero_config(
                 ),
         ),
         model=dict(
+            reward_support_range=(-300., 301., 1.),
+            value_support_range=(-300., 301., 1.),
+            
             observation_shape=512,
             action_space_size=action_space_size,
             encoder_option=wm_encoder_option,
@@ -253,6 +256,8 @@ def get_priorzero_config(
             continuous_action_space=False,
             norm_type="LN",
             world_model_cfg=dict(
+                support_size=601,
+
                 norm_type="LN",
                 final_norm_option_in_head="LayerNorm",
                 final_norm_option_in_encoder="LayerNorm",

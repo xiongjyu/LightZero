@@ -274,6 +274,7 @@ def prepare_vlm_components(rank, cfg, vlm_cfg, strategy, collector_env, evaluato
         data_processor=data_processor,
         prior_generator=prior_generator,
         obs_type='image',
+        env_id=cfg.env.env_id,  # Pass env_id for action mapping
     )
     collector.prof = prof
 
