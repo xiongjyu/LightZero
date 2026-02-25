@@ -197,6 +197,11 @@ class VLMPriorGenerator(PriorGenerator):
         # For logging VLM outputs
         self.episode_output = []
 
+        # Log control: only log every N calls
+        self.log_interval = 100  # Log every 100 calls
+        self.call_count = 0
+        self.batch_call_count = 0
+
     def _default_prompt_template(self) -> str:
         """Default prompt template for Atari games with Qwen-VL format."""
         if self.use_cot:
@@ -595,6 +600,8 @@ class VLMPriorGenerator(PriorGenerator):
         Returns:
             Prior dictionary with action_probs, action_logits, raw_output, cot_prefix
         """
+        self.call_count += 1
+
         # Convert observation to PIL Image if needed
         if isinstance(observation, np.ndarray):
             image = self._convert_obs_to_pil_image(observation)
@@ -606,6 +613,16 @@ class VLMPriorGenerator(PriorGenerator):
             prompt = self.get_user_prompt(action_candidates, history)
         else:
             prompt = self._build_prompt(action_candidates, history)
+
+        # Log prompt preview at intervals
+        if self.call_count % self.log_interval == 1:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(
+                f"[VLM Prior Generation] Call #{self.call_count} | "
+                f"Actions: {len(action_candidates)} | "
+                f"Prompt preview: {prompt[:150]}..."
+            )
 
         # Generate with VLM
         raw_output = self.vlm_engine.generate(
@@ -623,6 +640,13 @@ class VLMPriorGenerator(PriorGenerator):
             # Convert chosen action to log probability distribution
             action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
             action_probs = np.exp(action_log_probs)
+
+            # Log output at intervals
+            if self.call_count % self.log_interval == 1:
+                logger.info(
+                    f"[VLM Prior Output] Chosen: {chosen_action} | "
+                    f"CoT: {cot_prefix[:100] if cot_prefix else 'None'}..."
+                )
 
             return {
                 'action_probs': action_probs,
@@ -679,19 +703,30 @@ class VLMPriorGenerator(PriorGenerator):
                 ) from e
 
         # Build prompts
-        prompts = [
-            self._build_prompt(actions, hist)
-            for actions, hist in zip(action_candidates_list, histories)
-        ]
+        prompts = []
+        for action_candidates, history in zip(action_candidates_list, histories):
+            if self.use_cot:
+                prompt = self.get_user_prompt(action_candidates, history)
+            else:
+                prompt = self._build_prompt(action_candidates, history)
+            prompts.append(prompt)
 
-        # Debug: Log first prompt to verify vision tokens
-        if prompts and len(prompts) > 0:
+        # Increment batch call counter
+        self.batch_call_count += 1
+
+        # Log batch info at intervals (every 10 batch calls)
+        if self.batch_call_count % 10 == 1:
             import logging
             logger = logging.getLogger(__name__)
-            logger.info(f"[VLM Debug] First prompt preview (first 200 chars): {prompts[0][:200]}")
+            logger.info(
+                f"[VLM Batch Generation] Batch #{self.batch_call_count} | "
+                f"Batch size: {len(observations)} | "
+                f"Avg actions: {sum(len(a) for a in action_candidates_list) / len(action_candidates_list):.1f}"
+            )
+            # logger.debug(f"[VLM Debug] First prompt preview: {prompts[0][:200]}")
+            logger.debug(f"[VLM Debug] First prompt preview: {prompts[0]}")
             if "<|vision_start|>" not in prompts[0]:
                 logger.error(f"[VLM Error] Missing <|vision_start|> token in prompt!")
-                logger.error(f"[VLM Error] Full prompt: {prompts[0]}")
 
         # Batch generate with VLM
         raw_outputs = self.vlm_engine.batch_generate(
@@ -704,14 +739,29 @@ class VLMPriorGenerator(PriorGenerator):
         # Parse outputs
         results = []
         for raw_output, action_candidates in zip(raw_outputs, action_candidates_list):
-            action_probs = self._parse_vlm_output(raw_output, action_candidates)
-            action_logits = np.log(action_probs + 1e-10) * temperature
+            if self.use_cot:
+                # Parse CoT output
+                chosen_action, cot_prefix = self._parse_vlm_output_with_cot(raw_output, action_candidates)
+                action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
+                action_probs = np.exp(action_log_probs)
 
-            results.append({
-                'action_probs': action_probs,
-                'action_logits': action_logits,
-                'raw_output': raw_output,
-            })
+                results.append({
+                    'action_probs': action_probs,
+                    'action_logits': action_log_probs,
+                    'raw_output': raw_output,
+                    'cot_prefix': cot_prefix,
+                    'chosen_action': chosen_action,
+                })
+            else:
+                # Legacy: probability distribution
+                action_probs = self._parse_vlm_output(raw_output, action_candidates)
+                action_logits = np.log(action_probs + 1e-10) * temperature
+
+                results.append({
+                    'action_probs': action_probs,
+                    'action_logits': action_logits,
+                    'raw_output': raw_output,
+                })
 
         return results
 
@@ -740,7 +790,13 @@ class VLMPriorGenerator(PriorGenerator):
             - advantage: Advantage value for PPO loss
             - cot_prefix: CoT reasoning (if use_cot=True)
         """
+        import logging
+        logger = logging.getLogger(__name__)
+
         train_samples = []
+        total_steps = 0
+
+        logger.info(f"[VLM Training Samples] Building samples from {len(game_segments)} segments...")
 
         for seg_idx, segment in enumerate(game_segments):
             # Extract segment data
@@ -799,6 +855,17 @@ class VLMPriorGenerator(PriorGenerator):
                 }
 
                 train_samples.append(sample)
+                total_steps += 1
+
+        # Log summary
+        if len(train_samples) > 0:
+            avg_advantage = np.mean([s['advantage'] for s in train_samples])
+            avg_old_logprob = np.mean([s['old_log_prob'] for s in train_samples])
+            logger.info(
+                f"[VLM Training Samples] Built {len(train_samples)} samples | "
+                f"Avg advantage: {avg_advantage:.4f} | "
+                f"Avg old_logprob: {avg_old_logprob:.4f}"
+            )
 
         return train_samples
 
@@ -848,6 +915,29 @@ class VLMPriorGenerator(PriorGenerator):
                 return float(log_probs[target_idx])
             except ValueError:
                 return -10.0
+
+
+    def get_vlm_output_log(
+        self,
+        wm_train_iter: int,
+        vlm_train_iter: int,
+    ) -> None:
+        """
+        Log VLM output statistics (similar to LLM's get_llm_output_log).
+
+        Args:
+            wm_train_iter: World model training iteration
+            vlm_train_iter: VLM training iteration
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if len(self.episode_output) > 0:
+            logger.info(
+                f"[WM Iter {wm_train_iter} | VLM Iter {vlm_train_iter}] "
+                f"Collected {len(self.episode_output)} VLM outputs"
+            )
+            self.episode_output = []
 
 
 def create_prior_generator(
