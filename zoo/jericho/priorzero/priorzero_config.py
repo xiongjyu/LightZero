@@ -232,6 +232,12 @@ def get_priorzero_config(
         ),
         use_cache=True,
         cache_size=100000,
+        
+                
+        collect_max_episode_steps=int(200), # TODO
+        eval_max_episode_steps=int(200),
+        # collect_max_episode_steps=int(2e4),
+        # eval_max_episode_steps=int(1e4),
     )
     policy_config = dict(
         type='priorzero',
@@ -247,7 +253,7 @@ def get_priorzero_config(
         model=dict(
             reward_support_range=(-300., 301., 1.),
             value_support_range=(-300., 301., 1.),
-            
+
             observation_shape=512,
             action_space_size=action_space_size,
             encoder_option=wm_encoder_option,

@@ -738,12 +738,31 @@ class VLMPriorGenerator(PriorGenerator):
 
         # Parse outputs
         results = []
-        for raw_output, action_candidates in zip(raw_outputs, action_candidates_list):
+        for idx, (raw_output, action_candidates) in enumerate(zip(raw_outputs, action_candidates_list)):
             if self.use_cot:
                 # Parse CoT output
                 chosen_action, cot_prefix = self._parse_vlm_output_with_cot(raw_output, action_candidates)
                 action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
                 action_probs = np.exp(action_log_probs)
+
+                # Store for logging
+                if idx < 15:  # Only store first 15 for logging
+                    history = histories[idx] if idx < len(histories) else []
+                    prompt = prompts[idx]
+
+                    # Build action probability dict
+                    action_prob_dict = {
+                        action: float(action_probs[i])
+                        for i, action in enumerate(action_candidates)
+                    }
+
+                    self.episode_output.append({
+                        "Instruction": prompt,
+                        "Response": raw_output,
+                        "vlm_prior_per_seq": action_prob_dict,
+                        "chosen_action": chosen_action,
+                        "cot_prefix": cot_prefix,
+                    })
 
                 results.append({
                     'action_probs': action_probs,
@@ -932,12 +951,43 @@ class VLMPriorGenerator(PriorGenerator):
         import logging
         logger = logging.getLogger(__name__)
 
-        if len(self.episode_output) > 0:
+        if len(self.episode_output) == 0:
+            return
+
+        logger.info(
+            f"\n{'='*80}\n"
+            f"[VLM Output Log] WM Iter: {wm_train_iter} | VLM Iter: {vlm_train_iter}\n"
+            f"{'='*80}"
+        )
+
+        for i, tmp_dict in enumerate(self.episode_output[:15]):
+            instruction = tmp_dict["Instruction"]
+            response = tmp_dict["Response"]
+            vlm_prior = tmp_dict["vlm_prior_per_seq"]
+            chosen_action = tmp_dict.get("chosen_action", "N/A")
+            cot_prefix = tmp_dict.get("cot_prefix", "")
+
             logger.info(
-                f"[WM Iter {wm_train_iter} | VLM Iter {vlm_train_iter}] "
-                f"Collected {len(self.episode_output)} VLM outputs"
+                f"\n{'-'*80}\n"
+                f"[Step {i}]\n"
+                f"{'-'*80}\n"
+                f"Instruction:\n{instruction}\n\n"
+                f"Response:\n{response}\n\n"
+                f"Chosen Action: {chosen_action}\n"
             )
-            self.episode_output = []
+
+            if cot_prefix:
+                logger.info(f"CoT Reasoning:\n{cot_prefix}\n")
+
+            logger.info("Action Probabilities:")
+
+            # Sort actions by probability (descending)
+            sorted_actions = sorted(vlm_prior.items(), key=lambda x: x[1], reverse=True)
+
+            for action, prob in sorted_actions:
+                logger.info(f"  {action:30s} | prob={prob:.6f}")
+
+        self.episode_output = []
 
 
 def create_prior_generator(

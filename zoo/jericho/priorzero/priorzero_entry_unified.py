@@ -397,10 +397,22 @@ def train_unified(
                 train_iter=learner.train_iter,
                 policy_kwargs={'temperature': 0.25, 'epsilon': 0.0}
             )
-        data_processor.get_llm_output_log(
-            wm_train_iter=learner.train_iter,
-            llm_train_iter=policy_model.train_iter
-        )
+
+        # Log output based on input type
+        if is_text_input:
+            data_processor.get_llm_output_log(
+                wm_train_iter=learner.train_iter,
+                llm_train_iter=policy_model.train_iter
+            )
+        else:
+            # VLM: use prior_generator's log method
+            prior_generator = components.get('prior_generator')
+            if prior_generator and hasattr(prior_generator, 'get_vlm_output_log'):
+                prior_generator.get_vlm_output_log(
+                    wm_train_iter=learner.train_iter,
+                    vlm_train_iter=policy_model.train_iter
+                )
+
 
         # Sleep engine
         if prior_cfg.vllm_enable_sleep and prior_engine is not None:
