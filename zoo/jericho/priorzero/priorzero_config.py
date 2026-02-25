@@ -21,14 +21,19 @@ MODEL_CONFIGS = {
         "description": "Qwen2.5-1.5B-Instruct (balanced performance)",
     },
     "qwen2.5-3b": {
-        "model_name_or_path": "/mnt/afs/niuyazhe/workspace/xiongjyu/models/Qwen2.5-3B-Instruct",
+        # "model_name_or_path": "/mnt/afs/niuyazhe/workspace/xiongjyu/models/Qwen2.5-3B-Instruct",
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-3B-Instruct",
         "vllm_tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.25,
         "description": "Qwen2.5-3B-Instruct (better quality)",
     },
     "qwen2.5-7b": {
-        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct",
-        "vllm_tensor_parallel_size": 2,
+        # "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct",
+        # "vllm_tensor_parallel_size": 2,
+
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-7B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+
         "gpu_memory_utilization": 0.35,
         "description": "Qwen2.5-7B-Instruct (high quality, needs 2+ GPUs)",
     },
@@ -189,7 +194,8 @@ def get_priorzero_config(
     action_space_size, max_steps = env_configurations.get(env_id, (20, 100))
     wm_encoder_option = 'legacy' 
     # wm_model_name = 'BAAI/bge-base-en-v1.5'  
-    wm_model_name = '/mnt/afs/niuyazhe/workspace/xiongjyu/models/bge-base-en-v1.5'  
+    # wm_model_name = '/mnt/afs/niuyazhe/workspace/xiongjyu/models/bge-base-en-v1.5'  
+    wm_model_name = '/mnt/shared-storage-user/puyuan/xiongjyu/models/bge-base-en-v1.5'
     
     collector_env_num = 1
     evaluator_env_num = 2
@@ -212,8 +218,8 @@ def get_priorzero_config(
         observation_shape=512,  
         env_id=env_id,
         # game_path=f"/mnt/afs/wanzunian/niuyazhe/xiongjyu/jericho/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
-        game_path=f"/mnt/afs/niuyazhe/workspace/xiongjyu/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
-        # game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        # game_path=f"/mnt/afs/niuyazhe/workspace/xiongjyu/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
         for_unizero=True,
         tokenizer_path=wm_model_name,
         max_action_num=action_space_size,
