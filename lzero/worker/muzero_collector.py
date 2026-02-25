@@ -535,7 +535,7 @@ class MuZeroCollector(ISerialCollector):
                 # --- Episode Termination Handling ---
                 if done:
                     collected_episode += 1
-                    reward = info['eval_episode_return']
+                    reward = info['score']
                     log_info = {'reward': reward, 'time': self._env_info[env_id]['time'], 'step': self._env_info[env_id]['step']}
                     if not collect_with_pure_policy:
                         log_info['visit_entropy'] = visit_entropies_lst[env_id] / eps_steps_lst[env_id] if eps_steps_lst[env_id] > 0 else 0

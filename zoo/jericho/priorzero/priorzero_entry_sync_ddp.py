@@ -88,7 +88,6 @@ def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed):
 
     # Create evaluator
     evaluator = PriorZeroEvaluator(
-        eval_freq=cfg.policy.eval_freq,
         n_evaluator_episode=cfg.env.n_evaluator_episode,
         stop_value=cfg.env.stop_value,
         env=evaluator_env,
@@ -96,6 +95,7 @@ def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed):
         tb_logger=tb_logger,
         exp_name=cfg.exp_name,
         policy_config=cfg.policy,
+        llm_config=llm_cfg,
     )
     logger.info(f"[Rank {rank}] Evaluator created")
     learner.call_hook('before_run')
@@ -181,6 +181,7 @@ def train_priorzero(
     # 在collector中初始化data_processor 和prof对象
     collector.data_processor = data_processor
     collector.prof = prof
+    evaluator.data_processor = data_processor
     
     policy_model = PolicyModel(
         strategy=strategy,
@@ -206,13 +207,14 @@ def train_priorzero(
     while True:
         cmd = 0 # 0 表示当前循环contiune, 1 表示继续，2 表示break
         priorzero_batch = None
-        if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter):
+        if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
             logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
-            stop, reward = evaluator.eval(
-                save_ckpt_fn=learner.save_checkpoint,
-                train_iter=learner.train_iter,
-                envstep=collector.envstep
-            )
+            
+            if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
+                vllm_engine.wake_up()
+            evaluator.eval(train_iter=learner.train_iter, envstep=collector.envstep)
+            if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
+                vllm_engine.sleep()
                     
         if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
             vllm_engine.wake_up()
@@ -354,7 +356,6 @@ Examples:
     else:
         main_cfg, create_cfg, llm_cfg = get_priorzero_config(
             args.env_id, args.seed, use_cot=args.use_cot,
-            exp_name=f'data_priorzero/priorzero_ddp_ppo_{args.env_id}_use_cot_{args.use_cot}_with_fmtReward_seed0',
             model_key=model_key,
             multi_gpu=True
         )

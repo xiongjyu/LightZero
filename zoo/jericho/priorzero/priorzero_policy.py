@@ -380,3 +380,93 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             self.last_batch_action = batch_action
         return output
     
+    def _forward_eval(self, data: torch.Tensor, action_mask: list, to_play: int = -1,
+                      ready_env_id: np.array = None, timestep: List = [0], **kwargs) -> Dict:
+        self._eval_model.eval()
+        llm_prior_logprob = kwargs.pop('llm_prior_logprob', None)
+        valid_actions_list = kwargs.get('valid_actions_list', None)
+        
+        if llm_prior_logprob is None or not any(llm_prior_logprob):
+            logging.debug("No LLM priors provided, using standard UniZero MCTS")
+            return super()._forward_eval(
+                data, action_mask, to_play=to_play, ready_env_id=ready_env_id, timestep=timestep
+            )
+        
+        active_eval_env_num = data.shape[0]
+        if ready_env_id is None:
+            ready_env_id = np.arange(active_eval_env_num)
+        output = {i: None for i in ready_env_id}
+        
+        policy_priors = []
+        for env_id in range(active_eval_env_num):
+            actions = valid_actions_list[env_id]
+            prior = []
+            if len(actions) == 0:
+                print("When valid actions is None, the action must be 'go'")
+                prior.append(llm_prior_logprob[env_id]['go'])
+            else:
+                for action in actions:
+                    prior.append(llm_prior_logprob[env_id][action])
+            policy_priors.append(prior)
+        policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
+        
+        with torch.no_grad():
+            network_output = self._eval_model.initial_inference(self.last_batch_obs_eval, self.last_batch_action, data, timestep)
+            latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
+            
+            network_output.policy_logits = policy_priors
+
+            # if not in training, obtain the scalars of the value/reward
+            pred_values = self.value_inverse_scalar_transform_handle(pred_values).detach().cpu().numpy()  # shape（B, 1）
+            latent_state_roots = latent_state_roots.detach().cpu().numpy()
+            policy_logits = policy_priors.detach().cpu().numpy().tolist()
+
+            legal_actions = [[i for i, x in enumerate(action_mask[j]) if x == 1] for j in range(active_eval_env_num)]
+            if self._cfg.mcts_ctree:
+                # cpp mcts_tree
+                roots = MCTSCtree.roots(active_eval_env_num, legal_actions)
+            else:
+                # python mcts_tree
+                roots = MCTSPtree.roots(active_eval_env_num, legal_actions)
+            roots.prepare_no_noise(reward_roots, policy_logits, to_play)
+            next_latent_state_with_env = self._mcts_eval.search(roots, self._eval_model, latent_state_roots, to_play, timestep)
+
+            # list of list, shape: ``{list: batch_size} -> {list: action_space_size}``
+            roots_visit_count_distributions = roots.get_distributions()
+            roots_values = roots.get_values()  # shape: {list: batch_size}
+
+            batch_action = []
+            
+            for i, env_id in enumerate(ready_env_id):
+                distributions, value = roots_visit_count_distributions[i], roots_values[i]
+                # print("roots_visit_count_distributions:", distributions, "root_value:", value)
+
+                # NOTE: Only legal actions possess visit counts, so the ``action_index_in_legal_action_set`` represents
+                # the index within the legal action set, rather than the index in the entire action set.
+                #  Setting deterministic=True implies choosing the action with the highest value (argmax) rather than
+                # sampling during the evaluation phase.
+                action_index_in_legal_action_set, visit_count_distribution_entropy = select_action(
+                    distributions, temperature=1, deterministic=True
+                )
+                # NOTE: Convert the ``action_index_in_legal_action_set`` to the corresponding ``action`` in the
+                # entire action set.
+                action = np.where(action_mask[i] == 1.0)[0][action_index_in_legal_action_set]
+
+                # Predict the next latent state based on the selected action and policy
+                next_latent_state = next_latent_state_with_env[i][action]
+
+                output[env_id] = {
+                    'action': action,
+                    'visit_count_distributions': distributions,
+                    'visit_count_distribution_entropy': visit_count_distribution_entropy,
+                    'searched_value': value,
+                    'predicted_value': pred_values[i],
+                    'predicted_policy_logits': policy_logits[i],
+                    'timestep': timestep[i],
+                }
+                batch_action.append(action)
+
+            self.last_batch_obs_eval = data
+            self.last_batch_action = batch_action
+
+        return output

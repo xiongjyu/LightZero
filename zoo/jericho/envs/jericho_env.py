@@ -264,7 +264,7 @@ class JerichoEnv(BaseEnv):
         self.finished = False
         self._init_flag = True
         self._action_list = None
-        self.episode_return = 0.0
+        self.episode_return = info['score'] if 'score' in info else 0.0
         self._timestep = 0
         self.episode_history = []
         if self.collect_policy_mode == 'expert':
