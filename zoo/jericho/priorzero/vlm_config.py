@@ -106,6 +106,14 @@ class PriorZeroVLMConfig:
     use_prior: bool = True  # Whether to use VLM prior
     llm_prior_temperature: float = 1.0  # Temperature for prior distribution
 
+    # Evaluation settings
+    eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "world_model": True,
+        "world_model_llm_prior": True,
+        "llm_prior": True,
+        "eval_freq": int(500),
+    }))
+
     attn_implementation: str = "flash_attention_2" 
     use_cot: bool = True
     prompt_max_len: int = 8192
@@ -166,8 +174,9 @@ class PriorZeroVLMConfig:
         "value_norm_history_size": 1000,
     }))
 
-    # Prompt template
+    # Prompt template (Qwen-VL format)
     prompt_template: str = (
+        "<|vision_start|><|image_pad|><|vision_end|>"
         "You are an expert Atari game player. "
         "Based on the current game screen, choose the best action. "
         "Available actions: {action_list}\n"

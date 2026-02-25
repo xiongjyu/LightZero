@@ -187,10 +187,11 @@ class VLMPriorGenerator(PriorGenerator):
         self.prompt_template = prompt_template or self._default_prompt_template()
 
     def _default_prompt_template(self) -> str:
-        """Default prompt template for Atari games."""
+        """Default prompt template for Atari games with Qwen-VL format."""
         return (
+            "<|vision_start|><|image_pad|><|vision_end|>"
             "You are an expert Atari game player. "
-            "Based on the current game screen shown in the image, "
+            "Based on the current game screen shown in the image above, "
             "choose the best action from the following options:\n"
             "{action_list}\n\n"
             "Provide a probability distribution over these actions. "
@@ -248,12 +249,12 @@ class VLMPriorGenerator(PriorGenerator):
                 elif c == 3:
                     # RGB (3, H, W) -> (H, W, 3)
                     obs = np.transpose(obs, (1, 2, 0))
-                    return Image.fromarray(obs, mode='RGB')
+                    return Image.fromarray(obs)
                 elif c == 4:
                     # RGBA or stacked frames
                     # Take last 3 channels as RGB
                     obs = np.transpose(obs[-3:], (1, 2, 0))
-                    return Image.fromarray(obs, mode='RGB')
+                    return Image.fromarray(obs)
                 else:
                     # Stacked grayscale frames (N, H, W) -> take last frame
                     obs = obs[-1]
@@ -268,11 +269,11 @@ class VLMPriorGenerator(PriorGenerator):
                     return Image.fromarray(obs, mode='L').convert('RGB')
                 elif w == 3:
                     # RGB (H, W, 3)
-                    return Image.fromarray(obs, mode='RGB')
+                    return Image.fromarray(obs)
                 elif w == 4:
                     # RGBA (H, W, 4) -> take first 3 channels
                     obs = obs[:, :, :3]
-                    return Image.fromarray(obs, mode='RGB')
+                    return Image.fromarray(obs)
 
             # Ambiguous shape - provide detailed error
             raise ValueError(
@@ -312,15 +313,16 @@ class VLMPriorGenerator(PriorGenerator):
         # Format action list
         action_list = "\n".join([f"- {action}" for action in action_candidates])
 
-        # Build base prompt
+        # Build base prompt (already contains vision tokens at the start)
         prompt = self.prompt_template.format(action_list=action_list)
 
-        # Add history context if available
+        # Add history context if available (AFTER the vision tokens)
         if history and len(history) > 0:
             history_text = "\n\nRecent history:\n"
             for i, (obs, action, reward) in enumerate(history[-3:]):  # Last 3 steps
                 history_text += f"Step {i+1}: Action={action}, Reward={reward}\n"
-            prompt = history_text + "\n" + prompt
+            # Insert history after vision end token
+            prompt = prompt.replace("<|vision_end|>", "<|vision_end|>" + history_text)
 
         return prompt
 
@@ -463,6 +465,15 @@ class VLMPriorGenerator(PriorGenerator):
             self._build_prompt(actions, hist)
             for actions, hist in zip(action_candidates_list, histories)
         ]
+
+        # Debug: Log first prompt to verify vision tokens
+        if prompts and len(prompts) > 0:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"[VLM Debug] First prompt preview (first 200 chars): {prompts[0][:200]}")
+            if "<|vision_start|>" not in prompts[0]:
+                logger.error(f"[VLM Error] Missing <|vision_start|> token in prompt!")
+                logger.error(f"[VLM Error] Full prompt: {prompts[0]}")
 
         # Batch generate with VLM
         raw_outputs = self.vlm_engine.batch_generate(

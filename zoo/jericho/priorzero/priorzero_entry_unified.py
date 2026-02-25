@@ -172,6 +172,8 @@ def prepare_llm_components(rank, cfg, llm_cfg, strategy, collector_env, evaluato
         tb_logger=tb_logger,
         exp_name=cfg.exp_name,
         policy_config=cfg.policy,
+        llm_config=llm_cfg,
+        data_processor=data_processor,
     )
 
     logger.info(f"[Rank {rank}] ✓ LLM components initialized")
@@ -285,6 +287,8 @@ def prepare_vlm_components(rank, cfg, vlm_cfg, strategy, collector_env, evaluato
         tb_logger=tb_logger,
         exp_name=cfg.exp_name,
         policy_config=cfg.policy,
+        llm_config=vlm_cfg,
+        data_processor=data_processor,
     )
 
     logger.info(f"[Rank {rank}] ✓ VLM components initialized")
