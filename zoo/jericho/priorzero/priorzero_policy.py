@@ -299,7 +299,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
 
         llm_prior_logprob = kwargs.pop('llm_prior_logprob', None)
         valid_actions_list = kwargs.get('valid_actions_list', None)
-        if not any(llm_prior_logprob):
+        if llm_prior_logprob is None or (isinstance(llm_prior_logprob, np.ndarray) and llm_prior_logprob.size == 0):
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_collect(
                 data, action_mask, temperature, to_play, epsilon,
@@ -311,18 +311,45 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         if ready_env_id is None:
             ready_env_id = np.arange(active_collect_env_num)
         output = {i: None for i in ready_env_id}
-        
+
+        # Convert LLM priors to policy priors
+        # For Atari: llm_prior_logprob is a list of dicts (action_name -> prob)
+        # For text games: llm_prior_logprob is a list of dicts (action_name -> prob)
+        # Both use semantic action names now!
         policy_priors = []
         for env_id in range(active_collect_env_num):
-            actions = valid_actions_list[env_id]
-            prior = []
-            if len(actions) == 0:
-                print("When valid actions is None, the action must be 'go'")
-                prior.append(llm_prior_logprob[env_id]['go'])
+            prior_data = llm_prior_logprob[env_id]
+
+            # Check if this is a numpy array (legacy format) or dict (new format)
+            if isinstance(prior_data, np.ndarray):
+                # Legacy: numpy array with probabilities for each action index
+                prior = prior_data
+            elif isinstance(prior_data, dict):
+                # New format: dict mapping action names to probabilities
+                # Need to convert to array aligned with action space
+                actions = valid_actions_list[env_id]
+                prior = []
+
+                if len(actions) == 0:
+                    # Fallback for edge case
+                    print("Warning: No valid actions provided")
+                    prior = np.ones(self.cfg.model.action_space_size) / self.cfg.model.action_space_size
+                else:
+                    # Extract probabilities for each action in order
+                    for action in actions:
+                        prior.append(prior_data.get(action, 0.0))
+                    prior = np.array(prior, dtype=np.float32)
+
+                    # Normalize if needed
+                    if prior.sum() > 0:
+                        prior = prior / prior.sum()
+                    else:
+                        prior = np.ones(len(actions), dtype=np.float32) / len(actions)
             else:
-                for action in actions:
-                    prior.append(llm_prior_logprob[env_id][action])
+                raise TypeError(f"Unexpected prior type: {type(prior_data)}")
+
             policy_priors.append(prior)
+
         policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
         
         with torch.no_grad():
