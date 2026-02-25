@@ -178,7 +178,7 @@ class AtariEnvLightZero(BaseEnv):
         self._eval_episode_return += self.reward
         self._timestep += 1
         # if self._timestep%200==0:
-        if self._timestep%50==0:
+        if self._timestep%20==0:
             logging.info(f'self._timestep: {self._timestep}')
         observation = self.observe()
         if done:

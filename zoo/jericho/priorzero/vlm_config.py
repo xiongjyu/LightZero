@@ -253,6 +253,10 @@ def get_priorzero_vlm_config(
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False,),
+        # collect_max_episode_steps=int(50),  # Maximum steps for collection episodes
+        # eval_max_episode_steps=int(50),     # Maximum steps for evaluation episodes
+        collect_max_episode_steps=int(5e3),  # Maximum steps for collection episodes
+        eval_max_episode_steps=int(5e3),     # Maximum steps for evaluation episodes
     )
 
     # Policy configuration

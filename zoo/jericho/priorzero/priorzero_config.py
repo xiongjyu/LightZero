@@ -232,10 +232,12 @@ def get_priorzero_config(
         ),
         use_cache=True,
         cache_size=100000,
+
+        collect_max_episode_steps=int(50), # TODO
+        eval_max_episode_steps=int(50),
         
-                
-        collect_max_episode_steps=int(200), # TODO
-        eval_max_episode_steps=int(200),
+        # collect_max_episode_steps=int(200), # TODO
+        # eval_max_episode_steps=int(200),
         # collect_max_episode_steps=int(2e4),
         # eval_max_episode_steps=int(1e4),
     )
