@@ -39,8 +39,8 @@ class PriorZeroEvaluator(OriginalEvaluator):
         self.history_buffers = defaultdict(
             lambda: deque(maxlen=self.llm_cfg.history_length)
         )
-        self._logger.info("✓ PriorZeroEvaluator initialized with vLLM engine")
-        self._logger.info(f"  - History length: {self.llm_cfg.history_length}")
+        self._logger.info(f"[RANK {self._rank}] ✓ PriorZeroEvaluator initialized with vLLM engine")
+        self._logger.info(f"[RANK {self._rank}]  - History length: {self.llm_cfg.history_length}")
     
     def should_eval(self, train_iter: int) -> bool:
         """
@@ -74,6 +74,9 @@ class PriorZeroEvaluator(OriginalEvaluator):
             metrics_str = " | ".join([f"{k}: {info.get(k, 0):.2f}" for k in ['avg_envstep_per_episode', 'reward_mean', 'reward_max', 'reward_min']])
             self._logger.info(f"[RANK {self._rank}] {tag} >> {metrics_str}")
         
+        if self._rank != 0:
+            return
+        
         keys = ['avg_envstep_per_episode', 'reward_mean', 'reward_std', 'reward_max', 'reward_min']
         for k in keys:
             if self.eval_mode.world_model:
@@ -95,13 +98,14 @@ class PriorZeroEvaluator(OriginalEvaluator):
         env_nums = self._env.env_num
 
         self._env.reset()
+        self.history_buffers.clear()
         self._policy.reset(task_id=self.task_id)
 
         init_obs = self._env.ready_obs
 
         retry_waiting_time = 0.001
         while len(init_obs.keys()) != self._env_num:
-            self._logger.info(f"Waiting for all environments to reset. Current ready envs: {list(init_obs.keys())}")
+            self._logger.info(f"[RANK {self._rank}] Waiting for all environments to reset. Current ready envs: {list(init_obs.keys())}")
             time.sleep(retry_waiting_time)
             init_obs = self._env.ready_obs
 
@@ -136,7 +140,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
             while not eval_monitor.is_finished():
                 # Check if a timeout has occurred.
                 if self.stop_event.is_set():
-                    self._logger.info("[EVALUATOR]: Evaluation aborted due to timeout.")
+                    self._logger.info("[RANK {self._rank}] [EVALUATOR]: Evaluation aborted due to timeout.")
                     break
 
                 # Get observations from ready environments.
@@ -251,10 +255,6 @@ class PriorZeroEvaluator(OriginalEvaluator):
                             saved_info.update(episode_timestep.info['episode_info'])
                         eval_monitor.update_info(env_id, saved_info)
                         eval_monitor.update_reward(env_id, reward)
-                        self._logger.info(
-                            f"[EVALUATOR] env {env_id} finished episode, final reward: {eval_monitor.get_latest_reward(env_id)}, "
-                            f"current episode count: {eval_monitor.get_current_episode()}"
-                        )
 
                         # If there are more episodes to run than available environments, reset and reuse this one.
                         if n_episode > self._env_num:
@@ -309,6 +309,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
         env_nums = self._env.env_num
 
         self._env.reset()
+        self.history_buffers.clear()
 
         dones = np.array([False for _ in range(env_nums)])
         ready_env_id = [i for i in range(env_nums)]

@@ -207,7 +207,7 @@ def train_priorzero(
     while True:
         cmd = 0 # 0 表示当前循环contiune, 1 表示继续，2 表示break
         priorzero_batch = None
-        if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
+        if learner.train_iter != 0 and evaluator.should_eval(learner.train_iter):
             logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
             
             if llm_cfg.vllm_enable_sleep and vllm_engine is not None:

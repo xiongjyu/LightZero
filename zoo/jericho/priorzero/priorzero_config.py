@@ -330,7 +330,7 @@ def get_priorzero_config(
 
     if exp_name is None:
         env_name = env_id.replace(".z5", "")
-        exp_name = f"priorzero_{env_name}_{model_key}_{llm_config.policy_loss_type}_WM_{llm_config.enable_world_model}_useCot_{llm_config.use_cot}_seed{seed}"
+        exp_name = f"data_priorzero/priorzero_{env_name}_{model_key}_{llm_config.policy_loss_type}_WM_{llm_config.enable_world_model}_useCot_{llm_config.use_cot}_seed{seed}"
     
     priorzero_config = dict(
         env=env_config,

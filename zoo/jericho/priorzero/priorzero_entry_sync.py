@@ -204,7 +204,7 @@ def train_priorzero(
         cmd = "noop"
         priorzero_batch = None
         if rank == 0:
-            if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
+            if learner.train_iter != 0 and evaluator.should_eval(learner.train_iter):
                 logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.wake_up()
