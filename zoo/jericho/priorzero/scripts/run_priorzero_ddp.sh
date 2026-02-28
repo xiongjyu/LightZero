@@ -1,0 +1,31 @@
+
+#!/bin/bash
+set -x
+
+# 1. 训练环境参数
+CUDA_DEVICES="0,1,2,3"      
+NPROC_PER_NODE=4           
+MASTER_PORT=24554          
+
+# 2. 程序相关参数
+ENV_ID="detective.z5"       # "zork1.z5" "acorncourt.z5" "omniquest.z5"
+LOG_DIR="./data_priorzero/run_logs"        
+mkdir -p "${LOG_DIR}"       
+
+CURRENT_TIME=$(date +"%Y%m%d_%H%M%S")
+LOG_FILE="${LOG_DIR}/log_${CURRENT_TIME}.txt"
+
+# 3. 设置环境变量 
+export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
+export PYTHONFAULTHANDLER=1 
+export TORCH_DISTRIBUTED_DEBUG=DETAIL 
+export NCCL_DEBUG=INFO 
+
+
+torchrun \
+    --nproc_per_node="${NPROC_PER_NODE}" \
+    --master-port="${MASTER_PORT}" \
+    ./src/priorzero_entry_sync_ddp.py \
+    --use_cot \
+    --env_id "${ENV_ID}" \
+    2>&1 | tee "${LOG_FILE}"
