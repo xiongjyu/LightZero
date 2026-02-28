@@ -217,12 +217,12 @@ class UniZeroPolicy(MuZeroPolicy):
         ),
         # ****** common ******
         # (bool) 是否启用自适应策略熵权重 (alpha)
-        use_adaptive_entropy_weight=True,
+        use_adaptive_entropy_weight=False,
         # (float) 自适应alpha优化器的学习率
         adaptive_entropy_alpha_lr=1e-4,
         # ==================== START: Encoder-Clip Annealing Config ====================
         # (bool) 是否启用 encoder-clip 值的退火。
-        use_encoder_clip_annealing=True,
+        use_encoder_clip_annealing=False,
         # (str) 退火类型。可选 'linear' 或 'cosine'。
         encoder_clip_anneal_type='cosine',
         # (float) 退火的起始 clip 值 (训练初期，较宽松)。
@@ -232,7 +232,7 @@ class UniZeroPolicy(MuZeroPolicy):
         # (int) 完成从起始值到结束值的退火所需的训练迭代步数。
         encoder_clip_anneal_steps=100000,  # 例如，在200k次迭代后达到最终值
         # ===================== END: Encoder-Clip Annealing Config =====================
-
+        monitor_norm_freq=500000,
         # (bool) whether to use rnd model.
         use_rnd_model=False,
         # (bool) Whether to use multi-gpu training.
@@ -654,8 +654,8 @@ class UniZeroPolicy(MuZeroPolicy):
         # target_reward_categorical = phi_transform(self.reward_support, transformed_target_reward)
         # target_value_categorical = phi_transform(self.value_support, transformed_target_value)
 
-        target_reward_categorical = phi_transform(self.reward_support, transformed_target_reward, label_smoothing_eps= self._cfg.label_smoothing_eps)
-        target_value_categorical = phi_transform(self.value_support, transformed_target_value, label_smoothing_eps=self._cfg.label_smoothing_eps)
+        target_reward_categorical = phi_transform(self.reward_support, transformed_target_reward)
+        target_value_categorical = phi_transform(self.value_support, transformed_target_value)
 
         # Prepare batch for GPT model
         batch_for_gpt = {}
@@ -686,42 +686,10 @@ class UniZeroPolicy(MuZeroPolicy):
         average_target_policy_entropy = target_policy_entropy.mean()
 
         # Update world model
-        losses = self._learn_model.world_model.compute_loss(
+        losses, _ = self._learn_model.world_model.compute_loss(
             batch_for_gpt, self._target_model.world_model.tokenizer, self.value_inverse_scalar_transform_handle, global_step=train_iter, current_policy_label_eps=current_policy_label_eps,
         )           # NOTE : compute_loss third argument is now a dead argument. If this changes, it could need adaptation between value_inverse and reward_inverse.
 
-        # ==================== [修改] 集成范数监控逻辑 ====================
-        norm_log_dict = {}
-        # 检查是否达到监控频率
-        if self._cfg.monitor_norm_freq > 0 and train_iter == 0 or (train_iter % self._cfg.monitor_norm_freq == 0):
-            with torch.no_grad():
-                # 1. 监控模型参数范数
-                param_norm_metrics = self._monitor_model_norms()
-                norm_log_dict.update(param_norm_metrics)
-
-                # 2. 监控中间张量 x (Transformer的输出)
-                intermediate_x = losses.intermediate_losses.get('intermediate_tensor_x')
-                if intermediate_x is not None:
-                    # x 的形状为 (B, T, E)
-                    # 计算每个 token 的 L2 范数
-                    token_norms = intermediate_x.norm(p=2, dim=-1)
-
-                    # 记录这些范数的统计数据
-                    norm_log_dict['norm/x_token/mean'] = token_norms.mean().item()
-                    norm_log_dict['norm/x_token/std'] = token_norms.std().item()
-                    norm_log_dict['norm/x_token/max'] = token_norms.max().item()
-                    norm_log_dict['norm/x_token/min'] = token_norms.min().item()
-        # =================================================================
-
-        # ==================== START MODIFICATION 2 ====================
-        # Extract the calculated value_priority from the returned losses.
-        value_priority_tensor = losses.intermediate_losses['value_priority']
-        # Convert to numpy array for the replay buffer, adding a small epsilon.
-        value_priority_np = value_priority_tensor.detach().cpu().numpy() + 1e-6
-        # ===================== END MODIFICATION 2 =====================
-
-        # weighted_total_loss = losses.loss_total
-        # TODO:
         weighted_total_loss = (weights * losses.loss_total).mean()
 
         for loss_name, loss_value in losses.intermediate_losses.items():
@@ -768,55 +736,6 @@ class UniZeroPolicy(MuZeroPolicy):
         # Reset gradients at the start of each accumulation cycle
         if (train_iter % self.accumulation_steps) == 0:
             self._optimizer_world_model.zero_grad()
-
-
-        # ==================== START: 目标熵正则化更新逻辑 ====================
-        alpha_loss = None
-        current_alpha = self._cfg.model.world_model_cfg.policy_entropy_weight # 默认使用固定值
-        if self.use_adaptive_entropy_weight:
-            # --- 动态计算目标熵 (这部分逻辑是正确的，予以保留) ---
-            progress = min(1.0, train_iter / self.target_entropy_decay_steps)
-            current_ratio = self.target_entropy_start_ratio * (1 - progress) + self.target_entropy_end_ratio * progress
-            action_space_size = self._cfg.model.action_space_size
-            # 注意：我们将 target_entropy 定义为正数，更符合直觉
-            current_target_entropy = -np.log(1.0 / action_space_size) * current_ratio
-
-            # --- 计算 alpha_loss (已修正符号) ---
-            # 这是核心修正点：去掉了最前面的负号
-            # detach() 仍然是关键，确保 alpha_loss 的梯度只流向 log_alpha
-            alpha_loss = (self.log_alpha * (policy_entropy.detach() - current_target_entropy)).mean()
-
-            # # --- 更新 log_alpha ---
-            self.alpha_optimizer.zero_grad()
-            alpha_loss.backward()
-            self.alpha_optimizer.step()
-            # --- [优化建议] 增加 log_alpha 裁剪作为安全措施 ---
-            with torch.no_grad():
-                # 将 alpha 限制在例如 [1e-4, 10.0] 的范围内
-                self.log_alpha.clamp_(np.log(1e-4), np.log(10.0))
-
-            # --- 使用当前更新后的 alpha (截断梯度流) ---
-            current_alpha = self.log_alpha.exp().detach()
-
-            # 重新计算加权的策略损失和总损失
-            # 注意：这里的 policy_entropy 已经是一个batch的平均值
-            weighted_policy_loss = orig_policy_loss - current_alpha * policy_entropy
-            # 重新构建总损失 (不使用 losses.loss_total)
-            # 确保这里的权重与 LossWithIntermediateLosses 类中的计算方式一致
-            self.obs_loss_weight = 10
-            self.value_loss_weight = 0.5
-            self.reward_loss_weight = 1.
-            self.policy_loss_weight = 1.
-            self.ends_loss_weight = 0.
-            total_loss = (
-                self.reward_loss_weight * reward_loss +
-                self.value_loss_weight * value_loss +
-                self.policy_loss_weight * weighted_policy_loss +
-                self.obs_loss_weight  * obs_loss # 假设 ssl_loss_weight 是 obs_loss 的权重
-                # ... 如果还有其他损失项，也加进来 ...
-            )
-            weighted_total_loss = (weights * total_loss).mean()
-        # ===================== END: 目标熵正则化更新逻辑 =====================
 
         # Scale the loss by the number of accumulation steps
         weighted_total_loss = weighted_total_loss / self.accumulation_steps
@@ -930,8 +849,6 @@ class UniZeroPolicy(MuZeroPolicy):
             'reward_loss': reward_loss.item(),
             'value_loss': value_loss.item(),
             # Add value_priority to the log dictionary.
-            'value_priority': value_priority_np.mean().item(),
-            'value_priority_orig': value_priority_np,
             'target_reward': target_reward.mean().item(),
             'target_value': target_value.mean().item(),
             'transformed_target_reward': transformed_target_reward.mean().item(),

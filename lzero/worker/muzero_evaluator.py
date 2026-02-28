@@ -404,6 +404,11 @@ class MuZeroEvaluator(ISerialEvaluator):
 
             duration = self._timer.value
             episode_return = eval_monitor.get_episode_return()
+            mean_episode_return = np.mean(episode_return)
+            if mean_episode_return > self._max_episode_return:
+                if save_ckpt_fn:
+                    save_ckpt_fn('WM_ckpt_best.pth.tar')
+                self._max_episode_return = mean_episode_return
             info = {
                 'avg_envstep_per_episode': envstep_count / n_episode if n_episode > 0 else 0,
                 'reward_mean': np.mean(episode_return),
