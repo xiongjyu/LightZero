@@ -346,6 +346,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 if len(llm_prior) == 1:   # 只有go,即valid_action_len=0
                     assert len(valid_actions) == 0
                     actions[env_id] = 0
+                    continue
                 if 'go' in llm_prior and 'go' not in valid_actions:
                     llm_prior.pop('go')
                 action_str_select, max_logprob = "", float(-1e9)

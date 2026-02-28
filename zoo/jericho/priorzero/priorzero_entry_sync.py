@@ -242,15 +242,16 @@ def train_priorzero(
                 
                 logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
                 
-                for i in range(update_per_collect):
-                    with prof.block("train_world_model", rank=0):
-                        train_data = replay_buffer.sample(batch_size, policy)
-                        train_data.append(learner.train_iter)
+                if llm_cfg.enable_world_model:
+                    for i in range(update_per_collect):
+                        with prof.block("train_world_model", rank=0):
+                            train_data = replay_buffer.sample(batch_size, policy)
+                            train_data.append(learner.train_iter)
 
-                        log_vars = learner.train(train_data, collector.envstep)
-                        if cfg.policy.use_priority:
-                            replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
-                policy.recompute_pos_emb_diff_and_clear_cache()
+                            log_vars = learner.train(train_data, collector.envstep)
+                            if cfg.policy.use_priority:
+                                replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
+                    policy.recompute_pos_emb_diff_and_clear_cache()
                 
                 # 计算需要收集多少样本才能满足 llm 的训练
                 # 一次参数更新是train_batch_size，off次数为broadcast_every，1是因为只有一个rank收集数据
@@ -258,7 +259,7 @@ def train_priorzero(
                 llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // 1
                 llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps 
                 
-                if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt:
+                if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt and llm_cfg.enable_rft:
                     with prof.block("fetch_latest_batch", rank=0):
                         print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
                         priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)

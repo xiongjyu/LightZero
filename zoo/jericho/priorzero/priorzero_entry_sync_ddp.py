@@ -225,6 +225,7 @@ def train_priorzero(
         if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
             vllm_engine.sleep()
         
+        torch_dist_barrier_and_cuda_sync()
         update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=world_size)                
         
         replay_buffer.push_game_segments(new_data)
@@ -254,15 +255,16 @@ def train_priorzero(
             f"Updates: {update_per_collect}"
         )
         
-        for i in range(update_per_collect):
-            with prof.block("train_world_model", rank=rank):
-                train_data = replay_buffer.sample(batch_size, policy)
-                train_data.append(learner.train_iter)
+        if llm_cfg.enable_world_model:
+            for i in range(update_per_collect):
+                with prof.block("train_world_model", rank=rank):
+                    train_data = replay_buffer.sample(batch_size, policy)
+                    train_data.append(learner.train_iter)
 
-                log_vars = learner.train(train_data, collector.envstep)
-                if cfg.policy.use_priority:
-                    replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
-        policy.recompute_pos_emb_diff_and_clear_cache()
+                    log_vars = learner.train(train_data, collector.envstep)
+                    if cfg.policy.use_priority:
+                        replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
+            policy.recompute_pos_emb_diff_and_clear_cache()
         
         # 计算需要收集多少样本才能满足 llm 的训练
         # 一次参数更新是train_batch_size，off次数为broadcast_every，每个rank单独收集数据，所以需要除
@@ -270,7 +272,7 @@ def train_priorzero(
         llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // world_size
         llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps
         
-        if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt:
+        if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt and llm_cfg.enable_rft:
             cmd = 1
         else:
             cmd = 0
@@ -295,6 +297,7 @@ def train_priorzero(
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
                 
                 torch_dist_barrier_and_cuda_sync()
+                    
         else:
             continue
             
