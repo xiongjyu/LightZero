@@ -73,6 +73,17 @@ class PriorZeroLLMConfig:
     local_rank: int = -1
     enable_rft: bool = True
     enable_world_model: bool = True
+    llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
+    mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "mode": "llm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
+        "wm_weight": 0.5,            # 当 value = "LLMPrior_WM" 时，WM logits 的权重；LLMPrior 的权重 = 1 - WM_weight
+    }))
+    eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "world_model": True,              # 评估模式1：完全与 unizero 的 eval 一致；mcts 的根节点仅使用 WM 的logits
+        "world_model_llm_prior": True,    # 评估模式2：基于 unizero 的 eval 过程, 但是 mcts 的根节点需要利用 llm 的先验；具体怎么利用取决于mcts_root_logits_dict.mode 参数
+        "llm_prior": True,                # 评估模式3：仅使用 llm prior 进行 eval, 不需要 wm 进行评估
+        "eval_freq": int(500),
+    }))
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
@@ -96,13 +107,6 @@ class PriorZeroLLMConfig:
     top_p: float = 0.95
     seed: int = 0
     reduction: str = "mean"
-    llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
-    eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "world_model": True,
-        "world_model_llm_prior": True,
-        "llm_prior": True,
-        "eval_freq": int(500),
-    }))
     
     # 训练相关参数
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练

@@ -28,7 +28,8 @@ import lzero.model.unizero_model
 class PriorZeroPolicy(OriginalUniZeroPolicy):
     def __init__(self, cfg: Dict, model: torch.nn.Module = None, enable_field: List[str] = None, **kwargs):   
         super().__init__(cfg, model, enable_field)
-
+        self.llm_cfg = kwargs.get('llm_cfg', None)
+        
     def _init_learn(self) -> None:
         super()._init_learn()
         logging.info("✓ UniZero World Model and optimizer initialized")
@@ -299,7 +300,9 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
 
         llm_prior_logprob = kwargs.pop('llm_prior_logprob', None)
         valid_actions_list = kwargs.get('valid_actions_list', None)
-        if not any(llm_prior_logprob):
+        mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
+        
+        if not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_collect(
                 data, action_mask, temperature, to_play, epsilon,
@@ -328,8 +331,19 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         with torch.no_grad():
             network_output = self._collect_model.initial_inference(self.last_batch_obs, self.last_batch_action, data, timestep)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
+            
+            if mcts_root_logits_dict.mode == "llm_logits":
+                root_logits = policy_priors
+                
+            elif mcts_root_logits_dict.mode == "llm_plus_wm_logits":
+                llm_probs = F.softmax(policy_priors, dim=-1)
+                mask_tensor = torch.from_numpy(np.stack(action_mask))
+                policy_logits = policy_logits.cpu().masked_fill(mask_tensor == 0, -1e9)
+                wm_probs = F.softmax(policy_logits, dim=-1)
+                combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
+                root_logits = torch.log(combined_probs + 1e-8)
 
-            network_output.policy_logits = policy_priors
+            network_output.policy_logits = root_logits
             if not self._cfg.mcts_ctree:
                 raise NotImplementedError("Python MCTS not supported for PriorZero")
 
@@ -338,7 +352,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             # ======================================================================
             pred_values_np = self.value_inverse_scalar_transform_handle(pred_values).detach().cpu().numpy()
             latent_state_roots_np = latent_state_roots.detach().cpu().numpy()
-            policy_logits = policy_priors.detach().cpu().numpy().tolist()
+            policy_logits = root_logits.detach().cpu().numpy().tolist()
             
             legal_actions = [[i for i, x in enumerate(action_mask[j]) if x == 1] for j in range(active_collect_env_num)]
             noises = [
@@ -385,8 +399,9 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         self._eval_model.eval()
         llm_prior_logprob = kwargs.pop('llm_prior_logprob', None)
         valid_actions_list = kwargs.get('valid_actions_list', None)
+        mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
         
-        if llm_prior_logprob is None or not any(llm_prior_logprob):
+        if llm_prior_logprob is None or not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_eval(
                 data, action_mask, to_play=to_play, ready_env_id=ready_env_id, timestep=timestep
@@ -414,12 +429,23 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             network_output = self._eval_model.initial_inference(self.last_batch_obs_eval, self.last_batch_action, data, timestep)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
             
-            network_output.policy_logits = policy_priors
+            if mcts_root_logits_dict.mode == "llm_logits":
+                root_logits = policy_priors
+                
+            elif mcts_root_logits_dict.mode == "llm_plus_wm_logits":
+                llm_probs = F.softmax(policy_priors, dim=-1)
+                mask_tensor = torch.from_numpy(np.stack(action_mask))
+                policy_logits = policy_logits.cpu().masked_fill(mask_tensor == 0, -1e9)
+                wm_probs = F.softmax(policy_logits, dim=-1)
+                combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
+                root_logits = torch.log(combined_probs + 1e-8)
+            
+            network_output.policy_logits = root_logits
 
             # if not in training, obtain the scalars of the value/reward
             pred_values = self.value_inverse_scalar_transform_handle(pred_values).detach().cpu().numpy()  # shape（B, 1）
             latent_state_roots = latent_state_roots.detach().cpu().numpy()
-            policy_logits = policy_priors.detach().cpu().numpy().tolist()
+            policy_logits = root_logits.detach().cpu().numpy().tolist()
 
             legal_actions = [[i for i, x in enumerate(action_mask[j]) if x == 1] for j in range(active_eval_env_num)]
             if self._cfg.mcts_ctree:

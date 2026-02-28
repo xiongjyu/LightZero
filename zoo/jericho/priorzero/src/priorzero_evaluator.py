@@ -160,30 +160,33 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 stack_obs = prepare_observation(stack_obs, self.policy_config.model.model_type)
                 stack_obs = torch.from_numpy(stack_obs).to(self.policy_config.device).float()
                 
-                # ============================================
-                # 添加 LLM_PRIOR
-                raw_obs_list = []
-                histories_list = []
-                valid_actions_list = [] 
-                for env_id in sorted(list(ready_env_id)):
-                    raw_obs_text = obs[env_id]['raw_obs_text']
-                    raw_obs_list.append(raw_obs_text)
+                if self.llm_cfg.mcts_root_logits_dict.mode != "wm_logits":
+                    # ============================================
+                    # 添加 LLM_PRIOR
+                    raw_obs_list = []
+                    histories_list = []
+                    valid_actions_list = [] 
+                    for env_id in sorted(list(ready_env_id)):
+                        raw_obs_text = obs[env_id]['raw_obs_text']
+                        raw_obs_list.append(raw_obs_text)
 
-                    history = list(self.history_buffers[env_id])
-                    histories_list.append(history)
+                        history = list(self.history_buffers[env_id])
+                        histories_list.append(history)
 
-                    valid_actions = obs[env_id].get('valid_actions', [])
-                    valid_actions_list.append(valid_actions)
+                        valid_actions = obs[env_id].get('valid_actions', [])
+                        valid_actions_list.append(valid_actions)
 
-                llm_prior_per_seq, _, _ = self.data_processor.get_llm_prior(
-                    states=raw_obs_list,
-                    valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
-                    histories=histories_list,
-                    return_cot=True  # Request CoT prefixes for reuse in training
-                )
-                for env_id, llm_prior in enumerate(llm_prior_per_seq):
-                    scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
-                    llm_prior_per_seq[env_id] = scaled_llm_prior
+                    llm_prior_per_seq, _, _ = self.data_processor.get_llm_prior(
+                        states=raw_obs_list,
+                        valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
+                        histories=histories_list,
+                        return_cot=True  # Request CoT prefixes for reuse in training
+                    )
+                    for env_id, llm_prior in enumerate(llm_prior_per_seq):
+                        scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
+                        llm_prior_per_seq[env_id] = scaled_llm_prior
+                else:
+                    llm_prior_per_seq, valid_actions_list = None, None
                 
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,

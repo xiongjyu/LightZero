@@ -299,7 +299,7 @@ class PriorZeroCollector(OriginalCollector):
 
                 if collect_with_pure_policy:
                     continue
-                else:
+                elif self.llm_cfg.enable_rft or self.llm_cfg.mcts_root_logits_dict.mode != "wm_logits":
                     # Extract text observations and valid actions
                     raw_obs_list = []
                     histories_list = []
@@ -325,6 +325,9 @@ class PriorZeroCollector(OriginalCollector):
                         for idx, llm_prior in enumerate(llm_prior_per_seq):
                             scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
                             llm_prior_per_seq[idx] = scaled_llm_prior
+                            
+                else:
+                    llm_prior_per_seq, llm_prior_per_tok = None, None
                         
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
@@ -455,7 +458,7 @@ class PriorZeroCollector(OriginalCollector):
                         game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(obs_new), init_history_obs=list(self.history_buffers[env_id]))
 
                     self._env_info[env_id]['step'] += 1
-                    if llm_prior_per_seq[env_id] is not None:
+                    if llm_prior_per_seq is not None and llm_prior_per_seq[env_id] is not None:
                         llm_prior_tensor = torch.tensor([logit for k, logit in llm_prior_per_seq[env_id].items()]) 
                         llm_prior_prob = torch.softmax(llm_prior_tensor, dim=-1)
                         llm_prior_entropy[env_id].append(-torch.sum(llm_prior_prob * torch.log(llm_prior_prob + 1e-9), dim=-1))

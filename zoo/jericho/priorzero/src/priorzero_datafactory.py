@@ -462,12 +462,11 @@ class DataProcessor:
             if action_match:
                 end_index = action_match.end()
                 prefix_piece = gen_text[:end_index].strip()
-                prefix_cot_list.append(prefix_piece)
-                continue
-            # else:
-            #     prefix_piece = gen_text.strip() + "\nAction:"
-            #     prefix_cot_list.append(prefix_piece)
-            prefix_cot_list.append(gen_text.strip())
+            else:
+                # prefix_piece = gen_text.strip() 
+                prefix_piece = gen_text.strip() + "\nAction:"
+                
+            prefix_cot_list.append(prefix_piece)
 
         return prefix_cot_list, full_output
     
