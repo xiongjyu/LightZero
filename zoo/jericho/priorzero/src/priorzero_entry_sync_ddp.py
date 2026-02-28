@@ -44,7 +44,7 @@ def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed):
     collector_env.seed(seed)
     evaluator_env.seed(seed, dynamic_seed=False)
     
-    policy = create_policy( cfg.policy, enable_field=['learn', 'collect', 'eval'], exp_name=cfg.exp_name)
+    policy = create_policy( cfg.policy, enable_field=['learn', 'collect', 'eval'], exp_name=cfg.exp_name, llm_cfg=llm_cfg)
     logger.info(f"[Rank {rank}]  Policy created")
 
     os.makedirs(f'./{cfg.exp_name}/log/', exist_ok=True)
