@@ -88,6 +88,11 @@ class PriorZeroLLMConfig:
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
     use_cot: bool = True
+    user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "history_with_reward": True,   # 是否在 prompt 中加入历史交互的 reward 信息
+        "observation_with_valid_actions": False,  # 是否在 prompt 中加入当前 observation 中可执行的 action 信息  
+    }))
+    
     prompt_max_len: int = 8192
     generate_max_len: int = 512
     bf16: bool = True
