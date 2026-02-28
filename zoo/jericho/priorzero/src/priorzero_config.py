@@ -1,0 +1,411 @@
+import os
+from typing import Dict, Tuple, Optional, Any
+from easydict import EasyDict
+import torch.distributed as dist
+from dataclasses import dataclass, field
+
+# ============================================================================
+# Model Configuration Presets
+# ============================================================================
+MODEL_CONFIGS = {
+    "qwen2.5-0.5b": {
+        "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-0.5B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.2,
+        "description": "Qwen2.5-0.5B-Instruct (smallest, fastest)",
+    },
+    "qwen2.5-1.5b": {
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-1.5B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.2,
+        "description": "Qwen2.5-1.5B-Instruct (balanced performance)",
+    },
+    "qwen2.5-3b": {
+        "model_name_or_path": "/mnt/afs/niuyazhe/workspace/xiongjyu/models/Qwen2.5-3B-Instruct",
+        "vllm_tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.25,
+        "description": "Qwen2.5-3B-Instruct (better quality)",
+    },
+    "qwen2.5-7b": {
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct",
+        "vllm_tensor_parallel_size": 2,
+        "gpu_memory_utilization": 0.35,
+        "description": "Qwen2.5-7B-Instruct (high quality, needs 2+ GPUs)",
+    },
+    "qwen2.5-14b": {
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-14B-Instruct",
+        "vllm_tensor_parallel_size": 4,
+        "gpu_memory_utilization": 0.5,
+        "description": "Qwen2.5-14B-Instruct (best quality, needs 4+ GPUs)",
+    },
+}
+
+def get_available_models():
+    """Get list of available model configurations"""
+    return list(MODEL_CONFIGS.keys())
+
+def get_model_config(model_key: str) -> Dict:
+    """Get model configuration by key"""
+    if model_key not in MODEL_CONFIGS:
+        available = ", ".join(get_available_models())
+        raise ValueError(
+            f"Unknown model key: {model_key}\n"
+            f"Available models: {available}"
+        )
+    return MODEL_CONFIGS[model_key]
+
+def print_available_models():
+    """Print all available model configurations"""
+    print("\n" + "="*80)
+    print("Available Model Configurations:")
+    print("="*80)
+    for key, config in MODEL_CONFIGS.items():
+        print(f"\n  {key}:")
+        print(f"    Path: {config['model_name_or_path']}")
+        print(f"    Tensor Parallel Size: {config['vllm_tensor_parallel_size']}")
+        print(f"    GPU Memory Utilization: {config['gpu_memory_utilization']}")
+        print(f"    Description: {config['description']}")
+    print("="*80 + "\n")
+
+@dataclass
+class PriorZeroLLMConfig:
+    model_name_or_path: str = "Qwen2.5-3B-Instruct"
+    local_rank: int = -1
+    enable_rft: bool = True
+    enable_world_model: bool = True
+    
+    attn_implementation: str = "flash_attention_2" 
+    history_length: int = 10
+    use_cot: bool = True
+    prompt_max_len: int = 8192
+    generate_max_len: int = 512
+    bf16: bool = True
+
+    # vLLM engines 
+    enable_vllm: bool = True
+    enable_prefix_caching: bool = True
+    use_cuda_ipc: bool = False
+    vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
+    vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
+
+    vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行 (Fixed: 1.5B model should use 1 GPU)
+
+    gpu_memory_utilization: float = 0.3
+    vllm_enable_sleep: bool = True # 是否可以休眠
+    temperature: float = 1.0
+    top_p: float = 0.95
+    seed: int = 0
+    reduction: str = "mean"
+    llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
+    eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "world_model": True,
+        "world_model_llm_prior": True,
+        "llm_prior": True,
+        "eval_freq": int(500),
+    }))
+    
+    # 训练相关参数
+    colocate_all_models: bool = True # 是否把所有模型都放在一起训练
+    policy_model_num_gpus: int = 1 # 需要训练的 llm 使用几张卡
+    reference_model_num_gpus: int = 1
+    deepspeed_enable_sleep: bool = True
+    
+    zero_stage: int = 2
+    gradient_checkpointing: bool = False
+    max_norm: float = 1.0     # Gradient clipping
+    ds_tensor_parallel_size: int = 1
+    ring_attn_size: int = 1
+    
+    # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
+    train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    broadcast_every: int = 4 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
+
+    learning_rate: float = 1e-6
+    adam_betas: Tuple[float, float] = (0.9, 0.95)
+    weight_decay: float = 0.01
+    lr_scheduler: str = "cosine_with_min_lr"
+    lr_warmup_ratio: float = 0.03
+    max_steps: int = int(1e4)
+    policy_loss_type: str = "ppo"   # 'ppo' / 'gspo'
+    reward_func: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "format_reward": True,
+        "format_param": EasyDict(
+            {"format_weight": 0.5, } # fmt_reward 的权重，应该在 [0, 1) 之间，因为advantage的权重是 1 - format_weight
+        ),
+    }))
+    # advantage = target_value - pred_value 
+    advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
+    rft_kl_coef: float = 0.01
+    entropy_loss_coef: float = 0.0
+    kl_estimator: str = "k3"
+    
+    train_llm_after_wm_warm_step: int = int(2e2)
+    llm_save_freq: int = 500  # 每多少步保存一次 llm 模型,一步代表一次参数更新而不是梯度累积
+    save_path: str = "" # 该参数将被 exp_name 目录覆盖
+    
+    value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        'enable_stability_optimizer': True,
+        'value_norm_init_momentum': 0.9,        # Fast adaptation in early training
+        'value_norm_final_momentum': 0.99,     # Slow, stable updates in later training
+        'value_norm_warmup_steps': 100,           # Steps to transition from init to final momentum
+        'value_norm_clip_percentile': 0.95,     # Clip outliers beyond this percentile
+        'value_norm_clip_method': "soft",
+        "value_norm_history_size": 1000,
+    }))
+
+
+def get_priorzero_config(
+    env_id: str = 'detective.z5',
+    seed: int = 0,
+    exp_name: str = None,
+    use_cot: bool = False,
+    model_key: Optional[str] = "qwen2.5-3b",
+    multi_gpu: bool = False
+) -> Tuple[EasyDict, EasyDict]:
+    """
+    Generate complete PriorZero configuration with automatic model configuration.
+
+    Args:
+        env_id: Jericho game ID
+        seed: Random seed
+        exp_name: Experiment name (auto-generated if None)
+        use_cot: Whether to use Chain-of-Thought reasoning
+        model_key: Model configuration key (e.g., 'qwen2.5-0.5b', 'qwen2.5-1.5b', 'qwen2.5-7b')
+                  If None, uses default 'qwen2.5-1.5b'
+
+    Returns:
+        main_config: Main configuration dictionary
+        create_config: Creation configuration for DI-engine components
+        llm_config: LLM configuration with auto-configured model parameters
+    """
+    env_configurations = {
+        'detective.z5': (12, 100),
+        'omniquest.z5': (25, 100),
+        'acorncourt.z5': (45, 50),
+        'zork1.z5': (55, 500),
+    }
+    action_space_size, max_steps = env_configurations.get(env_id, (20, 100))
+    wm_encoder_option = 'legacy' 
+    # wm_model_name = 'BAAI/bge-base-en-v1.5'  
+    wm_model_name = '/mnt/afs/niuyazhe/workspace/xiongjyu/models/bge-base-en-v1.5'  
+    
+    collector_env_num = 1
+    evaluator_env_num = 2
+    n_episode = collector_env_num
+    
+    num_unroll_steps = 10
+    infer_context_length = 4
+    game_segment_length = 50
+    num_layers = 2
+    embed_dim = 768
+    replay_ratio = 0.1
+    batch_size = 64
+    collect_num_simulations=25
+    eval_num_simulations=25
+    replay_buffer_size = int(1e5)
+    
+    env_config = dict(
+        stop_value=int(1e6),
+        max_steps=max_steps,
+        observation_shape=512,  
+        env_id=env_id,
+        # game_path=f"/mnt/shared-storage-user/puyuan/xiongjyu/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        game_path=f"/mnt/afs/niuyazhe/workspace/xiongjyu/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        # game_path=f"/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/{env_id}",
+        for_unizero=True,
+        tokenizer_path=wm_model_name,
+        max_action_num=action_space_size,
+        max_seq_len=512,
+        collector_env_num=collector_env_num,
+        evaluator_env_num=evaluator_env_num,
+        n_evaluator_episode=evaluator_env_num,
+        manager=dict(
+            shared_memory=False,
+        ),
+        use_cache=True,
+        cache_size=100000,
+    )
+    policy_config = dict(
+        type='priorzero',
+        multi_gpu=multi_gpu,  
+        use_wandb=False,
+        learn=dict(
+                learner=dict(
+                    hook=dict(
+                        save_ckpt_after_iter=1000000, 
+                    ),
+                ),
+        ),
+        model=dict(
+            observation_shape=512,
+            action_space_size=action_space_size,
+            encoder_option=wm_encoder_option,
+            encoder_url=wm_model_name,
+            model_type="mlp",
+            continuous_action_space=False,
+            norm_type="LN",
+            world_model_cfg=dict(
+                norm_type="LN",
+                final_norm_option_in_head="LayerNorm",
+                final_norm_option_in_encoder="LayerNorm",
+                predict_latent_loss_type='mse', 
+                policy_entropy_weight=5e-2, 
+                continuous_action_space=False,
+                max_blocks=num_unroll_steps,  
+                max_tokens=2 * num_unroll_steps,  
+                context_length=2 * infer_context_length,  
+                device="cuda",
+                action_space_size=action_space_size,
+                num_layers=num_layers,
+                num_heads=24,
+                embed_dim=embed_dim,
+                obs_type="text",
+                env_num=max(collector_env_num, evaluator_env_num),
+                decode_loss_mode=None, 
+                latent_recon_loss_weight=0,
+                
+                task_embed_option=None,
+                moe_in_transformer=False,
+                multiplication_moe_in_transformer=False,
+                game_segment_length=game_segment_length,
+            )
+        ),
+        update_per_collect=None,
+        num_segments=collector_env_num,
+        action_type="varied_action_space",
+        model_path=None,
+        num_unroll_steps=num_unroll_steps,
+        reanalyze_ratio=0,
+        replay_ratio=replay_ratio,
+        batch_size=batch_size,
+        learning_rate=3e-4,  
+        weight_decay=1e-4,
+        cos_lr_scheduler=False,
+        fixed_temperature_value=0.25,
+        manual_temperature_decay=False,
+        n_episode=n_episode,
+        train_start_after_envsteps=0,
+        replay_buffer_size=replay_buffer_size,
+        eval_freq=int(3e4),
+        collector_env_num=collector_env_num,
+        evaluator_env_num=evaluator_env_num,
+        buffer_reanalyze_freq=1 / 1000000,
+        reanalyze_batch_size=160,
+        reanalyze_partition=0.75,
+        device='cuda',
+        
+        collect_num_simulations=collect_num_simulations,
+        eval_num_simulations=eval_num_simulations,
+        game_segment_length=game_segment_length,
+        off_policy_degree=0,
+        enable_async_eval=False,
+        
+        optim_type='AdamW',
+        grad_clip_value=10.0,
+        value_loss_weight=0.25,
+        policy_loss_weight=1.0,
+        reward_loss_weight=1.0,
+
+        use_adaptive_entropy_weight=False,
+        adaptive_entropy_alpha_lr=1e-4,
+        use_encoder_clip_annealing=False,
+        encoder_clip_anneal_type='cosine',
+        encoder_clip_start_value=30.0,
+        encoder_clip_end_value=10.0,
+        encoder_clip_anneal_steps=100000,
+        use_priority=False,  # Prioritized experience replay
+        priority_prob_alpha=0.6,
+        priority_prob_beta=0.4,
+    )
+
+    llm_config = PriorZeroLLMConfig(use_cot=use_cot) # 需要修改 llm 相关的参数，修改以上类即可
+
+    # Apply model configuration
+    model_config = get_model_config(model_key)
+    llm_config.model_name_or_path = model_config["model_name_or_path"]
+    llm_config.vllm_tensor_parallel_size = model_config["vllm_tensor_parallel_size"]
+    llm_config.gpu_memory_utilization = model_config["gpu_memory_utilization"]
+
+    if exp_name is None:
+        env_name = env_id.replace(".z5", "")
+        exp_name = f"data_priorzero/priorzero_{env_name}_{model_key}_{llm_config.policy_loss_type}_WM_{llm_config.enable_world_model}_RFT_{llm_config.enable_rft}_useCot_{llm_config.use_cot}_seed{seed}"
+    
+    priorzero_config = dict(
+        env=env_config,
+        policy=policy_config,
+        exp_name=exp_name,
+        seed=seed
+    )
+    create_config = dict(
+        env=dict(
+            type="jericho",
+            import_names=["zoo.jericho.envs.jericho_env"],
+        ),
+        env_manager=dict(
+            type="base" 
+        ),
+        policy=dict(
+            type="priorzero",
+            import_names=["zoo.jericho.priorzero.src.priorzero_policy"],
+        ),
+        collector=dict(
+            type="priorzero_segment",
+            import_names=["zoo.jericho.priorzero.src.priorzero_collector"],
+        ),
+        evaluator=dict(
+            type="priorzero",
+            import_names=["zoo.jericho.priorzero.src.priorzero_evaluator"],
+        ),
+        replay_buffer=dict(
+            type='game_buffer_muzero',
+            import_names=['lzero.mcts.buffer.game_buffer_muzero'],
+        ),
+    )
+    main_config = EasyDict(priorzero_config)
+    create_config = EasyDict(create_config)
+
+    print(f"[Config] Model configuration applied:")
+    print(f"  - Model: {model_key}")
+    print(f"  - Path: {llm_config.model_name_or_path}")
+    print(f"  - Tensor Parallel Size: {llm_config.vllm_tensor_parallel_size}")
+    print(f"  - GPU Memory Utilization: {llm_config.gpu_memory_utilization}")
+
+    return main_config, create_config, llm_config
+
+
+def get_priorzero_debug_config(
+    env_id: str = 'detective.z5',
+    seed: int = 0,
+    exp_name: str = None,
+    use_cot: bool = False,
+    model_key: Optional[str] = "qwen2.5-3b",
+) -> EasyDict:
+
+    main_config, create_config, llm_config = get_priorzero_config(
+        env_id=env_id, seed=seed, exp_name=exp_name, use_cot=use_cot, model_key=model_key
+    )
+    max_steps = 20
+    
+    batch_size = 8
+    collect_num_simulations=2
+    eval_num_simulations=2
+    num_layers=1
+    game_segment_length = 50
+
+    llm_config.train_batch_size = 40  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    llm_config.micro_train_batch_size = 8
+    llm_config.train_llm_after_wm_warm_step = 0
+
+    create_config.max_steps = max_steps
+    
+    main_config.policy.model.world_model_cfg.num_layers = num_layers
+    main_config.policy.model.world_model_cfg.game_segment_length = game_segment_length
+    main_config.policy.batch_size = batch_size
+    main_config.policy.collect_num_simulations = collect_num_simulations
+    main_config.policy.eval_num_simulations = eval_num_simulations
+    main_config.policy.update_per_collect = 2
+    main_config.policy.game_segment_length = game_segment_length
+    
+    return main_config, create_config, llm_config
