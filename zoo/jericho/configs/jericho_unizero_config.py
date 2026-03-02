@@ -48,7 +48,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
 
     num_layers: int = 2              # Number of layers in the model
     replay_ratio: float = 0.1       # Replay ratio for experience replay
-    embed_dim: int = 512             # Embedding dimension
+    embed_dim: int = 768             # Embedding dimension
 
     # Reanalysis (reanalyze) parameters:
     # buffer_reanalyze_freq: Frequency of reanalysis (e.g., 1 means reanalyze once per epoch)
@@ -150,7 +150,8 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
                     lora_dropout= 0.0,
 
                     decode_loss_mode=None, # Controls where to compute reconstruction loss: after_backbone, before_backbone, or None.
-                    latent_recon_loss_weight=0.1
+                    latent_recon_loss_weight=0.1,
+                    game_segment_length=50
                 ),
             ),
             update_per_collect=int(collector_env_num*max_steps*replay_ratio ),  # Important for DDP
@@ -168,7 +169,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
             n_episode=n_episode,
             train_start_after_envsteps=0,  # TODO: Adjust training start trigger if needed.
             replay_buffer_size=int(5e5),
-            eval_freq=int(3e4),
+            eval_freq=int(5e2),
             collector_env_num=collector_env_num,
             evaluator_env_num=evaluator_env_num,
             buffer_reanalyze_freq=buffer_reanalyze_freq,

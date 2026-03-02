@@ -129,24 +129,34 @@ class DataProcessor:
             )
         return "\n".join(parts)
 
-    def get_user_prompt(self, history: Optional[List[Tuple[str, str, float]]] = None, current_obs: Optional[str] = None):
+    def get_user_prompt(
+        self, 
+        history: Optional[List[Tuple[str, str, float]]] = None, 
+        current_obs: Optional[str] = None, 
+        valid_actions: Optional[List[str]] = None
+    ) -> str:
         """
         用户提示词：注入历史和当前状态，并触发输出。
         """
         prompt_parts = []
-
+        user_prompt_dict = self.args.user_prompt_dict
         if history and len(history) > 0:
             prompt_parts.append("=== GAME HISTORY ===")
             for i, (obs, action, reward) in enumerate(history, start=1):
                 prompt_parts.append(f"Step {i}:")
                 prompt_parts.append(f"Observation: {obs.strip()}")
                 prompt_parts.append(f"Action: {action.strip()}")
-                prompt_parts.append(f"Reward: {reward}")
+                if user_prompt_dict.history_with_reward:
+                    prompt_parts.append(f"Reward: {reward}")
             prompt_parts.append("") # 空行分隔
 
         prompt_parts.append("=== CURRENT OBSERVATION ===")
         prompt_parts.append(current_obs.strip())
-        
+        if user_prompt_dict.observation_with_valid_actions:
+            if valid_actions and len(valid_actions) > 0:
+                actions_str = ", ".join([f"'{act}'" for act in valid_actions])
+                prompt_parts.append(f"\n[Valid Actions]\nYou can choose from the following actions: {actions_str}")
+            
         prompt_parts.append("\n=== INSTRUCTION ===")
         if self.use_cot:
             prompt_parts.append(
@@ -462,12 +472,11 @@ class DataProcessor:
             if action_match:
                 end_index = action_match.end()
                 prefix_piece = gen_text[:end_index].strip()
-                prefix_cot_list.append(prefix_piece)
-                continue
-            # else:
-            #     prefix_piece = gen_text.strip() + "\nAction:"
-            #     prefix_cot_list.append(prefix_piece)
-            prefix_cot_list.append(gen_text.strip())
+            else:
+                # prefix_piece = gen_text.strip() 
+                prefix_piece = gen_text.strip() + "\nAction:"
+                
+            prefix_cot_list.append(prefix_piece)
 
         return prefix_cot_list, full_output
     

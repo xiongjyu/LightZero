@@ -109,9 +109,9 @@ class PriorZeroCollector(OriginalCollector):
         )
         self.llm_prior_temperature = llm_config.llm_prior_temperature
 
-        self._logger.info("✓ PriorZeroCollector initialized with vLLM engine")
-        self._logger.info(f"  - History length: {self.llm_cfg.history_length}")
-        self._logger.info(f"  - Generate max length: {self.llm_cfg.generate_max_len}")
+        self._logger.info(f"[RANK {self._rank}] ✓ PriorZeroCollector initialized with vLLM engine")
+        self._logger.info(f"[RANK {self._rank}]   - History length: {self.llm_cfg.history_length}")
+        self._logger.info(f"[RANK {self._rank}]   - Generate max length: {self.llm_cfg.generate_max_len}")
 
     def pad_and_save_last_trajectory(
             self, i: int, last_game_segments: List[GameSegment], last_game_priorities: List[np.ndarray],
@@ -228,7 +228,7 @@ class PriorZeroCollector(OriginalCollector):
 
         retry_waiting_time = 0.05
         while len(init_obs.keys()) != env_nums:
-            self._logger.info(f'Waiting for all environments to reset. Ready: {list(init_obs.keys())}')
+            self._logger.info(f'[RANK {self._rank}] Waiting for all environments to reset. Ready: {list(init_obs.keys())}')
             time.sleep(retry_waiting_time)
             init_obs = self._env.ready_obs
 
@@ -299,7 +299,7 @@ class PriorZeroCollector(OriginalCollector):
 
                 if collect_with_pure_policy:
                     continue
-                else:
+                elif self.llm_cfg.enable_rft or self.llm_cfg.mcts_root_logits_dict.mode != "wm_logits":
                     # Extract text observations and valid actions
                     raw_obs_list = []
                     histories_list = []
@@ -325,6 +325,9 @@ class PriorZeroCollector(OriginalCollector):
                         for idx, llm_prior in enumerate(llm_prior_per_seq):
                             scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
                             llm_prior_per_seq[idx] = scaled_llm_prior
+                            
+                else:
+                    llm_prior_per_seq, llm_prior_per_tok = None, None
                         
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
@@ -368,7 +371,7 @@ class PriorZeroCollector(OriginalCollector):
                         self._env.reset({env_id: None})
                         self._policy.reset([env_id])
                         self._reset_stat(env_id)
-                        self._logger.info(f'⚠ Env {env_id} had abnormal step: {episode_timestep.info}')
+                        self._logger.info(f'[RANK {self._rank}] Env {env_id} had abnormal step: {episode_timestep.info}')
                         continue
 
                     obs_new, reward, done, info = (
@@ -455,7 +458,7 @@ class PriorZeroCollector(OriginalCollector):
                         game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(obs_new), init_history_obs=list(self.history_buffers[env_id]))
 
                     self._env_info[env_id]['step'] += 1
-                    if llm_prior_per_seq[env_id] is not None:
+                    if llm_prior_per_seq is not None and llm_prior_per_seq[env_id] is not None:
                         llm_prior_tensor = torch.tensor([logit for k, logit in llm_prior_per_seq[env_id].items()]) 
                         llm_prior_prob = torch.softmax(llm_prior_tensor, dim=-1)
                         llm_prior_entropy[env_id].append(-torch.sum(llm_prior_prob * torch.log(llm_prior_prob + 1e-9), dim=-1))
@@ -469,7 +472,7 @@ class PriorZeroCollector(OriginalCollector):
                 # Episode Done
                 # ==============================================================
                 if episode_timestep.done:
-                    self._logger.info(f'======== Env {env_id} episode finished! ========')
+                    self._logger.info(f'[RANK {self._rank}] ======== Env {env_id} episode finished! ========')
                     self._total_episode_count += 1
                     # Logging
                     info_log = {
@@ -479,7 +482,7 @@ class PriorZeroCollector(OriginalCollector):
                         'llm_prior_entropy': sum(llm_prior_entropy[env_id])/len(llm_prior_entropy[env_id])}
                     
                     self._logger.info(
-                        f"[Episode Complete] Env={env_id} | "
+                        f"[RANK {self._rank}] [Episode Complete] Env={env_id} | "
                         f"Reward={info_log['reward']:.2f} | "
                         f"Steps={info_log['step']} | "
                         f"Time={info_log['time']:.2f}s | "
@@ -537,7 +540,7 @@ class PriorZeroCollector(OriginalCollector):
             # ==================================================================
             if len(self.game_segment_pool) >= self._default_num_segments:
                 self._logger.info(
-                    f'✓ Collected {len(self.game_segment_pool)} segments '
+                    f'[RANK {self._rank}] ✓ Collected {len(self.game_segment_pool)} segments '
                     f'(target: {self._default_num_segments})'
                 )
 
@@ -628,7 +631,7 @@ class PriorZeroCollector(OriginalCollector):
             
             self._logger.info(
                 f"\n{'='*80}\n"
-                f"[Collector Summary] Train Iter: {train_iter}\n"
+                f"[RANK {self._rank}][Collector Summary] Train Iter: {train_iter}\n"
                 f"{'-'*80}\n"
                 f"Episodes:     {info['episode_count']} (Total: {info['total_episode_count']})\n"
                 f"Steps:        {info['envstep_count']} (Total: {info['total_envstep_count']})\n"

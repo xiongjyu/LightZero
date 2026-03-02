@@ -39,8 +39,8 @@ class PriorZeroEvaluator(OriginalEvaluator):
         self.history_buffers = defaultdict(
             lambda: deque(maxlen=self.llm_cfg.history_length)
         )
-        self._logger.info("✓ PriorZeroEvaluator initialized with vLLM engine")
-        self._logger.info(f"  - History length: {self.llm_cfg.history_length}")
+        self._logger.info(f"[RANK {self._rank}] ✓ PriorZeroEvaluator initialized with vLLM engine")
+        self._logger.info(f"[RANK {self._rank}]  - History length: {self.llm_cfg.history_length}")
     
     def should_eval(self, train_iter: int) -> bool:
         """
@@ -74,19 +74,20 @@ class PriorZeroEvaluator(OriginalEvaluator):
             metrics_str = " | ".join([f"{k}: {info.get(k, 0):.2f}" for k in ['avg_envstep_per_episode', 'reward_mean', 'reward_max', 'reward_min']])
             self._logger.info(f"[RANK {self._rank}] {tag} >> {metrics_str}")
         
-        # Only log to TensorBoard if tb_logger is available (rank 0 in DDP)
-        if self._tb_logger is not None:
-            keys = ['avg_envstep_per_episode', 'reward_mean', 'reward_std', 'reward_max', 'reward_min']
-            for k in keys:
-                if self.eval_mode.world_model:
-                    self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_WM', world_model_info[k], train_iter)
-                    self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_WM', world_model_info[k], envstep)
-                if self.eval_mode.world_model_llm_prior:
-                    self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_WM_LLMPrior', world_model_llm_prior_info[k], train_iter)
-                    self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_WM_LLMPrior', world_model_llm_prior_info[k], envstep)
-                if self.eval_mode.llm_prior:
-                    self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_LLMPrior', llm_prior_info[k], train_iter)
-                    self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_LLMPrior', llm_prior_info[k], envstep)
+        if self._rank != 0:
+            return
+        
+        keys = ['avg_envstep_per_episode', 'reward_mean', 'reward_std', 'reward_max', 'reward_min']
+        for k in keys:
+            if self.eval_mode.world_model:
+                self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_WM', world_model_info[k], train_iter)
+                self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_WM', world_model_info[k], envstep)
+            if self.eval_mode.world_model_llm_prior:
+                self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_WM_LLMPrior', world_model_llm_prior_info[k], train_iter)
+                self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_WM_LLMPrior', world_model_llm_prior_info[k], envstep)
+            if self.eval_mode.llm_prior:
+                self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_LLMPrior', llm_prior_info[k], train_iter)    
+                self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_LLMPrior', llm_prior_info[k], envstep)
 
         
     def eval_with_llm_prior(self) -> Dict[str, Any]:
@@ -97,13 +98,14 @@ class PriorZeroEvaluator(OriginalEvaluator):
         env_nums = self._env.env_num
 
         self._env.reset()
+        self.history_buffers.clear()
         self._policy.reset(task_id=self.task_id)
 
         init_obs = self._env.ready_obs
 
         retry_waiting_time = 0.001
         while len(init_obs.keys()) != self._env_num:
-            self._logger.info(f"Waiting for all environments to reset. Current ready envs: {list(init_obs.keys())}")
+            self._logger.info(f"[RANK {self._rank}] Waiting for all environments to reset. Current ready envs: {list(init_obs.keys())}")
             time.sleep(retry_waiting_time)
             init_obs = self._env.ready_obs
 
@@ -138,7 +140,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
             while not eval_monitor.is_finished():
                 # Check if a timeout has occurred.
                 if self.stop_event.is_set():
-                    self._logger.info("[EVALUATOR]: Evaluation aborted due to timeout.")
+                    self._logger.info("[RANK {self._rank}] [EVALUATOR]: Evaluation aborted due to timeout.")
                     break
 
                 # Get observations from ready environments.
@@ -158,30 +160,33 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 stack_obs = prepare_observation(stack_obs, self.policy_config.model.model_type)
                 stack_obs = torch.from_numpy(stack_obs).to(self.policy_config.device).float()
                 
-                # ============================================
-                # 添加 LLM_PRIOR
-                raw_obs_list = []
-                histories_list = []
-                valid_actions_list = [] 
-                for env_id in sorted(list(ready_env_id)):
-                    raw_obs_text = obs[env_id]['raw_obs_text']
-                    raw_obs_list.append(raw_obs_text)
+                if self.llm_cfg.mcts_root_logits_dict.mode != "wm_logits":
+                    # ============================================
+                    # 添加 LLM_PRIOR
+                    raw_obs_list = []
+                    histories_list = []
+                    valid_actions_list = [] 
+                    for env_id in sorted(list(ready_env_id)):
+                        raw_obs_text = obs[env_id]['raw_obs_text']
+                        raw_obs_list.append(raw_obs_text)
 
-                    history = list(self.history_buffers[env_id])
-                    histories_list.append(history)
+                        history = list(self.history_buffers[env_id])
+                        histories_list.append(history)
 
-                    valid_actions = obs[env_id].get('valid_actions', [])
-                    valid_actions_list.append(valid_actions)
+                        valid_actions = obs[env_id].get('valid_actions', [])
+                        valid_actions_list.append(valid_actions)
 
-                llm_prior_per_seq, _, _ = self.data_processor.get_llm_prior(
-                    states=raw_obs_list,
-                    valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
-                    histories=histories_list,
-                    return_cot=True  # Request CoT prefixes for reuse in training
-                )
-                for env_id, llm_prior in enumerate(llm_prior_per_seq):
-                    scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
-                    llm_prior_per_seq[env_id] = scaled_llm_prior
+                    llm_prior_per_seq, _, _ = self.data_processor.get_llm_prior(
+                        states=raw_obs_list,
+                        valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
+                        histories=histories_list,
+                        return_cot=True  # Request CoT prefixes for reuse in training
+                    )
+                    for env_id, llm_prior in enumerate(llm_prior_per_seq):
+                        scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
+                        llm_prior_per_seq[env_id] = scaled_llm_prior
+                else:
+                    llm_prior_per_seq, valid_actions_list = None, None
                 
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
@@ -253,10 +258,6 @@ class PriorZeroEvaluator(OriginalEvaluator):
                             saved_info.update(episode_timestep.info['episode_info'])
                         eval_monitor.update_info(env_id, saved_info)
                         eval_monitor.update_reward(env_id, reward)
-                        self._logger.info(
-                            f"[EVALUATOR] env {env_id} finished episode, final reward: {eval_monitor.get_latest_reward(env_id)}, "
-                            f"current episode count: {eval_monitor.get_current_episode()}"
-                        )
 
                         # If there are more episodes to run than available environments, reset and reuse this one.
                         if n_episode > self._env_num:
@@ -311,6 +312,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
         env_nums = self._env.env_num
 
         self._env.reset()
+        self.history_buffers.clear()
 
         dones = np.array([False for _ in range(env_nums)])
         ready_env_id = [i for i in range(env_nums)]
@@ -347,6 +349,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 if len(llm_prior) == 1:   # 只有go,即valid_action_len=0
                     assert len(valid_actions) == 0
                     actions[env_id] = 0
+                    continue
                 if 'go' in llm_prior and 'go' not in valid_actions:
                     llm_prior.pop('go')
                 action_str_select, max_logprob = "", float(-1e9)

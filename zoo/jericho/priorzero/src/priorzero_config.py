@@ -78,10 +78,26 @@ class PriorZeroLLMConfig:
     local_rank: int = -1
     enable_rft: bool = True
     enable_world_model: bool = True
+    llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
+    mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "mode": "llm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
+        "wm_weight": 0.5,            # 当 value = "LLMPrior_WM" 时，WM logits 的权重；LLMPrior 的权重 = 1 - WM_weight
+    }))
+    eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "world_model": True,              # 评估模式1：完全与 unizero 的 eval 一致；mcts 的根节点仅使用 WM 的logits
+        "world_model_llm_prior": True,    # 评估模式2：基于 unizero 的 eval 过程, 但是 mcts 的根节点需要利用 llm 的先验；具体怎么利用取决于mcts_root_logits_dict.mode 参数
+        "llm_prior": True,                # 评估模式3：仅使用 llm prior 进行 eval, 不需要 wm 进行评估
+        "eval_freq": int(500),
+    }))
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
     use_cot: bool = True
+    user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "history_with_reward": True,   # 是否在 prompt 中加入历史交互的 reward 信息
+        "observation_with_valid_actions": False,  # 是否在 prompt 中加入当前 observation 中可执行的 action 信息  
+    }))
+    
     prompt_max_len: int = 8192
     generate_max_len: int = 512
     bf16: bool = True
@@ -101,13 +117,6 @@ class PriorZeroLLMConfig:
     top_p: float = 0.95
     seed: int = 0
     reduction: str = "mean"
-    llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
-    eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "world_model": True,
-        "world_model_llm_prior": True,
-        "llm_prior": True,
-        "eval_freq": int(500),
-    }))
     
     # 训练相关参数
     colocate_all_models: bool = True # 是否把所有模型都放在一起训练
@@ -122,9 +131,9 @@ class PriorZeroLLMConfig:
     ring_attn_size: int = 1
     
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
-    train_batch_size: int = 320 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    micro_train_batch_size: int = 2 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
-    broadcast_every: int = 2 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
+    train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
+    broadcast_every: int = 4 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
 
     learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
@@ -349,7 +358,7 @@ def get_priorzero_config(
 
     if exp_name is None:
         env_name = env_id.replace(".z5", "")
-        exp_name = f"priorzero_{env_name}_{model_key}_{llm_config.policy_loss_type}_WM_{llm_config.enable_world_model}_useCot_{llm_config.use_cot}_seed{seed}"
+        exp_name = f"data_priorzero/priorzero_{env_name}_{model_key}_{llm_config.policy_loss_type}_WM_{llm_config.enable_world_model}_RFT_{llm_config.enable_rft}_useCot_{llm_config.use_cot}_seed{seed}"
     
     priorzero_config = dict(
         env=env_config,
@@ -367,15 +376,15 @@ def get_priorzero_config(
         ),
         policy=dict(
             type="priorzero",
-            import_names=["zoo.jericho.priorzero.priorzero_policy"],
+            import_names=["zoo.jericho.priorzero.src.priorzero_policy"],
         ),
         collector=dict(
             type="priorzero_segment",
-            import_names=["zoo.jericho.priorzero.priorzero_collector"],
+            import_names=["zoo.jericho.priorzero.src.priorzero_collector"],
         ),
         evaluator=dict(
             type="priorzero",
-            import_names=["zoo.jericho.priorzero.priorzero_evaluator"],
+            import_names=["zoo.jericho.priorzero.src.priorzero_evaluator"],
         ),
         replay_buffer=dict(
             type='game_buffer_muzero',

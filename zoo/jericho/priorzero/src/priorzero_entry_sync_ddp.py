@@ -2,18 +2,6 @@ import sys
 import os
 from pathlib import Path
 
-# ==============================================================================
-# 假设当前脚本在 .../zoo/jericho/priorzero/ 目录下
-current_file_path = Path(__file__).resolve()
-# 回退 4 层找到 LightZero 根目录 (priorzero -> jericho -> zoo -> LightZero)
-project_root = current_file_path.parents[3] 
-
-if str(project_root) not in sys.path:
-    print(f"[SYSTEM] Inserting project root to sys.path: {project_root}")
-    sys.path.insert(0, str(project_root))
-# ==============================================================================
-
-
 import asyncio
 import os
 import sys
@@ -56,7 +44,7 @@ def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed):
     collector_env.seed(seed)
     evaluator_env.seed(seed, dynamic_seed=False)
     
-    policy = create_policy( cfg.policy, enable_field=['learn', 'collect', 'eval'], exp_name=cfg.exp_name)
+    policy = create_policy( cfg.policy, enable_field=['learn', 'collect', 'eval'], exp_name=cfg.exp_name, llm_cfg=llm_cfg)
     logger.info(f"[Rank {rank}]  Policy created")
 
     os.makedirs(f'./{cfg.exp_name}/log/', exist_ok=True)
@@ -101,13 +89,13 @@ def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed):
     learner.call_hook('before_run')
 
     return cfg, replay_buffer, tb_logger, policy, collector, evaluator, learner
-    
-def bcast_obj(world_size, obj, rank, src=0):
+
+def all_gather_cmd(world_size, obj) -> List:
     if world_size <= 1:
-        return obj
-    lst = [obj] if rank == src else [None]
-    dist.broadcast_object_list(lst, src=src)
-    return lst[0]    
+        return [obj]
+    lst = [None] * dist.get_world_size()
+    dist.all_gather_object(lst, obj)
+    return lst
 
 def train_priorzero(
     cfg: dict,
@@ -119,28 +107,32 @@ def train_priorzero(
     enable_profile: bool = False
 ):
     rank = int(os.environ.get("RANK", "0"))
-    print(f"rank={rank}")
-    if rank == 0:
-        cfg, replay_buffer, tb_logger, policy, collector, evaluator, learner = prepare_unizero( 
-                                                                            rank=rank,
-                                                                            cfg=cfg,
-                                                                            create_cfg=create_cfg, 
-                                                                            llm_cfg=llm_cfg, 
-                                                                            seed=seed)
-        batch_size = cfg.policy.batch_size
-        logger.info(f"[Rank {rank}] World Model components initialized")
-        dump_dataclass_cfg_py(llm_cfg, path=f"{cfg.exp_name}/llm_cfg.py")
-        llm_cfg.save_path = f'./{cfg.exp_name}/llm_ckpt/'
-
-    from utils import Profiler
-    prof = Profiler(log_interval=10, stats_file=f'./{cfg.exp_name}/log/profiler.txt', enable_profile=enable_profile)
-
+    print(f"DEBUG: Is dist initialized at start? {dist.is_initialized()}")
+    if dist.is_initialized():
+        print(f"DEBUG: Backend is {dist.get_backend()}")
     from strategy.deepspeed import get_strategy, torch_dist_barrier_and_cuda_sync
     strategy = get_strategy(llm_cfg)
     strategy.print(llm_cfg)
     
     strategy.setup_distributed()   # torchrun 下：绑定 local_rank + init_distributed
     world_size = getattr(strategy, "world_size", 1)
+    
+    
+    cfg, replay_buffer, tb_logger, policy, collector, evaluator, learner = prepare_unizero( 
+                                                                        rank=rank,
+                                                                        cfg=cfg,
+                                                                        create_cfg=create_cfg, 
+                                                                        llm_cfg=llm_cfg, 
+                                                                        seed=seed)
+    batch_size = cfg.policy.batch_size
+    logger.info(f"[Rank {rank}] World Model components initialized")
+    if rank == 0:
+        dump_dataclass_cfg_py(llm_cfg, path=f"{cfg.exp_name}/llm_cfg.py")
+        llm_cfg.save_path = f'./{cfg.exp_name}/llm_ckpt/'
+
+    from utils import Profiler
+    prof = Profiler(log_interval=10, stats_file=f'./{cfg.exp_name}/log/profiler.txt', enable_profile=enable_profile)
+
     
     logger.info(f"[Rank {rank}] Initializing LLM Actor...")
     set_pkg_seed(seed + rank, use_cuda=True)
@@ -174,10 +166,10 @@ def train_priorzero(
                                    model_path=llm_cfg.model_name_or_path,
                                    exp_name=cfg.exp_name if rank == 0 else None,
                                 )
-    if rank == 0:
-        collector.data_processor = data_processor
-        collector.prof = prof
-        evaluator.data_processor = data_processor
+    # 在collector中初始化data_processor 和prof对象
+    collector.data_processor = data_processor
+    collector.prof = prof
+    evaluator.data_processor = data_processor
     
     policy_model = PolicyModel(
         strategy=strategy,
@@ -201,86 +193,102 @@ def train_priorzero(
     torch_dist_barrier_and_cuda_sync()
     
     while True:
-        cmd = "noop"
+        cmd = 0 # 0 表示当前循环contiune, 1 表示继续，2 表示break
         priorzero_batch = None
-        if rank == 0:
-            if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
-                logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
-                if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
-                    vllm_engine.wake_up()
-                evaluator.eval(train_iter=learner.train_iter, envstep=collector.envstep)
-                if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
-                    vllm_engine.sleep()
+        if learner.train_iter != 0 and evaluator.should_eval(learner.train_iter):
+            logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
+            
+            if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
+                vllm_engine.wake_up()
+            evaluator.eval(train_iter=learner.train_iter, envstep=collector.envstep)
+            if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
+                vllm_engine.sleep()
                     
-            if cmd != "stop":
-                if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
-                    vllm_engine.wake_up()
-                        
-                new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
-                data_processor.get_llm_output_log(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter)
+        if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
+            vllm_engine.wake_up()
                 
-                if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
-                    vllm_engine.sleep()
-                
-                update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=1)                
-                
-                replay_buffer.push_game_segments(new_data)
-                replay_buffer.remove_oldest_data_to_fit()
-                
-                num_of_transitions = replay_buffer.get_num_of_transitions() 
-                new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
-                logger.info(f"[Rank {rank}] Data collected, num_of_transitions: {num_of_transitions} transitions\tnew_num_of_transitions: {new_num_of_transitions}")
-            
-                if not (num_of_transitions > batch_size):
-                    logger.warning(
-                        f'  ⚠ Data in replay_buffer is not sufficient: '
-                        f'batch_size: {batch_size}, replay_buffer: {replay_buffer}. Continue to collect...'
-                    )
-                    cmd = "noop" 
-                    cmd = bcast_obj(world_size, cmd, rank, src=0)
-                    continue
-                
-                logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
-                
-                for i in range(update_per_collect):
-                    with prof.block("train_world_model", rank=0):
-                        train_data = replay_buffer.sample(batch_size, policy)
-                        train_data.append(learner.train_iter)
-
-                        log_vars = learner.train(train_data, collector.envstep)
-                        if cfg.policy.use_priority:
-                            replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
-                policy.recompute_pos_emb_diff_and_clear_cache()
-                
-                # 计算需要收集多少样本才能满足 llm 的训练
-                # 一次参数更新是train_batch_size，off次数为broadcast_every，1是因为只有一个rank收集数据
-                # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
-                llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // 1
-                llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps 
-                
-                if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt:
-                    with prof.block("fetch_latest_batch", rank=0):
-                        print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
-                        priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
-                        print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
-                        cmd = "llm"
-
-                if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
-                    cmd = "stop"
+        new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
+        data_processor.get_llm_output_log(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter)
         
-        cmd = bcast_obj(world_size, cmd, rank, src=0)
-        if cmd == "stop":
-            break
-        elif cmd == "llm":
-            with prof.block("train_llm", rank=rank):
-                logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
-                priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
-                logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
-                train_samples = data_processor.make_llm_train_samples(priorzero_batch)
-                trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
-                torch_dist_barrier_and_cuda_sync()
+        if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
+            vllm_engine.sleep()
+        
+        torch_dist_barrier_and_cuda_sync()
+        update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=world_size)                
+        
+        replay_buffer.push_game_segments(new_data)
+        replay_buffer.remove_oldest_data_to_fit()
+        
+        num_of_transitions = replay_buffer.get_num_of_transitions() 
+        new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
+        logger.info(
+            f"[Data Collection] Rank {rank} | "
+            f"Total transitions: {num_of_transitions} | "
+            f"New transitions: {new_num_of_transitions}"
+        )
+        if not (num_of_transitions > batch_size):
+            logger.warning(
+                f'  ⚠ Data in replay_buffer is not sufficient: '
+                f'batch_size: {batch_size}, replay_buffer: {replay_buffer}. Continue to collect...'
+            )
+            cmd = 0
+        else:
+            cmd = 1
             
+        if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
+            continue
 
+        logger.info(
+            f"[World Model Training] Rank {rank} | Iter {learner.train_iter} | "
+            f"Updates: {update_per_collect}"
+        )
+        
+        if llm_cfg.enable_world_model:
+            for i in range(update_per_collect):
+                with prof.block("train_world_model", rank=rank):
+                    train_data = replay_buffer.sample(batch_size, policy)
+                    train_data.append(learner.train_iter)
+
+                    log_vars = learner.train(train_data, collector.envstep)
+                    if cfg.policy.use_priority:
+                        replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
+            policy.recompute_pos_emb_diff_and_clear_cache()
+        
+        # 计算需要收集多少样本才能满足 llm 的训练
+        # 一次参数更新是train_batch_size，off次数为broadcast_every，每个rank单独收集数据，所以需要除
+        # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
+        llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // world_size
+        llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps
+        
+        if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt and llm_cfg.enable_rft:
+            cmd = 1
+        else:
+            cmd = 0
+
+        if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
+            cmd = 2
+            
+        all_cmd = all_gather_cmd(world_size=world_size, obj=cmd)
+        if max(all_cmd) == 2:
+            break
+        elif min(all_cmd) == 1:
+            with prof.block("fetch_latest_batch", rank=rank):
+                print(f"[Batch Fetch] Rank {rank}] | WM Iter: {learner.train_iter} |  Required transitions: {llm_need_transition_cnt}")
+                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
+                print(f"[Batch Fetch] Rank {rank}] completed.")
+                
+            with prof.block("train_llm", rank=rank):
+                sample_count = len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 0
+                logger.info(f"[LLM Training] Rank {rank} | Samples: {sample_count}")
+                
+                train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True)
+                trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
+                
+                torch_dist_barrier_and_cuda_sync()
+                    
+        else:
+            continue
+            
 def main():
     """
     Main entry point with argument parsing.
@@ -328,6 +336,7 @@ Examples:
     print(f"enable_profile: {args.enable_profile}")
     print(f"{'='*80}\n")
 
+    # use_cot = True 
     if args.quick_test:
         logger.info("Using quick test configuration")
         main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(
@@ -339,6 +348,7 @@ Examples:
         main_cfg, create_cfg, llm_cfg = get_priorzero_config(
             args.env_id, args.seed, use_cot=args.use_cot,
             model_key=model_key,
+            multi_gpu=True
         )
 
     train_priorzero(
