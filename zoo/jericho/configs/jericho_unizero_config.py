@@ -18,7 +18,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
     """
     env_id = 'detective.z5'
 
-    collector_env_num: int = 4       # Number of collector environments
+    collector_env_num: int = 8       # Number of collector environments
     n_episode = int(collector_env_num)
     batch_size=64
 
@@ -156,7 +156,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
             ),
             update_per_collect=int(collector_env_num*max_steps*replay_ratio ),  # Important for DDP
             action_type="varied_action_space",
-            model_path=None,
+            model_path="/mnt/afs/niuyazhe/workspace/xiongjyu/LightZero/data_lz/data_unizero_jericho/bge-base-en-v1.5/detective.z5/uz_gpu_cen8_rr0.1_ftemp025_detectiv_ms100_ass-12_nlayer2_embed768_Htrain10-Hinfer4_bs64_seed0/ckpt/WM_ckpt_best.pth.tar",
             num_unroll_steps=num_unroll_steps,
             reanalyze_ratio=0,
             replay_ratio=replay_ratio,

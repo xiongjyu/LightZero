@@ -1106,13 +1106,13 @@ class UniZeroPolicy(MuZeroPolicy):
         self.evaluator_env_num = self._cfg.evaluator_env_num
 
         if self._cfg.model.model_type == 'conv':
-            self.last_batch_obs = torch.zeros([self.collector_env_num, self._cfg.model.observation_shape[0], 64, 64]).to(self._cfg.device)
-            self.last_batch_action = [-1 for i in range(self.collector_env_num)]
+            self.last_batch_obs = torch.zeros([self.evaluator_env_num, self._cfg.model.observation_shape[0], 64, 64]).to(self._cfg.device)
+            self.last_batch_action = [-1 for i in range(self.evaluator_env_num)]
         elif self._cfg.model.model_type == 'mlp':
             self.last_batch_obs = torch.full(
-                [self.collector_env_num, self._cfg.model.observation_shape], fill_value=self.pad_token_id,
+                [self.evaluator_env_num, self._cfg.model.observation_shape], fill_value=self.pad_token_id,
             ).to(self._cfg.device)
-            self.last_batch_action = [-1 for i in range(self.collector_env_num)]
+            self.last_batch_action = [-1 for i in range(self.evaluator_env_num)]
 
     def _forward_eval(self, data: torch.Tensor, action_mask: list, to_play: int = -1,
                       ready_env_id: np.array = None, timestep: List = [0], task_id: int = None,) -> Dict:
