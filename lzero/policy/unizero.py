@@ -762,7 +762,7 @@ class UniZeroPolicy(MuZeroPolicy):
             # ===================== END: 动态计算当前 Clip 阈值 =====================
 
             # 1. Encoder-Clip (使用动态计算出的 current_clip_value)
-            if current_clip_value > 0 and 'obs_embeddings' in losses.intermediate_losses:
+            if self.use_encoder_clip_annealing and current_clip_value > 0 and 'obs_embeddings' in losses.intermediate_losses:
                 obs_embeddings = losses.intermediate_losses['obs_embeddings']
                 if obs_embeddings is not None:
                     max_latent_norm = obs_embeddings.norm(p=2, dim=-1).max()

@@ -504,6 +504,9 @@ class HFLanguageRepresentationNetwork(nn.Module):
             torch.distributed.barrier()
         if get_rank() != 0:
             self.pretrained_model = AutoModel.from_pretrained(model_path)
+        
+        for p in self.pretrained_model.parameters():
+            p.requires_grad = False
 
         self.embedding_size = embedding_size
         self.embed_proj_head = nn.Linear(self.pretrained_model.config.hidden_size, self.embedding_size)

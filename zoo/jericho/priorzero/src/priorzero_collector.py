@@ -299,35 +299,32 @@ class PriorZeroCollector(OriginalCollector):
 
                 if collect_with_pure_policy:
                     continue
-                elif self.llm_cfg.enable_rft or self.llm_cfg.mcts_root_logits_dict.mode != "wm_logits":
-                    # Extract text observations and valid actions
-                    raw_obs_list = []
-                    histories_list = []
-                    valid_actions_list = [] 
-                    for env_id in sorted(list(ready_env_id)):
-                        raw_obs_text = extract_raw_obs_text(obs[env_id])
-                        raw_obs_list.append(raw_obs_text)
 
-                        history = list(self.history_buffers[env_id])
-                        histories_list.append(history)
+                # Extract text observations and valid actions
+                raw_obs_list = []
+                histories_list = []
+                valid_actions_list = [] 
+                for env_id in sorted(list(ready_env_id)):
+                    raw_obs_text = extract_raw_obs_text(obs[env_id])
+                    raw_obs_list.append(raw_obs_text)
 
-                        valid_actions = obs[env_id].get('valid_actions', [])
-                        valid_actions_list.append(valid_actions)
-                    with self.prof.block("collect_step_get_llm_prior", rank=self._rank):
-                        # CoT reuse optimization: request CoT prefixes to store in game segments
-                        llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
-                            states=raw_obs_list,
-                            valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
-                            histories=histories_list,
-                            return_cot=True  # Request CoT prefixes for reuse in training
-                        )
-                        assert len(llm_prior_per_seq) == len(ready_env_id) == len(valid_actions_list)
-                        for idx, llm_prior in enumerate(llm_prior_per_seq):
-                            scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
-                            llm_prior_per_seq[idx] = scaled_llm_prior
-                            
-                else:
-                    llm_prior_per_seq, llm_prior_per_tok = None, None
+                    history = list(self.history_buffers[env_id])
+                    histories_list.append(history)
+
+                    valid_actions = obs[env_id].get('valid_actions', [])
+                    valid_actions_list.append(valid_actions)
+                with self.prof.block("collect_step_get_llm_prior", rank=self._rank):
+                    # CoT reuse optimization: request CoT prefixes to store in game segments
+                    llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
+                        states=raw_obs_list,
+                        valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
+                        histories=histories_list,
+                        return_cot=True  # Request CoT prefixes for reuse in training
+                    )
+                    assert len(llm_prior_per_seq) == len(ready_env_id) == len(valid_actions_list)
+                    for idx, llm_prior in enumerate(llm_prior_per_seq):
+                        scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
+                        llm_prior_per_seq[idx] = scaled_llm_prior
                         
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
@@ -569,6 +566,7 @@ class PriorZeroCollector(OriginalCollector):
             local_step, local_episode = collected_step, collected_episode
             collected_step = allreduce_data(collected_step, 'sum')
             collected_episode = allreduce_data(collected_episode, 'sum')
+            collected_duration = float(collected_duration)
             collected_duration = allreduce_data(collected_duration, 'sum')
             # After allreduce
             self._logger.info(

@@ -302,7 +302,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         valid_actions_list = kwargs.get('valid_actions_list', None)
         mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
         
-        if not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
+        if llm_prior_logprob is None or not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_collect(
                 data, action_mask, temperature, to_play, epsilon,
