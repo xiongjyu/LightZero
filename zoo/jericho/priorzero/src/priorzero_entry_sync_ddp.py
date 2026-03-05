@@ -191,6 +191,13 @@ def train_priorzero(
     )
         
     torch_dist_barrier_and_cuda_sync()
+    train_schedule = llm_cfg.train_schedule
+    if train_schedule["mode"] == "alternate":
+        current_phase = train_schedule["start_phase"]
+        last_wm_train_iter = 0
+        last_llm_train_iter = 0
+    elif train_schedule["mode"] == "joint":
+        current_phase = "joint"
     
     while True:
         cmd = 0 # 0 表示当前循环contiune, 1 表示继续，2 表示break
@@ -243,7 +250,7 @@ def train_priorzero(
             f"Updates: {update_per_collect}"
         )
         
-        if llm_cfg.enable_world_model:
+        if llm_cfg.enable_world_model and current_phase in ["wm", "joint"]:
             for i in range(update_per_collect):
                 with prof.block("train_world_model", rank=rank):
                     train_data = replay_buffer.sample(batch_size, policy)
@@ -253,6 +260,10 @@ def train_priorzero(
                     if cfg.policy.use_priority:
                         replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
             policy.recompute_pos_emb_diff_and_clear_cache()
+            if current_phase != "joint" and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
+                current_phase = "llm"
+                last_wm_train_iter = learner.train_iter
+                print(f"[Rank {rank}] Switching to LLM training phase at wm iter: {learner.train_iter}")
         
         # 计算需要收集多少样本才能满足 llm 的训练
         # 一次参数更新是train_batch_size，off次数为broadcast_every，每个rank单独收集数据，所以需要除
@@ -260,7 +271,7 @@ def train_priorzero(
         llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // world_size
         llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps
         
-        if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt and llm_cfg.enable_rft:
+        if new_num_of_transitions >= llm_need_transition_cnt and llm_cfg.enable_rft and current_phase in ["llm", "joint"]:
             cmd = 1
         else:
             cmd = 0
@@ -285,6 +296,11 @@ def train_priorzero(
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
                 
                 torch_dist_barrier_and_cuda_sync()
+                
+                if current_phase != "joint" and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
+                    current_phase = "wm"
+                    last_llm_train_iter = trainer.global_step
+                    print(f"[Rank {rank}] Switching to World Model training phase at llm iter: {trainer.global_step}")
                     
         else:
             continue

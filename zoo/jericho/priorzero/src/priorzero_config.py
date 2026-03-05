@@ -73,6 +73,15 @@ class PriorZeroLLMConfig:
     local_rank: int = -1
     enable_rft: bool = True
     enable_world_model: bool = True
+    
+    train_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "mode": "alternate", # "joint": 两者都训练（默认配置）；# "alternate": 严格交替训练：phase=wm 时仅训练 wm；phase=llm 时仅训练 llm
+        "wm_update_iters": 1e3, # wm 的 train_iter 
+        "llm_update_iters": 1e2, # llm 的 train_iter
+        "start_phase": "wm",   # 从哪个阶段开始： "wm" 或 "llm"
+        "wm_warmup_updates": 0, # 在训练初期，先单独训练 wm 一段时间（更新次数），让 wm 学习到一些基本的环境动态
+    }))
+
     llm_prior_temperature: float = 1.0  # LLM prior 分布的温度参数
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "mode": "llm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
@@ -150,7 +159,6 @@ class PriorZeroLLMConfig:
     entropy_loss_coef: float = 0.0
     kl_estimator: str = "k3"
     
-    train_llm_after_wm_warm_step: int = int(2e2)
     llm_save_freq: int = 500  # 每多少步保存一次 llm 模型,一步代表一次参数更新而不是梯度累积
     save_path: str = "" # 该参数将被 exp_name 目录覆盖
     
@@ -403,9 +411,10 @@ def get_priorzero_debug_config(
     num_layers=1
     game_segment_length = 50
 
-    llm_config.train_batch_size = 40  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    llm_config.micro_train_batch_size = 8
-    llm_config.train_llm_after_wm_warm_step = 0
+    llm_config.train_batch_size = 8  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    llm_config.micro_train_batch_size = 2
+    llm_config.train_schedule.wm_update_iters=2
+    llm_config.train_schedule.llm_update_iters=1
 
     create_config.max_steps = max_steps
     

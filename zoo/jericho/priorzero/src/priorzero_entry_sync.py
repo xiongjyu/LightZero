@@ -188,6 +188,14 @@ def train_priorzero(
         
     torch_dist_barrier_and_cuda_sync()
     
+    train_schedule = llm_cfg.train_schedule
+    if train_schedule["mode"] == "alternate":
+        current_phase = train_schedule["start_phase"]
+        last_wm_train_iter = 0
+        last_llm_train_iter = 0
+    elif train_schedule["mode"] == "joint":
+        current_phase = "joint"
+        
     while True:
         cmd = "noop"
         priorzero_batch = None
@@ -230,7 +238,7 @@ def train_priorzero(
                 
                 logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
                 
-                if llm_cfg.enable_world_model:
+                if llm_cfg.enable_world_model and current_phase in ["wm", "joint"]:
                     for i in range(update_per_collect):
                         with prof.block("train_world_model", rank=0):
                             train_data = replay_buffer.sample(batch_size, policy)
@@ -240,14 +248,16 @@ def train_priorzero(
                             if cfg.policy.use_priority:
                                 replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
                     policy.recompute_pos_emb_diff_and_clear_cache()
-                
+                    if current_phase != "joint" and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
+                        current_phase = "llm"
+                        last_wm_train_iter = learner.train_iter
                 # 计算需要收集多少样本才能满足 llm 的训练
                 # 一次参数更新是train_batch_size，off次数为broadcast_every，1是因为只有一个rank收集数据
                 # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
                 llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // 1
                 llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps 
                 
-                if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt and llm_cfg.enable_rft:
+                if new_num_of_transitions >= llm_need_transition_cnt and llm_cfg.enable_rft and current_phase in ["llm", "joint"]:
                     with prof.block("fetch_latest_batch", rank=0):
                         print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
                         priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
@@ -268,6 +278,10 @@ def train_priorzero(
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch)
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
                 torch_dist_barrier_and_cuda_sync()
+                
+                if current_phase != "joint" and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
+                    current_phase = "wm"
+                    last_llm_train_iter = trainer.global_step
             
 
 def main():
