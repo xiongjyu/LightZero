@@ -46,6 +46,10 @@ def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed):
     
     policy = create_policy( cfg.policy, enable_field=['learn', 'collect', 'eval'], exp_name=cfg.exp_name, llm_cfg=llm_cfg)
     logger.info(f"[Rank {rank}]  Policy created")
+    
+    if cfg.policy.model_path is not None:
+        logging.info(f"Loading pretrained model from {cfg.policy.model_path}...")
+        policy.learn_mode.load_state_dict(torch.load(cfg.policy.model_path, map_location=cfg.policy.device))
 
     os.makedirs(f'./{cfg.exp_name}/log/', exist_ok=True)
     tb_logger = SummaryWriter(os.path.join(f'./{cfg.exp_name}/log/', 'serial')) if get_rank() == 0 else None
@@ -200,7 +204,7 @@ def train_priorzero(
         cmd = "noop"
         priorzero_batch = None
         if rank == 0:
-            if learner.train_iter != 0 and evaluator.should_eval(learner.train_iter):
+            if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
                 logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.wake_up()
