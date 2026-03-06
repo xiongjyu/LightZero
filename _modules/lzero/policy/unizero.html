@@ -1563,13 +1563,13 @@
 
             <span class="c1"># This logic is a temporary workaround specific to the muzero_segment_collector.</span>
             <span class="k">if</span> <span class="n">active_collect_env_num</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">collector_env_num</span><span class="p">:</span>
-                <span class="c1"># When an environment finishes an episode (&#39;done&#39;), the length of `self.last_batch_obs` passed back</span>
+                <span class="c1"># When an environment finishes an episode (&#39;done&#39;), the length of `self.last_batch_obs_collect` passed back</span>
                 <span class="c1"># becomes smaller than the total number of collector environments.</span>
                 <span class="c1"># Handling this dynamic batch size is complex, as the transformer&#39;s KV cache retrieval</span>
                 <span class="c1"># requires a stable environment ID for correct indexing. A mismatch would cause retrieval errors.</span>
                 <span class="c1">#</span>
                 <span class="c1"># Therefore, as a simpler solution, we reset the collection state for ALL environments.</span>
-                <span class="c1"># By resetting `self.last_batch_action` to -1 for all `self.collector_env_num` environments,</span>
+                <span class="c1"># By resetting `self.last_batch_action_collect` to -1 for all `self.collector_env_num` environments,</span>
                 <span class="c1"># we force the transformer to start its context from scratch, avoiding incorrect cache lookups.</span>
                 <span class="n">logging</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="s1">&#39;========== collect_forward ============&#39;</span><span class="p">)</span>
                 <span class="n">logging</span><span class="o">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s1">&#39;An environment has finished. Active envs: </span><span class="si">{</span><span class="n">active_collect_env_num</span><span class="si">}</span><span class="s1"> &lt; Total envs: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">collector_env_num</span><span class="si">}</span><span class="s1">. Resetting all.&#39;</span><span class="p">)</span>
