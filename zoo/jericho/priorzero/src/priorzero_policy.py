@@ -433,7 +433,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             
             if mcts_root_logits_dict.mode == "llm_logits":
                 root_logits = policy_priors
-                for env_id, (prior, valid_actions) in enumerate(zip(policy_priors, valid_actions_list)):
+                for env_id, prior, valid_actions in zip(ready_env_id, policy_priors, valid_actions_list):
                     llm_probs = F.softmax(prior, dim=-1).cpu().tolist()
                     for i in range(len(valid_actions)):
                         mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_probs[i]
@@ -446,7 +446,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
                 root_logits = torch.log(combined_probs + 1e-8)
                 
-                for env_id, (llm_prob, wm_prob, combined_prob, valid_actions) in enumerate(zip(llm_probs, wm_probs, combined_probs, valid_actions_list)):
+                for env_id, llm_prob, wm_prob, combined_prob, valid_actions in zip(ready_env_id, llm_probs, wm_probs, combined_probs, valid_actions_list):
                     for i in range(len(valid_actions)):
                         mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_prob[i].item()
                         mcts_info[env_id]["root_wm_prob"][valid_actions[i]] = wm_prob[i].item()
