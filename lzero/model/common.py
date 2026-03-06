@@ -502,6 +502,9 @@ class HFLanguageRepresentationNetwork(nn.Module):
             torch.distributed.barrier()
         if get_rank() != 0:
             self.pretrained_model = AutoModel.from_pretrained(model_path)
+        
+        for p in self.pretrained_model.parameters():
+            p.requires_grad = False
 
         if get_rank() != 0:
             logging.info(f"Worker process is loading model from cache: {model_path}")

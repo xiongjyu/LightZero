@@ -302,7 +302,7 @@ def configure_optimizers_nanogpt(
     # TODO: The following code is commented out, which is crucial for a balanced pipeline.
     # We do not filter out parameters with `requires_grad=False` because their `requires_grad`
     # attribute might be set to `True` at a later stage during training.
-    # param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+    param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
 
     # Create optimizer parameter groups. Any parameter that is 2D or higher will be weight decayed,
     # otherwise no. i.e. all weight tensors in matrix multiplications and embeddings will be decayed,
