@@ -1470,13 +1470,13 @@ class UniZeroPolicy(MuZeroPolicy):
 
             # This logic is a temporary workaround specific to the muzero_segment_collector.
             if active_collect_env_num < self.collector_env_num:
-                # When an environment finishes an episode ('done'), the length of `self.last_batch_obs` passed back
+                # When an environment finishes an episode ('done'), the length of `self.last_batch_obs_collect` passed back
                 # becomes smaller than the total number of collector environments.
                 # Handling this dynamic batch size is complex, as the transformer's KV cache retrieval
                 # requires a stable environment ID for correct indexing. A mismatch would cause retrieval errors.
                 #
                 # Therefore, as a simpler solution, we reset the collection state for ALL environments.
-                # By resetting `self.last_batch_action` to -1 for all `self.collector_env_num` environments,
+                # By resetting `self.last_batch_action_collect` to -1 for all `self.collector_env_num` environments,
                 # we force the transformer to start its context from scratch, avoiding incorrect cache lookups.
                 logging.info('========== collect_forward ============')
                 logging.info(f'An environment has finished. Active envs: {active_collect_env_num} < Total envs: {self.collector_env_num}. Resetting all.')

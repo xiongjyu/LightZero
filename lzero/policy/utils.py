@@ -277,7 +277,8 @@ def configure_optimizers_nanogpt(
     weight_decay: float,
     learning_rate: float,
     betas: Tuple[float, float],
-    device_type: str
+    device_type: str,
+    optim_include_no_require_grad_params: bool = False
 ) -> torch.optim.AdamW:
     """
     Overview:
@@ -299,10 +300,10 @@ def configure_optimizers_nanogpt(
     # Start with all of the candidate parameters from the model.
     param_dict = {pn: p for pn, p in model.named_parameters()}
 
-    # TODO: The following code is commented out, which is crucial for a balanced pipeline.
-    # We do not filter out parameters with `requires_grad=False` because their `requires_grad`
-    # attribute might be set to `True` at a later stage during training.
-    param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+    # TODO: When `optim_include_no_require_grad_params` is True, keep `requires_grad=False` parameters
+    # in weight decay, since some may be unfrozen later (e.g., in the ScaleZero DPS pipeline).
+    if not optim_include_no_require_grad_params:
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
 
     # Create optimizer parameter groups. Any parameter that is 2D or higher will be weight decayed,
     # otherwise no. i.e. all weight tensors in matrix multiplications and embeddings will be decayed,
