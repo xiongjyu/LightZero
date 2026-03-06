@@ -98,6 +98,7 @@ class MuZeroEvaluator(ISerialEvaluator):
             self._tb_logger = tb_logger
 
         self._rank = get_rank()
+        self._world_size = get_world_size()
         print(f'rank {self._rank}, self.task_id: {self.task_id}')
 
         self.reset(policy, env)

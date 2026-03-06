@@ -6,6 +6,7 @@ import sys
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Union, Optional
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -411,6 +412,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         if ready_env_id is None:
             ready_env_id = np.arange(active_eval_env_num)
         output = {i: None for i in ready_env_id}
+        mcts_info = {i: defaultdict(dict) for i in ready_env_id}
         
         policy_priors = []
         for env_id in range(active_eval_env_num):
@@ -431,6 +433,10 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             
             if mcts_root_logits_dict.mode == "llm_logits":
                 root_logits = policy_priors
+                for env_id, (prior, valid_actions) in enumerate(zip(policy_priors, valid_actions_list)):
+                    llm_probs = F.softmax(prior, dim=-1).cpu().tolist()
+                    for i in range(len(valid_actions)):
+                        mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_probs[i]
                 
             elif mcts_root_logits_dict.mode == "llm_plus_wm_logits":
                 llm_probs = F.softmax(policy_priors, dim=-1)
@@ -439,6 +445,12 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 wm_probs = F.softmax(policy_logits, dim=-1)
                 combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
                 root_logits = torch.log(combined_probs + 1e-8)
+                
+                for env_id, (llm_prob, wm_prob, combined_prob, valid_actions) in enumerate(zip(llm_probs, wm_probs, combined_probs, valid_actions_list)):
+                    for i in range(len(valid_actions)):
+                        mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_prob[i].item()
+                        mcts_info[env_id]["root_wm_prob"][valid_actions[i]] = wm_prob[i].item()
+                        mcts_info[env_id]["root_combined_prob"][valid_actions[i]] = combined_prob[i].item()
             
             network_output.policy_logits = root_logits
 
@@ -491,8 +503,10 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     'timestep': timestep[i],
                 }
                 batch_action.append(action)
+                for idx, action in enumerate(valid_actions_list[i]):
+                    mcts_info[env_id]["visit_count_distributions"][action] = distributions[idx]
 
             self.last_batch_obs_eval = data
             self.last_batch_action = batch_action
 
-        return output
+        return output, mcts_info

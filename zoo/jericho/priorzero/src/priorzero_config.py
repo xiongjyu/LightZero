@@ -75,16 +75,16 @@ class PriorZeroLLMConfig:
     enable_world_model: bool = True
     
     train_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "mode": "alternate", # "joint": 两者都训练（默认配置）；# "alternate": 严格交替训练：phase=wm 时仅训练 wm；phase=llm 时仅训练 llm
-        "wm_update_iters": 1e3, # wm 的 train_iter 
-        "llm_update_iters": 1e2, # llm 的 train_iter
-        "start_phase": "wm",   # 从哪个阶段开始： "wm" 或 "llm"
-        "wm_warmup_updates": 0, # 在训练初期，先单独训练 wm 一段时间（更新次数），让 wm 学习到一些基本的环境动态
+        "alternate": False, # False 两者都训练（默认配置）；True: 严格交替训练：phase=wm 时仅训练 wm；phase=llm 时仅训练 llm
+        "wm_update_iters": 1e3, # alternate=True. wm 的 train_iter 
+        "llm_update_iters": 1e2, # alternate=True. llm 的 train_iter
+        "start_phase": "wm",   # alternate=True. 从哪个阶段开始： "wm" 或 "llm"
+        "wm_warmup_updates": 0, # alternate=True/False， 在训练初期，先单独训练 wm 一段时间（更新次数），让 wm 学习到一些基本的环境动态
     }))
 
     llm_prior_temperature: float = 1.0  # LLM prior 分布的温度参数
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "mode": "llm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
+        "mode": "llm_plus_wm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
         "wm_weight": 0.5,            # 当 value = "LLMPrior_WM" 时，WM logits 的权重；LLMPrior 的权重 = 1 - WM_weight
     }))
     eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({

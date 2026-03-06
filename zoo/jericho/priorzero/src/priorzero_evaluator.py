@@ -32,6 +32,13 @@ class PriorZeroEvaluator(OriginalEvaluator):
         self.llm_cfg = llm_config
         self.data_processor = data_processor
         
+        if self._rank == 0:
+            self._logger_eval_episode, _ = build_logger(
+                    f'./{self._exp_name}/log/evaluator', "evaluator_episode_info", need_tb=False
+            )
+            import logging
+            for handler in self._logger_eval_episode.handlers:
+                handler.setFormatter(logging.Formatter("%(message)s"))
         
         self.eval_mode = llm_config.eval_dict
         self.eval_freq = self.eval_mode.eval_freq
@@ -64,10 +71,11 @@ class PriorZeroEvaluator(OriginalEvaluator):
             world_model_info = super().eval()
             modes.append(("WM", world_model_info))
         if self.eval_mode.world_model_llm_prior:
-            world_model_llm_prior_info = self.eval_with_llm_prior()
+            world_model_llm_prior_info, wm_llm_eval_episode_info = self.eval_with_llm_prior()
             modes.append(("WM_LLMPrior", world_model_llm_prior_info)) 
+            
         if self.eval_mode.llm_prior:
-            llm_prior_info = self.eval_only_llm_prior()
+            llm_prior_info, llm_eval_episode_info = self.eval_only_llm_prior()
             modes.append(("LLMPrior", llm_prior_info))
 
         for tag, info in modes:
@@ -76,6 +84,41 @@ class PriorZeroEvaluator(OriginalEvaluator):
         
         if self._rank != 0:
             return
+        
+        self._logger_eval_episode.info("="*100)
+        self._logger_eval_episode.info("="*10 + f"[WM_LLM] | episode_avg_steps={len(wm_llm_eval_episode_info[0])} | episode_return={wm_llm_eval_episode_info[0][-1]['info']['score'].item()} " + "="*10)
+        for step, info in enumerate(wm_llm_eval_episode_info[0]):
+            obs, action, reward, mcts_info = info['obs'].replace("\n",""), info['action'], info['reward'], info['mcts_info']
+            self._logger_eval_episode.info(f"[Step {step:03d}] obs: {obs}")
+            self._logger_eval_episode.info(f'action="{action}" | reward={reward}')
+            self._logger_eval_episode.info("MCTS:")
+            for key, value in mcts_info.items():
+                items = list(value.items())
+                action_str = " | ".join(
+                    f"{a}({v:.3f})" if isinstance(v, float) else f"{a}({v})"
+                    for a, v in items
+                )
+                self._logger_eval_episode.info(f"  {key}:")
+                self._logger_eval_episode.info(f"    {action_str}")
+            self._logger_eval_episode.info("-" * 100)
+        self._logger_eval_episode.info("="*100)
+        
+        self._logger_eval_episode.info("="*100)
+        self._logger_eval_episode.info("="*10 + f"[LLM] | episode_avg_steps={len(llm_eval_episode_info[0])} | episode_return={llm_eval_episode_info[0][-1]['info']['score'].item()} " + "="*10)
+        for step, info in enumerate(llm_eval_episode_info[0]):
+            obs, action, reward, llm_policy = info['obs'].replace("\n",""), info['action'], info['reward'], info['llm_policy']
+            self._logger_eval_episode.info(f"[Step {step:03d}] obs: {obs}")
+            self._logger_eval_episode.info(f'action="{action}" | reward={reward}')
+            items = list(llm_policy.items())
+            action_str = " | ".join(
+                f"{a}({v:.3f})" if isinstance(v, float) else f"{a}({v})"
+                for a, v in items
+            )
+            self._logger_eval_episode.info("llm_policy:")
+            self._logger_eval_episode.info(f"    {action_str}")
+            self._logger_eval_episode.info("-" * 100)
+        self._logger_eval_episode.info("="*100)
+        
         
         keys = ['avg_envstep_per_episode', 'reward_mean', 'reward_std', 'reward_max', 'reward_min']
         for k in keys:
@@ -96,7 +139,9 @@ class PriorZeroEvaluator(OriginalEvaluator):
         envstep_count = 0
         eval_monitor = VectorEvalMonitor(self._env.env_num, n_episode)
         env_nums = self._env.env_num
-
+        
+        eval_episode_info = [[] for _ in range(env_nums)]
+        
         self._env.reset()
         self.history_buffers.clear()
         self._policy.reset(task_id=self.task_id)
@@ -160,33 +205,30 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 stack_obs = prepare_observation(stack_obs, self.policy_config.model.model_type)
                 stack_obs = torch.from_numpy(stack_obs).to(self.policy_config.device).float()
                 
-                if self.llm_cfg.mcts_root_logits_dict.mode != "wm_logits":
-                    # ============================================
-                    # 添加 LLM_PRIOR
-                    raw_obs_list = []
-                    histories_list = []
-                    valid_actions_list = [] 
-                    for env_id in sorted(list(ready_env_id)):
-                        raw_obs_text = obs[env_id]['raw_obs_text']
-                        raw_obs_list.append(raw_obs_text)
+                # ============================================
+                # 添加 LLM_PRIOR
+                raw_obs_list = []
+                histories_list = []
+                valid_actions_list = [] 
+                for env_id in sorted(list(ready_env_id)):
+                    raw_obs_text = obs[env_id]['raw_obs_text']
+                    raw_obs_list.append(raw_obs_text)
 
-                        history = list(self.history_buffers[env_id])
-                        histories_list.append(history)
+                    history = list(self.history_buffers[env_id])
+                    histories_list.append(history)
 
-                        valid_actions = obs[env_id].get('valid_actions', [])
-                        valid_actions_list.append(valid_actions)
+                    valid_actions = obs[env_id].get('valid_actions', [])
+                    valid_actions_list.append(valid_actions)
 
-                    llm_prior_per_seq, _, _ = self.data_processor.get_llm_prior(
-                        states=raw_obs_list,
-                        valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
-                        histories=histories_list,
-                        return_cot=True  # Request CoT prefixes for reuse in training
-                    )
-                    for env_id, llm_prior in enumerate(llm_prior_per_seq):
-                        scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
-                        llm_prior_per_seq[env_id] = scaled_llm_prior
-                else:
-                    llm_prior_per_seq, valid_actions_list = None, None
+                llm_prior_per_seq, _, _ = self.data_processor.get_llm_prior(
+                    states=raw_obs_list,
+                    valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
+                    histories=histories_list,
+                    return_cot=True  # Request CoT prefixes for reuse in training
+                )
+                for env_id, llm_prior in enumerate(llm_prior_per_seq):
+                    scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
+                    llm_prior_per_seq[env_id] = scaled_llm_prior
                 
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
@@ -198,7 +240,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 # ==============================================================
                 # Policy Forward Pass
                 # ==============================================================
-                policy_output = self._policy.forward(data=stack_obs, action_mask=action_mask, 
+                policy_output, mcts_info = self._policy.forward(data=stack_obs, action_mask=action_mask, 
                                                     to_play=to_play, ready_env_id=ready_env_id, 
                                                     timestep=timestep, **policy_kwargs_forward)
                 # Unpack policy outputs.
@@ -232,6 +274,13 @@ class PriorZeroEvaluator(OriginalEvaluator):
                     obs_new, reward, done, info = episode_timestep.obs, episode_timestep.reward, episode_timestep.done, episode_timestep.info
 
                     action = info['action_str']
+                    eval_episode_info[env_id].append({
+                        "obs": obs[env_id]['raw_obs_text'],
+                        "action": action,
+                        "reward": float(reward),
+                        "mcts_info": mcts_info[env_id],
+                        "info": info
+                    })
                     self.history_buffers[env_id].append((obs[env_id]['raw_obs_text'], action, float(reward)))
                     
                     eps_steps_lst[env_id] += 1
@@ -303,13 +352,15 @@ class PriorZeroEvaluator(OriginalEvaluator):
             'reward_max': np.max(episode_return),
             'reward_min': np.min(episode_return),
         }
-        return info
+        return info, eval_episode_info
     
     def eval_only_llm_prior(self) -> Dict[str, Any]:
         n_episode = self._default_n_episode
         assert n_episode is not None, "Please specify the number of evaluation episodes (n_episode)."
         envstep_count = 0
         env_nums = self._env.env_num
+        
+        eval_episode_info = [[] for _ in range(env_nums)]
 
         self._env.reset()
         self.history_buffers.clear()
@@ -344,6 +395,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 return_cot=True  # Request CoT prefixes for reuse in training
             )
             actions = {env_id: None for env_id in sorted(list(ready_env_id))}
+            llm_policy = {env_id: {} for env_id in sorted(list(ready_env_id))}
             
             for env_id, llm_prior, valid_actions in zip(sorted(list(ready_env_id)), llm_prior_per_seq, valid_actions_list):
                 if len(llm_prior) == 1:   # 只有go,即valid_action_len=0
@@ -354,9 +406,14 @@ class PriorZeroEvaluator(OriginalEvaluator):
                     llm_prior.pop('go')
                 action_str_select, max_logprob = "", float(-1e9)
                 for action_str, logprob in llm_prior.items():
+                    llm_policy[env_id][action_str] = np.exp(logprob)
                     if logprob > max_logprob:
                         action_str_select = action_str
                         max_logprob = logprob
+                all_values = [v for _, v in llm_policy[env_id].items()]
+                for k, _ in llm_policy[env_id].items():
+                    llm_policy[env_id][k] /= sum(all_values)
+                
                 actions[env_id] = valid_actions.index(action_str_select)
             
             # ============================================
@@ -367,6 +424,13 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 obs_new, reward, done, info = episode_timestep.obs, episode_timestep.reward, episode_timestep.done, episode_timestep.info
 
                 action = info['action_str']
+                eval_episode_info[env_id].append({
+                        "obs": obs[env_id]['raw_obs_text'],
+                        "action": action,
+                        "reward": float(reward),
+                        "llm_policy": llm_policy[env_id],
+                        "info": info,
+                    })
                 self.history_buffers[env_id].append((obs[env_id]['raw_obs_text'], action, float(reward)))
 
                 dones[env_id] = done
@@ -382,7 +446,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
             'reward_max': np.max(episode_return),
             'reward_min': np.min(episode_return),
         }
-        return info
+        return info, eval_episode_info
     
     def apply_temperature_scaling(self, logprobs_dict: dict, return_logprobs: bool = True) -> dict:
         """
