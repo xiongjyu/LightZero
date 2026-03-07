@@ -196,7 +196,6 @@ def train_priorzero(
     torch_dist_barrier_and_cuda_sync()
     train_schedule = llm_cfg.train_schedule
     train_alternate = train_schedule["alternate"]
-    llm_after_wm_warmup = train_schedule["wm_warmup_updates"]
     if train_alternate:
         current_phase = train_schedule["start_phase"]
         last_wm_train_iter = 0
@@ -263,7 +262,7 @@ def train_priorzero(
                     if cfg.policy.use_priority:
                         replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
             policy.recompute_pos_emb_diff_and_clear_cache()
-            if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"] and learner.train_iter >= llm_after_wm_warmup:
+            if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
                 current_phase = "llm"
                 last_wm_train_iter = learner.train_iter
                 print(f"[Rank {rank}] Switching to LLM training phase at wm iter: {learner.train_iter}")

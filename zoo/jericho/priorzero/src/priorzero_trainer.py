@@ -10,6 +10,7 @@ import torch.nn.functional as F
 import ray
 import numpy as np
 from transformers import AutoTokenizer
+import torch.distributed as dist
 
 import ray
 import torch
@@ -140,7 +141,9 @@ class PriorZeroLLMTrainer:
                     self._tb_logger.add_scalar(f"learner_llm_iter/{k}", float(v), int(tmp_dict['iter']))
                     self._tb_logger.add_scalar(f"learner_llm_envstep/{k}", float(v), int(collect_env_steps))
                     self.global_step = max(self.global_step, int(tmp_dict['iter']))
-                    
+        
+        self._sync_global_step_from_rank0()
+        
         if self.strategy.is_rank_0():
             if self.global_step > 0 and self.global_step % self.llm_save_freq == 0:
                 self.policy_model.save_model()
@@ -149,6 +152,13 @@ class PriorZeroLLMTrainer:
         kl_val = float(self.kl_ctl.value) if hasattr(self.kl_ctl, "value") else float(self.init_kl_coef)
         return {"global_step": self.global_step, "kl_coef": kl_val}
 
+    def _sync_global_step_from_rank0(self):
+        if self.world_size <= 1:
+            return 
+        lst = [self.global_step] if self.rank == 0 else [None]
+        dist.broadcast_object_list(lst, src=0)
+        self.global_step = int(lst[0])
+    
     def _broadcast_to_vllm(self):
         if self.strategy.args.vllm_enable_sleep:
             self.vllm_engine.wake_up()
