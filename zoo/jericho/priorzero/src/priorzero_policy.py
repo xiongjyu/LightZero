@@ -301,6 +301,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
 
         llm_prior_logprob = kwargs.pop('llm_prior_logprob', None)
         valid_actions_list = kwargs.get('valid_actions_list', None)
+        current_envstep = kwargs.get('current_env_step', 0)
         mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
         
         if llm_prior_logprob is None or not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
@@ -341,7 +342,17 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 mask_tensor = torch.from_numpy(np.stack(action_mask))
                 policy_logits = policy_logits.cpu().masked_fill(mask_tensor == 0, -1e9)
                 wm_probs = F.softmax(policy_logits, dim=-1)
-                combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
+                if mcts_root_logits_dict.plus_method == "adaptive": 
+                    wm_entropy = -(wm_probs * (wm_probs + 1e-8).log()).sum(dim=-1) 
+                    wm_entropy_norm = wm_entropy / torch.log(mask_tensor.sum(dim=-1).clamp(min=2.0))
+                    progess = current_envstep / mcts_root_logits_dict.max_envsteps
+                    llm_weight = mcts_root_logits_dict.llm_max_weight * (1 - progess) * wm_entropy_norm
+                    llm_weight = llm_weight.unsqueeze(-1)
+                    combined_probs = (1 - llm_weight) * wm_probs + llm_probs * llm_weight
+                    
+                elif mcts_root_logits_dict.plus_method == "fixed":
+                    combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
+                
                 root_logits = torch.log(combined_probs + 1e-8)
 
             network_output.policy_logits = root_logits

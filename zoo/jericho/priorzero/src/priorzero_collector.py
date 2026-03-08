@@ -329,6 +329,7 @@ class PriorZeroCollector(OriginalCollector):
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
                     'valid_actions_list': valid_actions_list,
+                    "current_env_step": self._total_envstep_count
                 }
 
                 if self.task_id is not None:
