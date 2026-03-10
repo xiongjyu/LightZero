@@ -267,6 +267,7 @@ class PriorZeroCollector(OriginalCollector):
 
         eps_steps_lst = np.zeros(env_nums)
         visit_entropies_lst = np.zeros(env_nums)
+        llm_weight_lst = np.zeros(env_nums)
 
         if collect_with_pure_policy:
             temp_visit_list = [0.0 for _ in range(self._env.action_space.n)]
@@ -352,6 +353,7 @@ class PriorZeroCollector(OriginalCollector):
                     visit_entropy_dict_with_env_id = {
                         k: v['visit_count_distribution_entropy'] for k, v in policy_output.items()
                     }
+                llm_weight_dict_with_env_id = {k: v['llm_weight'] for k, v in policy_output.items()}
 
                 actions: Dict[int, Any] = {
                     env_id: actions_with_env_id.pop(env_id)
@@ -411,6 +413,7 @@ class PriorZeroCollector(OriginalCollector):
 
                     if not collect_with_pure_policy:
                         visit_entropies_lst[env_id] += visit_entropy_dict_with_env_id[env_id]
+                        llm_weight_lst[env_id] += llm_weight_dict_with_env_id[env_id]
 
                     eps_steps_lst[env_id] += 1
 
@@ -492,6 +495,8 @@ class PriorZeroCollector(OriginalCollector):
                             visit_entropies_lst[env_id] / eps_steps_lst[env_id]
                             if eps_steps_lst[env_id] > 0 else 0
                         )
+                        info_log['llm_weight'] = llm_weight_lst[env_id] / eps_steps_lst[env_id] if eps_steps_lst[env_id] > 0 else 0
+                        
 
                     collected_episode += 1
                     self._episode_info.append(info_log)
@@ -510,6 +515,7 @@ class PriorZeroCollector(OriginalCollector):
                     # Reset
                     pred_values_lst[env_id], search_values_lst[env_id] = [], []
                     eps_steps_lst[env_id], visit_entropies_lst[env_id] = 0, 0
+                    llm_weight_lst[env_id] = 0
 
                     self._policy.reset([env_id], task_id=self.task_id)
                     self._reset_stat(env_id)
@@ -622,6 +628,8 @@ class PriorZeroCollector(OriginalCollector):
             if not self.collect_with_pure_policy:
                 visit_entropy = [d['visit_entropy'] for d in self._episode_info]
                 info['visit_entropy_mean'] = np.mean(visit_entropy)
+                llm_weight = [d['llm_weight'] for d in self._episode_info]
+                info['llm_weight_mean'] = np.mean(llm_weight)
             if self.policy_config.gumbel_algo:
                 completed_value = [d['completed_value'] for d in self._episode_info]
                 info['completed_value_mean'] = np.mean(completed_value)

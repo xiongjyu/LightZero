@@ -82,12 +82,13 @@ class PriorZeroLLMConfig:
         "wm_warmup_updates": 0, # alternate=True/False， 在训练初期，先单独训练 wm 一段时间（更新次数），让 wm 学习到一些基本的环境动态
     }))
 
-    llm_prior_temperature: float = 1.0  # LLM prior 分布的温度参数
+    llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "mode": "llm_plus_wm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
         "plus_method": "adaptive",        # 当 plus_method = "fixed" 时，使用固定权重；否则使用自适应权重"adaptive"
         "wm_weight": 0.5,            # 当 plus_method = "fixed" 时，WM logits 的权重；LLMPrior 的权重 = 1 - WM_weight
         "llm_max_weight": 0.7,        # 当 plus_method = "adaptive" 时，LLM 的最大权重；WM 的最小权重 = 1 - llm_max_weight
+        "llm_min_weight": 0.3,
         "max_envsteps": 1e5,           # 当 plus_method = "adaptive" 时，随着环境交互步数增加，逐渐降低 llm prior 的权重
     }))
     eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({

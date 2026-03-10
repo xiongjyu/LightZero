@@ -338,6 +338,9 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 root_logits = policy_priors
                 
             elif mcts_root_logits_dict.mode == "llm_plus_wm_logits":
+                llm_weight_min = mcts_root_logits_dict.llm_min_weight 
+                llm_weight_max = mcts_root_logits_dict.llm_max_weight
+                
                 llm_probs = F.softmax(policy_priors, dim=-1)
                 mask_tensor = torch.from_numpy(np.stack(action_mask))
                 policy_logits = policy_logits.cpu().masked_fill(mask_tensor == 0, -1e9)
@@ -345,11 +348,8 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 if mcts_root_logits_dict.plus_method == "adaptive": 
                     wm_entropy = -(wm_probs * (wm_probs + 1e-8).log()).sum(dim=-1) 
                     wm_entropy_norm = wm_entropy / torch.log(mask_tensor.sum(dim=-1).clamp(min=2.0))
-                    progess = current_envstep / mcts_root_logits_dict.max_envsteps
-                    llm_weight = mcts_root_logits_dict.llm_max_weight * (1 - progess) * wm_entropy_norm
-                    llm_weight = llm_weight.clamp_min(0.0).unsqueeze(-1)
+                    llm_weight = llm_weight_min + (llm_weight_max - llm_weight_min)*(1 - wm_entropy_norm)
                     combined_probs = (1 - llm_weight) * wm_probs + llm_probs * llm_weight
-                    print(f"[ADAPTIVE] current_envstep: {current_envstep} | wm_entropy_norm: {wm_entropy_norm} | llm_weight: {llm_weight}")
                     
                 elif mcts_root_logits_dict.plus_method == "fixed":
                     combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
@@ -401,6 +401,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     'predicted_value': pred_values_np[i],
                     'predicted_policy_logits': policy_logits[i],
                     'timestep': timestep[i],
+                    'llm_weight': llm_weight[i].item() if mcts_root_logits_dict.plus_method == "adaptive" else mcts_root_logits_dict.wm_weight,
                 }
                 batch_action.append(action)
             self.last_batch_obs = data
