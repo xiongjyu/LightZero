@@ -347,8 +347,9 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     wm_entropy_norm = wm_entropy / torch.log(mask_tensor.sum(dim=-1).clamp(min=2.0))
                     progess = current_envstep / mcts_root_logits_dict.max_envsteps
                     llm_weight = mcts_root_logits_dict.llm_max_weight * (1 - progess) * wm_entropy_norm
-                    llm_weight = llm_weight.unsqueeze(-1)
+                    llm_weight = llm_weight.clamp_min(0.0).unsqueeze(-1)
                     combined_probs = (1 - llm_weight) * wm_probs + llm_probs * llm_weight
+                    print(f"[ADAPTIVE] current_envstep: {current_envstep} | wm_entropy_norm: {wm_entropy_norm} | llm_weight: {llm_weight}")
                     
                 elif mcts_root_logits_dict.plus_method == "fixed":
                     combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
