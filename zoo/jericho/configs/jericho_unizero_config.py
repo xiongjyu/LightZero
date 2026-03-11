@@ -204,7 +204,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
 
     # Construct experiment name containing key parameters
     main_config.exp_name = (
-        f"data_lz/data_unizero_jericho/bge-base-en-v1.5/{env_id}/uz_gpu_cen{collector_env_num}_rr{replay_ratio}_ftemp025_{env_id[:8]}_ms{max_steps}_ass-{action_space_size}_"
+        f"data_lz_fixed/data_unizero_jericho/bge-base-en-v1.5/{env_id}/uz_gpu_cen{collector_env_num}_rr{replay_ratio}_ftemp025_{env_id[:8]}_ms{max_steps}_ass-{action_space_size}_"
         f"nlayer{num_layers}_embed{embed_dim}_Htrain{num_unroll_steps}-"
         f"Hinfer{infer_context_length}_bs{batch_size}_seed{seed}"
     )

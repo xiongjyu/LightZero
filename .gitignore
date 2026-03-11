@@ -17,6 +17,8 @@ data_*
 *.gv
 *.png
 *.csv
+*.jsonl
+*.json
 
 pkg/
 
