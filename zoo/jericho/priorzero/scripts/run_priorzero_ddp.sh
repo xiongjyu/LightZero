@@ -11,6 +11,7 @@ MASTER_PORT=24554
 ENV_ID="detective.z5"       # "zork1.z5" "acorncourt.z5" "omniquest.z5"
 LOG_DIR="./data_priorzero/run_logs"   
 LLM_MODEL="qwen2.5-3b"  # "qwen2.5-3b" "qwen2.5-7b"
+USE_COT=false                # true / false
 mkdir -p "${LOG_DIR}"       
 
 CURRENT_TIME=$(date +"%Y%m%d_%H%M%S")
@@ -22,12 +23,21 @@ export PYTHONFAULTHANDLER=1
 export TORCH_DISTRIBUTED_DEBUG=DETAIL 
 export NCCL_DEBUG=INFO 
 
-
-torchrun \
-    --nproc_per_node="${NPROC_PER_NODE}" \
-    --master-port="${MASTER_PORT}" \
-    ./src/priorzero_entry_sync_ddp.py \
-    --use_cot \
-    --env_id "${ENV_ID}" \
-    --model  "${LLM_MODEL}" \
-    2>&1 | tee "${LOG_FILE}"
+if [ "${USE_COT}" = true ]; then
+    torchrun \
+        --nproc_per_node="${NPROC_PER_NODE}" \
+        --master-port="${MASTER_PORT}" \
+        ./src/priorzero_entry_sync_ddp.py \
+        --use_cot \
+        --env_id "${ENV_ID}" \
+        --model "${LLM_MODEL}" \
+        2>&1 | tee "${LOG_FILE}"
+else
+    torchrun \
+        --nproc_per_node="${NPROC_PER_NODE}" \
+        --master-port="${MASTER_PORT}" \
+        ./src/priorzero_entry_sync_ddp.py \
+        --env_id "${ENV_ID}" \
+        --model "${LLM_MODEL}" \
+        2>&1 | tee "${LOG_FILE}"
+fi

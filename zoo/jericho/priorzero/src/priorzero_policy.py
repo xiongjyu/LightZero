@@ -401,8 +401,15 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     'predicted_value': pred_values_np[i],
                     'predicted_policy_logits': policy_logits[i],
                     'timestep': timestep[i],
-                    'llm_weight': llm_weight[i].item() if mcts_root_logits_dict.plus_method == "adaptive" else mcts_root_logits_dict.wm_weight,
                 }
+                if mcts_root_logits_dict.mode == "llm_plus_wm_logits":
+                    if mcts_root_logits_dict.plus_method == "adaptive":
+                        output[env_id]['llm_weight'] = llm_weight[i].item()
+                    else:
+                        output[env_id]['llm_weight'] = 1 - mcts_root_logits_dict.wm_weight
+                elif mcts_root_logits_dict.mode == "llm_logits":
+                    output[env_id]['llm_weight'] = 1
+                    
                 batch_action.append(action)
             self.last_batch_obs_collect = data
             self.last_batch_action_collect = batch_action

@@ -75,7 +75,7 @@ class PriorZeroLLMConfig:
     enable_world_model: bool = True
     
     train_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "alternate": False, # False 两者都训练（默认配置）；True: 严格交替训练：phase=wm 时仅训练 wm；phase=llm 时仅训练 llm
+        "alternate": True, # False 两者都训练（默认配置）；True: 严格交替训练：phase=wm 时仅训练 wm；phase=llm 时仅训练 llm
         "wm_update_iters": 1e3, # alternate=True. wm 的 train_iter 
         "llm_update_iters": 1e2, # alternate=True. llm 的 train_iter
         "start_phase": "wm",   # alternate=True. 从哪个阶段开始： "wm" 或 "llm"
@@ -84,7 +84,7 @@ class PriorZeroLLMConfig:
 
     llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "mode": "llm_plus_wm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
+        "mode": "llm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
         "plus_method": "adaptive",        # 当 plus_method = "fixed" 时，使用固定权重；否则使用自适应权重"adaptive"
         "wm_weight": 0.5,            # 当 plus_method = "fixed" 时，WM logits 的权重；LLMPrior 的权重 = 1 - WM_weight
         "llm_max_weight": 0.7,        # 当 plus_method = "adaptive" 时，LLM 的最大权重；WM 的最小权重 = 1 - llm_max_weight
