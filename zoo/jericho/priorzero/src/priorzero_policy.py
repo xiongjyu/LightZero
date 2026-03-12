@@ -331,7 +331,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
         
         with torch.no_grad():
-            network_output = self._collect_model.initial_inference(self.last_batch_obs, self.last_batch_action, data, timestep)
+            network_output = self._collect_model.initial_inference(self.last_batch_obs_collect, self.last_batch_action_collect, data, timestep)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
             
             if mcts_root_logits_dict.mode == "llm_logits":
@@ -404,8 +404,8 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     'llm_weight': llm_weight[i].item() if mcts_root_logits_dict.plus_method == "adaptive" else mcts_root_logits_dict.wm_weight,
                 }
                 batch_action.append(action)
-            self.last_batch_obs = data
-            self.last_batch_action = batch_action
+            self.last_batch_obs_collect = data
+            self.last_batch_action_collect = batch_action
         return output
     
     def _forward_eval(self, data: torch.Tensor, action_mask: list, to_play: int = -1,
@@ -441,7 +441,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
         
         with torch.no_grad():
-            network_output = self._eval_model.initial_inference(self.last_batch_obs_eval, self.last_batch_action, data, timestep)
+            network_output = self._eval_model.initial_inference(self.last_batch_obs_eval, self.last_batch_action_eval, data, timestep)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
             
             if mcts_root_logits_dict.mode == "llm_logits":
@@ -520,6 +520,6 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     mcts_info[env_id]["visit_count_distributions"][action] = distributions[idx]
 
             self.last_batch_obs_eval = data
-            self.last_batch_action = batch_action
+            self.last_batch_action_eval = batch_action
 
         return output, mcts_info
