@@ -300,6 +300,7 @@ def train_priorzero(
                 if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
                     current_phase = "wm"
                     last_llm_train_iter = trainer.global_step
+                    data_processor.value_normalizer.clear()
                     print(f"[Rank {rank}] Switching to World Model training phase at llm iter: {trainer.global_step}")
                     
         else:
@@ -337,7 +338,7 @@ Examples:
     # Model selection
     parser.add_argument('--model', type=str, default="qwen2.5-3b", choices=get_available_models())
     parser.add_argument('--enable_profile', action='store_true', default=False)
-    parser.add_argument('--use_cot', action='store_true', default=True)
+    parser.add_argument('--use_cot', action='store_true', default=False)
     args = parser.parse_args()
 
     model_key = args.model if args.model else "qwen2.5-1.5b"
@@ -352,7 +353,6 @@ Examples:
     print(f"enable_profile: {args.enable_profile}")
     print(f"{'='*80}\n")
 
-    # use_cot = True 
     if args.quick_test:
         logger.info("Using quick test configuration")
         main_cfg, create_cfg, llm_cfg = get_priorzero_debug_config(

@@ -226,10 +226,9 @@ class BatchPPOTrainer:
             
             loss = actor_loss + kl_loss * float(kl_ctl.value)
             
-            if self.args.entropy_loss_coef is not None:
-                entropy_loss = masked_mean(output.entropy[:, -micro_batch["action_mask"].shape[1] :], micro_batch["action_mask"])
-                if self.args.entropy_loss_coef != 0:
-                    loss -= entropy_loss * self.args.entropy_loss_coef  
+            entropy_loss = masked_mean(output.entropy[:, -micro_batch["action_mask"].shape[1] :], micro_batch["action_mask"])
+            if self.args.entropy_loss_coef != 0:
+                loss -= entropy_loss * self.args.entropy_loss_coef  
             
             self.strategy.backward(loss, self.actor, self.actor_optim)
             self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
@@ -242,7 +241,7 @@ class BatchPPOTrainer:
             input_response_length_item = micro_batch["attention_mask"].sum().detach().float().item() / micro_batch["attention_mask"].shape[0]
             response_length_item = micro_batch["action_mask"].sum().detach().float().item() / micro_batch["action_mask"].shape[0]
             input_length_item = input_response_length_item - response_length_item
-            entropy_loss_item = entropy_loss.detach().float().item() if self.args.entropy_loss_coef is not None else None
+            entropy_loss_item = entropy_loss.detach().float().item()
             
             pbar.set_postfix({
                 "policy_loss": policy_loss_item,
@@ -273,7 +272,7 @@ class BatchPPOTrainer:
                     "clip_ratio": np.mean(metrics_buffer['clip_ratio']),
                     "approx_kl": np.mean(metrics_buffer['approx_kl']),
                     "ref_kl": np.mean(metrics_buffer['ref_kl']),
-                    "entropy": np.mean(metrics_buffer['entropy']) if self.args.entropy_loss_coef is not None else None,
+                    "entropy": np.mean(metrics_buffer['entropy']),
                     
                     "iter": self.train_iter,
                     "lr": self.actor_scheduler.get_last_lr()[0],
@@ -286,15 +285,17 @@ class BatchPPOTrainer:
                     "response_length_max": np.max(metrics_buffer['response_length']),
                     "response_length_mean": np.mean(metrics_buffer['response_length']),
                     "response_length_min": np.min(metrics_buffer['response_length']),
-                    
-                    "fmt_rewards": np.mean(metrics_buffer['fmt_rewards']) if "fmt_rewards" in metrics_buffer else None,
+
                     "value_advantage_max": np.max(metrics_buffer['value_advantage']),
                     "value_advantage_mean": np.mean(metrics_buffer['value_advantage']),
                     "value_advantage_min": np.min(metrics_buffer['value_advantage']),
-                    "final_advantage_max": np.max(metrics_buffer['final_advantage']),
-                    "final_advantage_mean": np.mean(metrics_buffer['final_advantage']),
-                    "final_advantage_min": np.min(metrics_buffer['final_advantage']),
                 }
+                if "final_advantage" in metrics_buffer:
+                    status["final_advantage_max"] = np.max(metrics_buffer['final_advantage'])
+                    status["final_advantage_mean"] = np.mean(metrics_buffer['final_advantage'])
+                    status["final_advantage_min"] = np.min(metrics_buffer['final_advantage'])
+                if "fmt_rewards" in metrics_buffer:
+                    status["fmt_rewards"] = np.mean(metrics_buffer['fmt_rewards'])
                 metrics_buffer.clear()
 
                 status = self.strategy.all_reduce(status)

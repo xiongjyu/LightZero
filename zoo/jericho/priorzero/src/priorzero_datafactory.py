@@ -285,7 +285,6 @@ class DataProcessor:
             print(f"[Rank {self.rank}] process {start}: {end} samples. Total {len(samples)} samples collected by Rank 0.")
             real_samples = samples[start:end]
         
-        prompts_only = [s["prompt"] for s in real_samples]
         if self.use_cot:
             targets_only = [s["prefix_cot"] + " " + s["target"] + self.tokenizer.eos_token for s in real_samples]
             if self.args.reward_func.format_reward:
@@ -293,7 +292,7 @@ class DataProcessor:
             else:
                 fmt_rewards = None
         else:
-            targets_only = [s["target"] + self.tokenizer.eos_token for s in real_samples]
+            targets_only = ["Action: " +s["target"] + self.tokenizer.eos_token for s in real_samples]
             fmt_rewards = None
 
         full_ids_list = [s['full_ids'] for s in real_samples]
@@ -587,7 +586,7 @@ class DataProcessor:
             label_texts = [pc + " " + l + self.tokenizer.eos_token for pc, l in zip(all_prefix_cots, all_labels)]
             label_texts_no_cots =  [" " + l + self.tokenizer.eos_token for l in all_labels]
         else:
-            label_texts = [l + self.tokenizer.eos_token for l in all_labels]
+            label_texts = ["Action: " + l + self.tokenizer.eos_token for l in all_labels]
             label_texts_no_cots = label_texts
             
         label_ids = self.tokenizer(label_texts, add_special_tokens=False, padding=False, truncation=False)["input_ids"]

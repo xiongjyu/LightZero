@@ -100,7 +100,7 @@ class PriorZeroLLMConfig:
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
-    use_cot: bool = True
+    use_cot: bool = False
     user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "history_with_reward": True,   # 是否在 prompt 中加入历史交互的 reward 信息
         "observation_with_valid_actions": False,  # 是否在 prompt 中加入当前 observation 中可执行的 action 信息  
@@ -351,7 +351,10 @@ def get_priorzero_config(
 
     if exp_name is None:
         env_name = env_id.replace(".z5", "")
-        exp_name = f"data_priorzero/priorzero_{env_name}_{model_key}_{llm_config.policy_loss_type}_WM_{llm_config.enable_world_model}_RFT_{llm_config.enable_rft}_useCot_{llm_config.use_cot}_seed{seed}"
+        if llm_config.enable_rft:
+            exp_name = f"data_priorzero/llm_rft/priorzero_{env_name}_{model_key}_WM_{llm_config.enable_world_model}_useCot_{llm_config.use_cot}_seed{seed}"
+        else:
+            exp_name = f"data_priorzero/llm_frozen/priorzero_{env_name}_{model_key}_WM_{llm_config.enable_world_model}_useCot_{llm_config.use_cot}_seed{seed}"
     
     priorzero_config = dict(
         env=env_config,
