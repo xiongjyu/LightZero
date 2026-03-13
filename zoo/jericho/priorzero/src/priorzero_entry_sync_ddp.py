@@ -297,6 +297,7 @@ def train_priorzero(
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True)
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
                 
+                torch_dist_barrier_and_cuda_sync()
                 if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
                     current_phase = "wm"
                     last_llm_train_iter = trainer.global_step

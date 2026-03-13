@@ -144,9 +144,8 @@ class PriorZeroLLMTrainer:
         
         self._sync_global_step_from_rank0()
         
-        if self.strategy.is_rank_0():
-            if self.global_step > 0 and self.global_step % self.llm_save_freq == 0:
-                self.policy_model.save_model()
+        if self.global_step > 0 and self.global_step % self.llm_save_freq == 0:
+            self.policy_model.save_model()
 
     def get_state(self) -> Dict[str, Any]:
         kl_val = float(self.kl_ctl.value) if hasattr(self.kl_ctl, "value") else float(self.init_kl_coef)
