@@ -297,7 +297,7 @@ class DataProcessor:
 
         full_ids_list = [s['full_ids'] for s in real_samples]
         tgt_ids_list = [s['label_ids'] for s in real_samples]
-        
+        assert self.tokenizer.batch_decode(tgt_ids_list) == targets_only, "Decoded label ids do not match targets_only. Please check the tokenizer and data processing logic."
         inputs = self.tokenizer.pad({"input_ids": full_ids_list}, padding=True, return_tensors="pt")
         labels = torch.full_like(inputs.input_ids, -100)
         for i, tgt_ids in enumerate(tgt_ids_list):

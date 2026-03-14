@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from typing import Optional, Union, List, Dict
 from collections import defaultdict
 import os
@@ -9,11 +10,45 @@ from torch.optim import Optimizer
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from transformers.trainer import get_scheduler
 
 from utils import compute_approx_kl, compute_entropy, masked_mean, torch_dist_barrier_and_cuda_sync, log_probs_from_logits
+
+
+def _normalize_vllm_weight_name(name: str) -> str:
+    if name.startswith("base_model.model."):
+        name = name[len("base_model.model."):]
+    name = name.replace(".base_layer.", ".")
+    return name
+
+
+def _should_skip_vllm_sync_param(name: str) -> bool:
+    return any(marker in name for marker in ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B"))
+
+
+def _validate_vllm_sync_config(args, train_mode: str, vllm_engine) -> None:
+    if vllm_engine is None:
+        return
+
+    ds_tensor_parallel_size = getattr(args, "ds_tensor_parallel_size", 1)
+    zero_stage = getattr(args, "zero_stage", 2)
+
+    if ds_tensor_parallel_size != 1:
+        raise NotImplementedError(
+            "PolicyModel._deepspeed_broadcast currently supports only ds_tensor_parallel_size == 1. "
+            f"Got ds_tensor_parallel_size={ds_tensor_parallel_size}. "
+            "The active vLLM sync path does not safely handle DeepSpeed tensor parallel shards yet."
+        )
+
+    if zero_stage == 3 and train_mode == "lora":
+        raise NotImplementedError(
+            "PolicyModel._deepspeed_broadcast does not support train_mode='lora' with zero_stage=3. "
+            "This path needs adapter merge/unmerge together with ZeRO-3 sharded parameters, which is not "
+            "validated in the current implementation."
+        )
 
 class Actor(nn.Module):
     """
@@ -38,11 +73,14 @@ class Actor(nn.Module):
         ds_config=None,
         device_map=None,
         temperature=1.0,
+        train_mode_cfg=None,
         **kwargs,
     ) -> None:
         super().__init__()
         
         self.temperature = temperature
+        self.train_mode_cfg = train_mode_cfg if train_mode_cfg is not None else {"mode": "full"}
+        self.train_mode = self.train_mode_cfg.get("mode", "full")
         attn_impl = attn_implementation
 
         if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
@@ -58,6 +96,22 @@ class Actor(nn.Module):
             device_map=device_map,
         )
         self.model.config.use_cache = False
+
+        if self.train_mode == "lora":
+            target_modules = self.train_mode_cfg.get("lora_target_modules")
+            target_modules = list(target_modules) if target_modules else None
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=False,
+                r=self.train_mode_cfg.get("lora_r", 16),
+                lora_alpha=self.train_mode_cfg.get("lora_alpha", 32),
+                lora_dropout=self.train_mode_cfg.get("lora_dropout", 0.05),
+                bias=self.train_mode_cfg.get("lora_bias", "none"),
+                target_modules=target_modules,
+            )
+            self.model = get_peft_model(self.model, lora_config)
+        elif self.train_mode != "full":
+            raise ValueError(f"Unsupported train_mode: {self.train_mode}")
 
     def forward(
         self,
@@ -95,7 +149,8 @@ class Actor(nn.Module):
         self.model.gradient_checkpointing_disable()
 
     def print_trainable_parameters(self):
-        self.model.print_trainable_parameters()
+        if hasattr(self.model, "print_trainable_parameters"):
+            self.model.print_trainable_parameters()
 
 class ReferenceModel:
     def __init__(self, strategy, pretrain):
@@ -304,19 +359,22 @@ class BatchPPOTrainer:
         return status_list
     
     def _deepspeed_broadcast(self):
+        _validate_vllm_sync_config(self.strategy.args, self.actor.train_mode, self.vllm_engine)
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
         if use_prefix_cache:
             self.vllm_engine.reset_prefix_cache()
 
         torch.cuda.empty_cache()
         model = self.actor.model.module
-        count, num_params = 0, len(list(model.named_parameters()))
-        for name, param in model.named_parameters():
-            count += 1  # empty_cache at last param
-            # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-            with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
-                shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
-                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params)) 
+        with self._merged_lora_adapter(model):
+            sync_params = list(self._iter_vllm_sync_params(model))
+            count, num_params = 0, len(sync_params)
+            for name, param in sync_params:
+                count += 1  # empty_cache at last param
+                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+                with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
+                    shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+                    self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params)) 
     
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
@@ -384,6 +442,25 @@ class BatchPPOTrainer:
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()
 
+    def _iter_vllm_sync_params(self, model):
+        for name, param in model.named_parameters():
+            if _should_skip_vllm_sync_param(name):
+                continue
+            yield _normalize_vllm_weight_name(name), param
+
+    @contextmanager
+    def _merged_lora_adapter(self, model):
+        if isinstance(model, PeftModel):
+            if not hasattr(model, "merge_adapter") or not hasattr(model, "unmerge_adapter"):
+                raise RuntimeError("Current PEFT version does not support merge_adapter/unmerge_adapter required for vLLM sync.")
+            model.merge_adapter()
+            try:
+                yield model
+            finally:
+                model.unmerge_adapter()
+        else:
+            yield model
+
 
 class PolicyModel:
     def __init__(
@@ -409,8 +486,11 @@ class PolicyModel:
             bf16=args.bf16,
             ds_config=strategy.get_ds_train_config(is_actor=True),
             temperature=args.temperature,
+            train_mode_cfg=args.train_mode_dict,
         )
         strategy.print(actor)
+        if args.train_mode_dict.mode == "lora":
+            actor.print_trainable_parameters()
 
         from transformers import AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -491,7 +571,6 @@ class PolicyModel:
             action_mask=action_mask,
             attention_mask=attention_mask,
             ring_attn_group=self.strategy.ring_attn_group, 
-            packed_seq_lens=packed_seq_lens,
         )
 
         self.actor.train() 

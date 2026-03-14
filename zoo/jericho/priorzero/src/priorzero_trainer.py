@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import os
 import copy
 import json
@@ -103,6 +104,7 @@ class PriorZeroLLMTrainer:
             return {}
         input_ids, attention_mask, action_mask, advantage, old_lp, log_status = data
         assert len(input_ids) == len(attention_mask) == len(action_mask) == len(advantage) == len(old_lp) == len(log_status)
+        batch_input_stats = self._collect_input_ids_stats(input_ids)
         
         batch = {
             "input_ids": input_ids,
@@ -132,8 +134,18 @@ class PriorZeroLLMTrainer:
         
         if self.strategy.args.deepspeed_enable_sleep:
             self.policy_model.offload_states()
+
+        for tmp_dict in status:
+            tmp_dict.update(batch_input_stats)
         
         if self._tb_logger is not None and self.strategy.is_rank_0():
+            print(
+                f"[Rank {self.rank}] | [LLM Batch Stats] "
+                f"global_samples={int(batch_input_stats['input_ids_global_sample_count'])}, "
+                f"global_unique_samples={int(batch_input_stats['input_ids_global_unique_count'])}, "
+                f"global_duplicate_samples={int(batch_input_stats['input_ids_global_duplicate_count'])}, "
+                f"unique_ratio={float(batch_input_stats['input_ids_global_unique_ratio']):.4f}"
+            )
             for tmp_dict in status:
                 for k, v in tmp_dict.items():
                     if k == 'iter':
@@ -157,6 +169,38 @@ class PriorZeroLLMTrainer:
         lst = [self.global_step] if self.rank == 0 else [None]
         dist.broadcast_object_list(lst, src=0)
         self.global_step = int(lst[0])
+
+    def _collect_input_ids_stats(self, input_ids: torch.Tensor) -> Dict[str, float]:
+        local_hashes = self._hash_input_rows(input_ids)
+        local_sample_count = len(local_hashes)
+        local_unique_count = len(set(local_hashes))
+
+        global_hashes = local_hashes
+        if self.world_size > 1:
+            gathered_hashes = [None for _ in range(self.world_size)]
+            dist.all_gather_object(gathered_hashes, local_hashes)
+            global_hashes = [item for rank_hashes in gathered_hashes for item in rank_hashes]
+
+        global_sample_count = len(global_hashes)
+        global_unique_count = len(set(global_hashes))
+        global_duplicate_count = global_sample_count - global_unique_count
+        global_unique_ratio = global_unique_count / global_sample_count if global_sample_count > 0 else 0.0
+
+        return {
+            "input_ids_local_sample_count": float(local_sample_count),
+            "input_ids_local_unique_count": float(local_unique_count),
+            "input_ids_global_sample_count": float(global_sample_count),
+            "input_ids_global_unique_count": float(global_unique_count),
+            "input_ids_global_duplicate_count": float(global_duplicate_count),
+            "input_ids_global_unique_ratio": float(global_unique_ratio),
+        }
+
+    def _hash_input_rows(self, input_ids: torch.Tensor) -> List[str]:
+        input_ids_cpu = input_ids.detach().to("cpu")
+        return [
+            hashlib.blake2b(row.numpy().tobytes(), digest_size=16).hexdigest()
+            for row in input_ids_cpu
+        ]
     
     def _broadcast_to_vllm(self):
         if self.strategy.args.vllm_enable_sleep:

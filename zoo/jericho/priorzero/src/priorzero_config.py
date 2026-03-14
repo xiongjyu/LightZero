@@ -73,6 +73,22 @@ class PriorZeroLLMConfig:
     local_rank: int = -1
     enable_rft: bool = True
     enable_world_model: bool = True
+    train_mode_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "mode": "full",  # "full" or "lora"
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "lora_bias": "none",  # "none" / "all" / "lora_only"
+        "lora_target_modules": (
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ),
+    }))
     
     train_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "alternate": True, # False 两者都训练（默认配置）；True: 严格交替训练：phase=wm 时仅训练 wm；phase=llm 时仅训练 llm
@@ -134,6 +150,7 @@ class PriorZeroLLMConfig:
     
     zero_stage: int = 2
     gradient_checkpointing: bool = False
+    gradient_checkpointing_use_reentrant: bool = False
     max_norm: float = 1.0     # Gradient clipping
     ds_tensor_parallel_size: int = 1
     ring_attn_size: int = 1
@@ -163,7 +180,7 @@ class PriorZeroLLMConfig:
     entropy_loss_coef: float = 0.0
     kl_estimator: str = "k3"
     
-    llm_save_freq: int = 500  # 每多少步保存一次 llm 模型,一步代表一次参数更新而不是梯度累积
+    llm_save_freq: int = 1000  # 每多少步保存一次 llm 模型,一步代表一次参数更新而不是梯度累积
     save_path: str = "" # 该参数将被 exp_name 目录覆盖
     
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -183,7 +200,7 @@ def get_priorzero_config(
     exp_name: str = None,
     use_cot: bool = False,
     model_key: Optional[str] = "qwen2.5-3b",
-    multi_gpu: bool = False
+    multi_gpu: bool = False,
 ) -> Tuple[EasyDict, EasyDict]:
     """
     Generate complete PriorZero configuration with automatic model configuration.
@@ -352,9 +369,17 @@ def get_priorzero_config(
     if exp_name is None:
         env_name = env_id.replace(".z5", "")
         if llm_config.enable_rft:
-            exp_name = f"data_priorzero/llm_rft/priorzero_{env_name}_{model_key}_WM_{llm_config.enable_world_model}_useCot_{llm_config.use_cot}_seed{seed}"
+            exp_name = (
+                f"data_priorzero/llm_rft/priorzero_{env_name}_{model_key}_"
+                f"train_{llm_config.train_mode_dict.mode}_WM_{llm_config.enable_world_model}_"
+                f"useCot_{llm_config.use_cot}_seed{seed}"
+            )
         else:
-            exp_name = f"data_priorzero/llm_frozen/priorzero_{env_name}_{model_key}_WM_{llm_config.enable_world_model}_useCot_{llm_config.use_cot}_seed{seed}"
+            exp_name = (
+                f"data_priorzero/llm_frozen/priorzero_{env_name}_{model_key}_"
+                f"train_{llm_config.train_mode_dict.mode}_WM_{llm_config.enable_world_model}_"
+                f"useCot_{llm_config.use_cot}_seed{seed}"
+            )
     
     priorzero_config = dict(
         env=env_config,
@@ -393,8 +418,17 @@ def get_priorzero_config(
     print(f"[Config] Model configuration applied:")
     print(f"  - Model: {model_key}")
     print(f"  - Path: {llm_config.model_name_or_path}")
+    print(f"  - Train Mode: {llm_config.train_mode_dict.mode}")
     print(f"  - Tensor Parallel Size: {llm_config.vllm_tensor_parallel_size}")
     print(f"  - GPU Memory Utilization: {llm_config.gpu_memory_utilization}")
+    if llm_config.train_mode_dict.mode == "lora":
+        print(
+            f"  - LoRA r/alpha/dropout: "
+            f"{llm_config.train_mode_dict.lora_r}/"
+            f"{llm_config.train_mode_dict.lora_alpha}/"
+            f"{llm_config.train_mode_dict.lora_dropout}"
+        )
+        print(f"  - LoRA target modules: {', '.join(llm_config.train_mode_dict.lora_target_modules)}")
 
     return main_config, create_config, llm_config
 
