@@ -203,7 +203,7 @@ def train_priorzero(
         cmd = "noop"
         priorzero_batch = None
         if rank == 0:
-            if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
+            if learner.train_iter != 0 and evaluator.should_eval(learner.train_iter):
                 logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.wake_up()
@@ -255,9 +255,9 @@ def train_priorzero(
                         current_phase = "llm"
                         last_wm_train_iter = learner.train_iter
                 # 计算需要收集多少样本才能满足 llm 的训练
-                # 一次参数更新是train_batch_size，off次数为broadcast_every，1是因为只有一个rank收集数据
+                # 一次参数更新是train_batch_size，off次数为max_rollout_staleness，1是因为只有一个rank收集数据
                 # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
-                llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // 1
+                llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // 1
                 llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps 
                 
                 if llm_cfg.enable_rft and new_num_of_transitions >= llm_need_transition_cnt and (not train_alternate or (train_alternate and current_phase == "llm")):
@@ -285,7 +285,8 @@ def train_priorzero(
                 if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
                     current_phase = "wm"
                     last_llm_train_iter = trainer.global_step
-                    data_processor.value_normalizer.clear()
+                    if data_processor.value_normalizer is not None:
+                        data_processor.value_normalizer.clear()
             
 
 def main():

@@ -226,6 +226,55 @@ class BatchPPOTrainer:
             policy_loss_type=self.args.policy_loss_type,
         )
         self.train_iter = 0
+    
+    def compute_vllm_prompt_logprob(self, input_ids, attention_mask, action_mask):
+        self.vllm_engine.wake_up()
+        self.vllm = self.vllm_engine.llm
+        tokenizer = self.vllm.get_tokenizer()
+
+        texts = []
+
+        for i in range(input_ids.shape[0]):
+            seq_len = attention_mask[i].sum().item()
+            tokens = input_ids[i][-seq_len:]
+            texts.append(tokenizer.decode(tokens, skip_special_tokens=False))
+        from vllm import SamplingParams
+        sampling_params = SamplingParams(
+            temperature=0,
+            top_p=0.95,
+            max_tokens=1,
+            prompt_logprobs=1
+        )
+
+        outputs = self.vllm.generate(
+            texts,
+            sampling_params,
+            use_tqdm=False
+        )
+
+        batch_logprobs = []
+
+        for i, out in enumerate(outputs):
+
+            prompt_logprobs = out.prompt_logprobs
+
+            token_logprobs = []
+            seq_len = attention_mask[i].sum().item()
+            tokens = input_ids[i][-seq_len:]
+            for pos, item in enumerate(prompt_logprobs[1:], start=1):
+                token_id = tokens[pos].item()
+                if token_id in item:
+                    token_logprobs.append(item[token_id].logprob)
+                else:
+                    token_logprobs.append(float("-inf"))
+
+            token_logprobs = torch.tensor(token_logprobs)
+
+            resp_len = action_mask[i].sum().item()
+
+            batch_logprobs.append(token_logprobs[-resp_len:])
+
+        return torch.nn.utils.rnn.pad_sequence(batch_logprobs, batch_first=True)
 
     def train_batch(self, batch_data: Dict[str, torch.Tensor], kl_ctl: float, step_idx: int = 0) -> Dict[str, float]:
         device = torch.cuda.current_device()
@@ -254,7 +303,11 @@ class BatchPPOTrainer:
                 "log_status": batch_data['log_status'][start_idx:end_idx]
             }
             micro_batch['ref_action_log_probs'] = batch_data['ref_action_log_probs'][start_idx:end_idx] if batch_data['ref_action_log_probs'] is not None else None
-
+            old_logprob = self.compute_vllm_prompt_logprob(
+                micro_batch['input_ids'],
+                micro_batch['attention_mask'],
+                micro_batch['action_mask']
+            ) 
             action_log_probs, output = self.actor(
                 micro_batch['input_ids'],
                 micro_batch['action_mask'],
@@ -268,6 +321,17 @@ class BatchPPOTrainer:
                 micro_batch['advantages'],
                 action_mask=micro_batch['action_mask'],
             )
+            #######################
+            lengths = micro_batch['action_mask'].sum(dim=1).detach().cpu().tolist()
+            rows = []
+            for i, a in enumerate(lengths):
+                rows.append(old_logprob[i, -a:])
+            selected = torch.nn.utils.rnn.pad_sequence(rows, batch_first=True)
+            if not (selected == old_logprob).all() or clipfrac.item() > 0.1:
+                if not (selected == old_logprob).all():
+                    if not (old_logprob[1][1:] == selected[1][0:-1]).all() and not (old_logprob[0][1:] == selected[0][0:-1]).all():
+                        pass
+                pass
             
             if self.args.rft_kl_coef > 0 and micro_batch['ref_action_log_probs'] is not None:
                 kl = compute_approx_kl(

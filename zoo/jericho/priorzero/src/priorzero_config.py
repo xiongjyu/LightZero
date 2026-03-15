@@ -100,8 +100,8 @@ class PriorZeroLLMConfig:
 
     llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "mode": "llm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
-        "plus_method": "adaptive",        # 当 plus_method = "fixed" 时，使用固定权重；否则使用自适应权重"adaptive"
+        "mode": "llm_plus_wm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
+        "plus_method": "fixed",        # 当 plus_method = "fixed" 时，使用固定权重；否则使用自适应权重"adaptive"
         "wm_weight": 0.5,            # 当 plus_method = "fixed" 时，WM logits 的权重；LLMPrior 的权重 = 1 - WM_weight
         "llm_max_weight": 0.7,        # 当 plus_method = "adaptive" 时，LLM 的最大权重；WM 的最小权重 = 1 - llm_max_weight
         "llm_min_weight": 0.3,
@@ -158,7 +158,7 @@ class PriorZeroLLMConfig:
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
-    broadcast_every: int = 4 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
+    max_rollout_staleness: int = 1 # off 次数，用来训练的数据和当前策略之间允许的最大差距
 
     learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
@@ -174,7 +174,7 @@ class PriorZeroLLMConfig:
         ),
     }))
     # advantage = target_value - pred_value 
-    advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    advantage_type: str = "advantage_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     entropy_loss_coef: float = 0.0

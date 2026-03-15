@@ -417,6 +417,14 @@ class DataProcessor:
             {k: log_status_tmp[k][i] for k in log_status_tmp.keys()} for i in range(len(log_status_tmp['value_advantage']))
         ]
         
+        for i, s in enumerate(real_samples):
+            if len(s['old_logprob']) != len(s['label_ids']):
+                raise ValueError(
+                    f"Length mismatch at sample {i}: "
+                    f"len(old_logprob)={len(s['old_logprob'])}, "
+                    f"len(label_ids)={len(s['label_ids'])}, "
+                    f"target={repr(s['target'])}"
+                )
         old_seq_max_len = max([len(s['old_logprob']) for s in real_samples])
         old_logprob = torch.zeros(len(real_samples), old_seq_max_len, dtype=torch.float32)
         for idx in range(len(real_samples)):

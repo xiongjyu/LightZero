@@ -268,9 +268,9 @@ def train_priorzero(
                 print(f"[Rank {rank}] Switching to LLM training phase at wm iter: {learner.train_iter}")
         
         # 计算需要收集多少样本才能满足 llm 的训练
-        # 一次参数更新是train_batch_size，off次数为broadcast_every，每个rank单独收集数据，所以需要除
+        # 一次参数更新是train_batch_size，off次数为max_rollout_staleness，每个rank单独收集数据，所以需要除
         # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
-        llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // world_size
+        llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // world_size
         llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps
         
         if llm_cfg.enable_rft and new_num_of_transitions >= llm_need_transition_cnt and (not train_alternate or (train_alternate and current_phase == "llm")):
@@ -301,7 +301,8 @@ def train_priorzero(
                 if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
                     current_phase = "wm"
                     last_llm_train_iter = trainer.global_step
-                    data_processor.value_normalizer.clear()
+                    if data_processor.value_normalizer is not None:
+                        data_processor.value_normalizer.clear()
                     print(f"[Rank {rank}] Switching to World Model training phase at llm iter: {trainer.global_step}")
                     
         else:
