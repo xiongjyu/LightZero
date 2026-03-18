@@ -305,7 +305,8 @@ class PriorZeroCollector(OriginalCollector):
                 raw_obs_list = []
                 histories_list = []
                 valid_actions_list = [] 
-                for env_id in sorted(list(ready_env_id)):
+                ready_env_ids = sorted(list(ready_env_id))
+                for env_id in ready_env_ids:
                     raw_obs_text = extract_raw_obs_text(obs[env_id])
                     raw_obs_list.append(raw_obs_text)
 
@@ -327,6 +328,16 @@ class PriorZeroCollector(OriginalCollector):
                         scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
                         llm_prior_per_seq[idx] = scaled_llm_prior
                         
+                llm_prior_per_seq_by_env = {
+                    env_id: llm_prior_per_seq[idx] for idx, env_id in enumerate(ready_env_ids)
+                }
+                llm_prior_per_tok_by_env = {
+                    env_id: llm_prior_per_tok[idx] for idx, env_id in enumerate(ready_env_ids)
+                }
+                cot_prefixes_by_env = {
+                    env_id: cot_prefixes[idx] for idx, env_id in enumerate(ready_env_ids)
+                }
+
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
                     'valid_actions_list': valid_actions_list,
@@ -400,8 +411,8 @@ class PriorZeroCollector(OriginalCollector):
                         timestep=to_ndarray(self.timestep_dict[env_id]),
                         raw_obs_text=extract_raw_obs_text(obs_new),
                         history_obs=list(self.history_buffers[env_id]),
-                        llm_prior_per_tok=llm_prior_per_tok[env_id],
-                        cot_prefix=cot_prefixes[env_id],
+                        llm_prior_per_tok=llm_prior_per_tok_by_env[env_id],
+                        cot_prefix=cot_prefixes_by_env[env_id],
                         llm_action=action
                     )
 
@@ -459,8 +470,8 @@ class PriorZeroCollector(OriginalCollector):
                         game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(obs_new), init_history_obs=list(self.history_buffers[env_id]))
 
                     self._env_info[env_id]['step'] += 1
-                    if llm_prior_per_seq is not None and llm_prior_per_seq[env_id] is not None:
-                        llm_prior_tensor = torch.tensor([logit for k, logit in llm_prior_per_seq[env_id].items()]) 
+                    if llm_prior_per_seq is not None and llm_prior_per_seq_by_env[env_id] is not None:
+                        llm_prior_tensor = torch.tensor([logit for k, logit in llm_prior_per_seq_by_env[env_id].items()]) 
                         llm_prior_prob = torch.softmax(llm_prior_tensor, dim=-1)
                         llm_prior_entropy[env_id].append(-torch.sum(llm_prior_prob * torch.log(llm_prior_prob + 1e-9), dim=-1))
                     else:

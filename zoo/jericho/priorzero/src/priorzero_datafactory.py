@@ -273,7 +273,7 @@ class DataProcessor:
         samples = self.build_llm_samples(
             raw_obs_list, history_obs_list, llm_prior_per_tok_list, pred_value, target_value, cot_prefix_list, llm_action_list
         )
-        random.shuffle(samples)
+        random.Random(0).shuffle(samples)
 
         if ddp:
             print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")

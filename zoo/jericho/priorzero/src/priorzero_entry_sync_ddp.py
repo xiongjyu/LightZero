@@ -246,13 +246,13 @@ def train_priorzero(
             
         if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
             continue
-
-        logger.info(
-            f"[World Model Training] Rank {rank} | Iter {learner.train_iter} | "
-            f"Updates: {update_per_collect}"
-        )
         
         if llm_cfg.enable_world_model and (not train_alternate or (train_alternate and current_phase == "wm")):
+            logger.info(
+                f"[World Model Training] Rank {rank} | Iter {learner.train_iter} | "
+                f"Updates: {update_per_collect}"
+            )
+            
             for i in range(update_per_collect):
                 with prof.block("train_world_model", rank=rank):
                     train_data = replay_buffer.sample(batch_size, policy)
@@ -265,6 +265,7 @@ def train_priorzero(
             if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
                 current_phase = "llm"
                 last_wm_train_iter = learner.train_iter
+                replay_buffer.last_pos_in_transition = replay_buffer.get_num_of_transitions()
                 print(f"[Rank {rank}] Switching to LLM training phase at wm iter: {learner.train_iter}")
         
         # 计算需要收集多少样本才能满足 llm 的训练

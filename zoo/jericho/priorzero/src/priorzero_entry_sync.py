@@ -239,9 +239,8 @@ def train_priorzero(
                     cmd = bcast_obj(world_size, cmd, rank, src=0)
                     continue
                 
-                logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
-                
                 if llm_cfg.enable_world_model and (not train_alternate or (train_alternate and current_phase == "wm")):
+                    logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
                     for i in range(update_per_collect):
                         with prof.block("train_world_model", rank=0):
                             train_data = replay_buffer.sample(batch_size, policy)
@@ -254,6 +253,7 @@ def train_priorzero(
                     if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
                         current_phase = "llm"
                         last_wm_train_iter = learner.train_iter
+                        replay_buffer.last_pos_in_transition = replay_buffer.get_num_of_transitions()
                 # 计算需要收集多少样本才能满足 llm 的训练
                 # 一次参数更新是train_batch_size，off次数为max_rollout_staleness，1是因为只有一个rank收集数据
                 # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
