@@ -291,8 +291,18 @@ def train_priorzero(
                 
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True, max_samples=llm_need_sample_cnt)
                 if len(train_samples) == 0 or not train_samples:
-                    logger.warning(f"[Rank {rank}] No valid LLM training samples were created. Skipping this LLM training phase.")
-
+                    local_llm_ready = 0
+                else:
+                    local_llm_ready = 1
+                gathered_llm_ready = all_gather_cmd(world_size=world_size, obj=local_llm_ready)
+                if min(gathered_llm_ready) == 0:
+                    logger.info(
+                        f"[Rank {rank}] Skip LLM training because not all ranks have enough samples. "
+                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, "
+                        f"required_samples_per_rank={llm_need_sample_cnt}"
+                    )
+                    continue
+                
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
                 replay_buffer.mark_latest_transitions_consumed()
                 

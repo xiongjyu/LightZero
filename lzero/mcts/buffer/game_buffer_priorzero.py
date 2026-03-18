@@ -255,8 +255,6 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         else:
             candidate_batch_index_list = latest_new_indices[-batch_size:]
             
-        self.last_pos_in_transition = num_of_transitions 
-            
         if self._cfg.reanalyze_outdated:
             batch_index_list.sort()
         
