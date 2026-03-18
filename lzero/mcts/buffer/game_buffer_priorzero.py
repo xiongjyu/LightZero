@@ -12,12 +12,15 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         super().__init__(cfg)
         self.last_pos_in_transition = 0
     
+    def mark_latest_transitions_consumed(self) -> None:
+        self.last_pos_in_transition = self.get_num_of_transitions()
+    
     def fetch_latest_batch(self, batch_size: int, policy) -> List[Any]:
         """
         Fetch latest batch for LLM training.
 
         Returns:
-            [raw_obs_list, history_obs_list, llm_prior_per_tok_list, batch_target_values, cot_prefix_list, llm_action]
+            [raw_obs_list, history_obs_list, llm_prior_per_tok_list, batch_target_values, batch_pred_values, cot_prefix_list, llm_action]
             CoT prefix list is added for CoT reuse optimization.
         """
         policy._target_model.to(self._cfg.device)
@@ -246,10 +249,12 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         probs /= probs.sum()
 
         # 主要改动： 由sample改成了确定的取最后batch_size个样本
+        latest_new_indices = list(range(self.last_pos_in_transition, num_of_transitions))
         if batch_size == -1:
-            batch_index_list = list(range(num_of_transitions))[self.last_pos_in_transition:]  
+            candidate_batch_index_list = latest_new_indices 
         else:
-            batch_index_list = list(range(num_of_transitions))[-batch_size:]
+            candidate_batch_index_list = latest_new_indices[-batch_size:]
+            
         self.last_pos_in_transition = num_of_transitions 
             
         if self._cfg.reanalyze_outdated:
@@ -260,64 +265,33 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
 
         game_segment_list = []
         pos_in_game_segment_list = []
+        batch_index_list = []
 
-        for idx in batch_index_list:
+        for idx in candidate_batch_index_list:
             game_segment_idx, pos_in_game_segment = self.game_segment_game_pos_look_up[idx]
             game_segment_idx -= self.base_idx  # Adjust index based on base index
             game_segment = self.game_segment_buffer[game_segment_idx]
 
             game_segment_list.append(game_segment)
             assert len(game_segment.obs_segment) == len(game_segment.raw_obs_segment) == len(game_segment.cot_prefix_segment)
-            if pos_in_game_segment + self._cfg.num_unroll_steps + self._cfg.model.frame_stack_num > len(game_segment.obs_segment):
-                max_safe_pos = max(0, len(game_segment.obs_segment) - self._cfg.num_unroll_steps - self._cfg.model.frame_stack_num)
-                pos_in_game_segment = np.random.randint(0, max_safe_pos + 1)
-            
-            # print(f'len(game_segment)=:len(game_segment.action_segment): {len(game_segment)}')
-            # print(f'len(game_segment.obs_segment): {game_segment.obs_segment.shape[0]}')
-
-            # In the reanalysis phase, `pos_in_game_segment` should be a multiple of `num_unroll_steps`.
-            # Indices exceeding `game_segment_length` are padded with the next segment and are not updated
-            # in the current implementation. Therefore, we need to sample `pos_in_game_segment` within
-            # [0, game_segment_length - num_unroll_steps] to avoid padded data.
-            
+            segment_len = len(game_segment.action_segment)
             if self._cfg.action_type == 'varied_action_space':
-                # For some environments (e.g., Jericho), the action space size may be different.
-                # To ensure we can always unroll `num_unroll_steps` steps starting from the sampled position (without exceeding segment length),
-                # we avoid sampling from the last `num_unroll_steps` steps of the game segment. 
-                if pos_in_game_segment >= self._cfg.game_segment_length - self._cfg.num_unroll_steps - self._cfg.td_steps:
-                    pos_in_game_segment = np.random.choice(self._cfg.game_segment_length - self._cfg.num_unroll_steps - self._cfg.td_steps, 1).item()
-                
-                segment_len = len(game_segment.action_segment)
-                if pos_in_game_segment >= segment_len - 1:
-                    # If the segment is very short (length 0 or 1), we can't randomly sample a position
-                    # before the last one. The only safe position is 0.
-                    if segment_len > 1:
-                        # If the segment has at least 2 actions, we can safely sample from [0, len-2].
-                        # The upper bound for np.random.choice is exclusive, so (segment_len - 1) is correct.
-                        pos_in_game_segment = np.random.choice(segment_len - 1, 1).item()
-                    else:
-                        # If segment length is 0 or 1, the only valid/safe position is 0.
-                        pos_in_game_segment = 0
-
+                within_obs_window = pos_in_game_segment + self._cfg.num_unroll_steps + self._cfg.model.frame_stack_num <= len(game_segment.obs_segment)
+                within_td_window = pos_in_game_segment < self._cfg.game_segment_length - self._cfg.num_unroll_steps - self._cfg.td_steps
+                valid_next_action = pos_in_game_segment < segment_len - 1
+                is_valid_latest_transition = within_obs_window and within_td_window and valid_next_action
             else:
-                # For environments with a fixed action space (e.g., Atari),
-                # we can safely sample from the entire game segment range.
-                if pos_in_game_segment >= self._cfg.game_segment_length:
-                    pos_in_game_segment = np.random.choice(self._cfg.game_segment_length, 1).item()
-                
-                segment_len = len(game_segment.action_segment)
-                if pos_in_game_segment >= segment_len - 1:
-                    # If the segment is very short (length 0 or 1), we can't randomly sample a position
-                    # before the last one. The only safe position is 0.
-                    if segment_len > 1:
-                        # If the segment has at least 2 actions, we can safely sample from [0, len-2].
-                        # The upper bound for np.random.choice is exclusive, so (segment_len - 1) is correct.
-                        pos_in_game_segment = np.random.choice(segment_len - 1, 1).item()
-                    else:
-                        # If segment length is 0 or 1, the only valid/safe position is 0.
-                        pos_in_game_segment = 0
+                within_obs_window = pos_in_game_segment + self._cfg.num_unroll_steps + self._cfg.model.frame_stack_num <= len(game_segment.obs_segment)
+                within_segment_window = pos_in_game_segment < self._cfg.game_segment_length
+                valid_next_action = pos_in_game_segment < segment_len - 1
+                is_valid_latest_transition = within_obs_window and within_segment_window and valid_next_action
 
+            if not is_valid_latest_transition:
+                continue
+            
+            game_segment_list.append(game_segment)
             pos_in_game_segment_list.append(pos_in_game_segment)
+            batch_index_list.append(idx)
             
 
         # make_time = [time.time() for _ in range(len(batch_index_list))]

@@ -253,17 +253,12 @@ def train_priorzero(
                     if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
                         current_phase = "llm"
                         last_wm_train_iter = learner.train_iter
-                        replay_buffer.last_pos_in_transition = replay_buffer.get_num_of_transitions()
-                # 计算需要收集多少样本才能满足 llm 的训练
-                # 一次参数更新是train_batch_size，off次数为max_rollout_staleness，1是因为只有一个rank收集数据
-                # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
-                llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // 1
-                llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps 
-                
-                if llm_cfg.enable_rft and new_num_of_transitions >= llm_need_transition_cnt and (not train_alternate or (train_alternate and current_phase == "llm")):
+                        replay_buffer.mark_latest_transitions_consumed()
+
+                if llm_cfg.enable_rft and (not train_alternate or (train_alternate and current_phase == "llm")):
                     with prof.block("fetch_latest_batch", rank=0):
                         print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
-                        priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
+                        priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
                         print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
                         cmd = "llm"
 
@@ -278,8 +273,15 @@ def train_priorzero(
                 logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
                 priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
                 logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
-                train_samples = data_processor.make_llm_train_samples(priorzero_batch)
+                
+                llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // 1
+                train_samples = data_processor.make_llm_train_samples(priorzero_batch, max_samples=llm_need_sample_cnt)
+                if len(train_samples) == 0 or not train_samples:  # 检查样本是否有效
+                    logger.warning(f"[Rank {rank}] No valid LLM training samples were created. Skipping this LLM training phase.")
+                    continue
+                
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
+                replay_buffer.mark_latest_transitions_consumed()
                 torch_dist_barrier_and_cuda_sync()
                 
                 if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:

@@ -253,12 +253,12 @@ class DataProcessor:
                 )
         return samples
 
-    def make_llm_train_samples(self, priorzero_batch, ddp: bool = False) -> List[Dict[str, Any]]:
+    def make_llm_train_samples(self, priorzero_batch, ddp: bool = False, max_samples: int = 32) -> List[Dict[str, Any]]:
         """
         Convert PriorZero batch to LLM training samples.
 
         Args:
-            priorzero_batch: Tuple of (raw_obs_list, history_obs_list, llm_prior_per_tok_list, target_value, pred_value, cot_prefix_list)
+            priorzero_batch: Tuple of  (raw_obs_list, history_obs_list, llm_prior_per_tok_list, target_value, pred_value, cot_prefix_list, llm_action_list
                             CoT prefix list is added for CoT reuse optimization.
 
         Returns:
@@ -267,7 +267,8 @@ class DataProcessor:
         raw_obs_list, history_obs_list, llm_prior_per_tok_list, target_value, pred_value, cot_prefix_list, llm_action_list = priorzero_batch
 
         assert len(raw_obs_list) == len(history_obs_list) == len(llm_prior_per_tok_list) == len(target_value) == len(pred_value) == len(cot_prefix_list) == len(llm_action_list), \
-            f"Batch size mismatch: raw_obs={len(raw_obs_list)}, history_obs={len(history_obs_list)}, llm_prior_per_tok={len(llm_prior_per_tok_list)}, target_value={len(target_value)}, cot_prefix={len(cot_prefix_list)}, llm_action={len(llm_action_list)}"
+            f"Batch size mismatch: raw_obs={len(raw_obs_list)}, history_obs={len(history_obs_list)}, llm_prior_per_tok={len(llm_prior_per_tok_list)}, \
+                target_value={len(target_value)}, pred_value={len(pred_value)}, cot_prefix={len(cot_prefix_list)}, llm_action={len(llm_action_list)}"
 
         # Build samples with CoT prefixes
         samples = self.build_llm_samples(
@@ -275,6 +276,11 @@ class DataProcessor:
         )
         random.Random(0).shuffle(samples)
 
+        if len(samples) >= max_samples:
+            samples = samples[:max_samples]
+        else:
+            return []
+        
         if ddp:
             print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")
             real_samples = samples
