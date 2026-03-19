@@ -18,6 +18,53 @@ from transformers.trainer import get_scheduler
 from utils import compute_approx_kl, compute_entropy, masked_mean, torch_dist_barrier_and_cuda_sync, log_probs_from_logits
 
 
+import hashlib
+import torch
+
+def _tensor_digest(t: torch.Tensor, max_elems: int = 4096):
+    x = t.detach().float().contiguous().view(-1)
+    if x.numel() > max_elems:
+        x = x[:max_elems]
+    return hashlib.md5(x.cpu().numpy().tobytes()).hexdigest()
+
+def _param_signature(param: torch.Tensor):
+    x = param.detach()
+    return {
+        "shape": tuple(x.shape),
+        "dtype": str(x.dtype),
+        "digest": _tensor_digest(x),
+    }
+
+def _compare_signature_dict(sig_a, sig_b, max_print=20, title="COMPARE"):
+    keys_a = set(sig_a.keys())
+    keys_b = set(sig_b.keys())
+
+    only_a = sorted(keys_a - keys_b)
+    only_b = sorted(keys_b - keys_a)
+
+    if only_a:
+        print(f"[{title}] only in A: {only_a[:10]}")
+    if only_b:
+        print(f"[{title}] only in B: {only_b[:10]}")
+
+    mismatch = 0
+    for k in sorted(keys_a & keys_b):
+        a = sig_a[k]
+        b = sig_b[k]
+        if a["shape"] != b["shape"] or a["digest"] != b["digest"]:
+            print(f"[{title}] mismatch: {k}")
+            print(f"  A: {a}")
+            print(f"  B: {b}")
+            mismatch += 1
+            if mismatch >= max_print:
+                print(f"[{title}] too many mismatches, stop early")
+                break
+
+    ok = (len(only_a) == 0 and len(only_b) == 0 and mismatch == 0)
+    print(f"[{title}] ok={ok}, mismatch={mismatch}, only_a={len(only_a)}, only_b={len(only_b)}")
+    return ok
+
+
 def _normalize_vllm_weight_name(name: str) -> str:
     if name.startswith("base_model.model."):
         name = name[len("base_model.model."):]
@@ -79,6 +126,7 @@ class Actor(nn.Module):
         super().__init__()
         
         self.temperature = temperature
+        self.pretrain_or_model = pretrain_or_model
         self.train_mode_cfg = train_mode_cfg if train_mode_cfg is not None else {"mode": "full"}
         self.train_mode = self.train_mode_cfg.get("mode", "full")
         attn_impl = attn_implementation
@@ -98,6 +146,7 @@ class Actor(nn.Module):
         self.model.config.use_cache = False
 
         if self.train_mode == "lora":
+            self.model.enable_input_require_grads()
             target_modules = self.train_mode_cfg.get("lora_target_modules")
             target_modules = list(target_modules) if target_modules else None
             lora_config = LoraConfig(
@@ -112,6 +161,8 @@ class Actor(nn.Module):
             self.model = get_peft_model(self.model, lora_config)
         elif self.train_mode != "full":
             raise ValueError(f"Unsupported train_mode: {self.train_mode}")
+        
+        self.model.config.use_cache = False
 
     def forward(
         self,
@@ -226,6 +277,102 @@ class BatchPPOTrainer:
             policy_loss_type=self.args.policy_loss_type,
         )
         self.train_iter = 0
+        self._install_vllm_weight_recorder()
+
+    def _install_vllm_weight_recorder(self):
+        if self.vllm_engine is None:
+            return
+        if hasattr(self.vllm_engine, "_weight_recorder_installed"):
+            return
+
+        self.vllm_engine._broadcasted_weight_cache = {}
+        original_update_weight = self.vllm_engine.update_weight
+
+        def wrapped_update_weight(name, dtype, shape, weight, empty_cache=False, **kwargs):
+            self.vllm_engine._broadcasted_weight_cache[name] = {
+                "shape": tuple(shape),
+                "dtype": str(dtype),
+                "digest": _tensor_digest(weight),
+            }
+            return original_update_weight(
+                name=name,
+                dtype=dtype,
+                shape=shape,
+                weight=weight,
+                empty_cache=empty_cache,
+                **kwargs,
+            )
+
+        self.vllm_engine.update_weight = wrapped_update_weight
+        self.vllm_engine._weight_recorder_installed = True
+
+
+    def _collect_actor_sync_signature(self):
+        model = self.actor.model.module if hasattr(self.actor.model, "module") else self.actor.model
+        sig = {}
+        with self._merged_lora_adapter(model):
+            for name, param in self._iter_vllm_sync_params(model):
+                sig[name] = _param_signature(param)
+        return sig
+
+
+    def compare_actor_vs_vllm_broadcasted(self, tag="WEIGHT_CHECK"):
+        if self.vllm_engine is None:
+            print(f"[{tag}] vllm_engine is None")
+            return False
+
+        actor_sig = self._collect_actor_sync_signature()
+        vllm_sig = getattr(self.vllm_engine, "_broadcasted_weight_cache", None)
+
+        if not vllm_sig:
+            print(f"[{tag}] no cached weights in vllm yet")
+            return False
+
+        return _compare_signature_dict(actor_sig, vllm_sig, title=tag)
+
+    def compute_logprob_from_vllm(self, action_log_probs, sequences: torch.LongTensor, action_mask: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        self.vllm_engine.wake_up()
+        from vllm import SamplingParams
+        sampling_params = SamplingParams(
+            temperature=1.0,
+            top_p=1.0,
+            top_k=-1,
+            max_tokens=1,                       
+            logprobs=None,
+            prompt_logprobs=5,
+        )
+        full_ids = []
+        for seq, attn in zip(sequences, attention_mask):
+            ids = seq[attn.bool()].tolist()
+            full_ids.append(ids)
+        
+        action_lengths = action_mask.sum(dim=-1).tolist()
+        
+        self.vllm_engine.add_requests(sampling_params=sampling_params, prompt_token_ids=full_ids)
+        outs = self.vllm_engine.get_responses()
+
+        old_action_logprob = []
+        old_full_logprob = []
+        for i, (out, ids, action_len) in enumerate(zip(outs, full_ids, action_lengths)):            
+            prompt_logprobs = getattr(out, "prompt_logprobs", None)
+            token_lps = []
+            
+            for j in range(1, len(ids)):
+                tok_id = ids[j]
+                lp_dict = prompt_logprobs[j]
+                
+                assert tok_id in lp_dict
+                token_lps.append(lp_dict[tok_id].logprob)
+
+            old_action_logprob.append(token_lps[-action_len :])
+            old_full_logprob.append(token_lps)
+        max_len = max(action_lengths)
+        result = torch.tensor(
+            [[0.0]*(max_len - len(x)) + x for x in old_action_logprob],
+            dtype=torch.float32
+        )
+        return result, old_full_logprob
+        
     def train_batch(self, batch_data: Dict[str, torch.Tensor], kl_ctl: float, step_idx: int = 0) -> Dict[str, float]:
         device = torch.cuda.current_device()
         for k, v in batch_data.items():
@@ -260,6 +407,12 @@ class BatchPPOTrainer:
                 return_output=True,
                 return_entropy=True,
             )
+            # vllm_logprob, vllm_full_logprob = self.compute_logprob_from_vllm(
+            #     action_log_probs=action_log_probs,
+            #     sequences=micro_batch['input_ids'],
+            #     action_mask=micro_batch['action_mask'],
+            #     attention_mask=micro_batch['attention_mask']
+            # )
             actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
                 action_log_probs,
                 micro_batch['old_action_logprob'],

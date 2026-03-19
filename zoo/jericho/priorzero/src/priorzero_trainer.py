@@ -207,7 +207,11 @@ class PriorZeroLLMTrainer:
             self.vllm_engine.wake_up()
         
         print(f"[Rank {self.rank}]: vllm starting update weights....")
+        self.policy_model.trainer.compare_actor_vs_vllm_broadcasted(tag="BEFORE_BROADCAST")
+
         self.policy_model.broadcast_to_vllm()
+
+        self.policy_model.trainer.compare_actor_vs_vllm_broadcasted(tag="AFTER_BROADCAST")
         print(f"[Rank {self.rank}]: vllm has updating done.")
 
         if self.strategy.args.vllm_enable_sleep:

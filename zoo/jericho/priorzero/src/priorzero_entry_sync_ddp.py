@@ -267,6 +267,7 @@ def train_priorzero(
                 last_wm_train_iter = learner.train_iter
                 replay_buffer.mark_latest_transitions_consumed()
                 print(f"[Rank {rank}] Switching to LLM training phase at wm iter: {learner.train_iter}")
+                continue
 
         if llm_cfg.enable_rft and (not train_alternate or (train_alternate and current_phase == "llm")):
             cmd = 1

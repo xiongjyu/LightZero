@@ -71,6 +71,11 @@ def create_vllm_engine(
         dtype="bfloat16",
         gpu_memory_utilization=gpu_memory_utilization,
         enable_sleep_mode=vllm_enable_sleep,
+        enforce_eager=True,
+        disable_cascade_attn=True,
+        enable_chunked_prefill=False,
+        model_impl="transformers",
+        
     )
     if vllm_enable_sleep:
         vllm_engine.sleep()

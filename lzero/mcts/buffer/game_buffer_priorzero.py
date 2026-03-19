@@ -29,6 +29,8 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         reward_value_context, policy_re_context, policy_non_re_context, current_batch = self._make_batch(
             batch_size, self._cfg.reanalyze_ratio, fetch_latest=True
         )
+        if not current_batch:
+            return [[], [], [], [], [], [], []]
 
         obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, llm_prior_per_tok_list, cot_prefix_list, llm_action_list = current_batch
 
@@ -95,7 +97,9 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
                 raise ValueError("fetch_latest with episode sampling not supported.")
 
         game_segment_list, pos_in_game_segment_list, batch_index_list, weights_list, make_time_list = orig_data
-
+        if not pos_in_game_segment_list:
+            return [], [], [], []
+        
         # Rest of the code is identical to parent's _make_batch
         batch_size = len(batch_index_list)
         obs_list, action_list, mask_list = [], [], []
@@ -254,12 +258,6 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             candidate_batch_index_list = latest_new_indices 
         else:
             candidate_batch_index_list = latest_new_indices[-batch_size:]
-            
-        if self._cfg.reanalyze_outdated:
-            batch_index_list.sort()
-        
-        weights_list = (num_of_transitions * probs[batch_index_list]) ** (-self._beta)
-        weights_list /= weights_list.max()  # Normalize weights
 
         game_segment_list = []
         pos_in_game_segment_list = []
@@ -270,7 +268,6 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             game_segment_idx -= self.base_idx  # Adjust index based on base index
             game_segment = self.game_segment_buffer[game_segment_idx]
 
-            game_segment_list.append(game_segment)
             assert len(game_segment.obs_segment) == len(game_segment.raw_obs_segment) == len(game_segment.cot_prefix_segment)
             segment_len = len(game_segment.action_segment)
             if self._cfg.action_type == 'varied_action_space':
@@ -291,13 +288,12 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             pos_in_game_segment_list.append(pos_in_game_segment)
             batch_index_list.append(idx)
             
-
         # make_time = [time.time() for _ in range(len(batch_index_list))]
 
         # Set the make_time for each sample (set to 0 for now, but can be the actual time if needed).
         make_time = [0. for _ in range(len(batch_index_list))]
 
-        orig_data = (game_segment_list, pos_in_game_segment_list, batch_index_list, weights_list, make_time)
+        orig_data = (game_segment_list, pos_in_game_segment_list, batch_index_list, None, make_time)
             
         return orig_data
     

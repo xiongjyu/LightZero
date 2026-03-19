@@ -254,10 +254,11 @@ def train_priorzero(
                         current_phase = "llm"
                         last_wm_train_iter = learner.train_iter
                         replay_buffer.mark_latest_transitions_consumed()
+                        continue
 
                 if llm_cfg.enable_rft and (not train_alternate or (train_alternate and current_phase == "llm")):
                     with prof.block("fetch_latest_batch", rank=0):
-                        print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
+                        print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t")
                         priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
                         print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
                         cmd = "llm"

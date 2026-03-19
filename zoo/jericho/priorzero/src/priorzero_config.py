@@ -114,7 +114,8 @@ class PriorZeroLLMConfig:
         "eval_freq": int(500),
     }))
     
-    attn_implementation: str = "flash_attention_2" 
+    attn_implementation: str = "sdpa" 
+    # attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
     use_cot: bool = False
     user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -128,7 +129,7 @@ class PriorZeroLLMConfig:
 
     # vLLM engines 
     enable_vllm: bool = True
-    enable_prefix_caching: bool = True
+    enable_prefix_caching: bool = False
     use_cuda_ipc: bool = False
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
     vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
