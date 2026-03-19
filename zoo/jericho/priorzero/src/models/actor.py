@@ -17,54 +17,6 @@ from transformers.trainer import get_scheduler
 
 from utils import compute_approx_kl, compute_entropy, masked_mean, torch_dist_barrier_and_cuda_sync, log_probs_from_logits
 
-
-import hashlib
-import torch
-
-def _tensor_digest(t: torch.Tensor, max_elems: int = 4096):
-    x = t.detach().float().contiguous().view(-1)
-    if x.numel() > max_elems:
-        x = x[:max_elems]
-    return hashlib.md5(x.cpu().numpy().tobytes()).hexdigest()
-
-def _param_signature(param: torch.Tensor):
-    x = param.detach()
-    return {
-        "shape": tuple(x.shape),
-        "dtype": str(x.dtype),
-        "digest": _tensor_digest(x),
-    }
-
-def _compare_signature_dict(sig_a, sig_b, max_print=20, title="COMPARE"):
-    keys_a = set(sig_a.keys())
-    keys_b = set(sig_b.keys())
-
-    only_a = sorted(keys_a - keys_b)
-    only_b = sorted(keys_b - keys_a)
-
-    if only_a:
-        print(f"[{title}] only in A: {only_a[:10]}")
-    if only_b:
-        print(f"[{title}] only in B: {only_b[:10]}")
-
-    mismatch = 0
-    for k in sorted(keys_a & keys_b):
-        a = sig_a[k]
-        b = sig_b[k]
-        if a["shape"] != b["shape"] or a["digest"] != b["digest"]:
-            print(f"[{title}] mismatch: {k}")
-            print(f"  A: {a}")
-            print(f"  B: {b}")
-            mismatch += 1
-            if mismatch >= max_print:
-                print(f"[{title}] too many mismatches, stop early")
-                break
-
-    ok = (len(only_a) == 0 and len(only_b) == 0 and mismatch == 0)
-    print(f"[{title}] ok={ok}, mismatch={mismatch}, only_a={len(only_a)}, only_b={len(only_b)}")
-    return ok
-
-
 def _normalize_vllm_weight_name(name: str) -> str:
     if name.startswith("base_model.model."):
         name = name[len("base_model.model."):]
@@ -275,103 +227,10 @@ class BatchPPOTrainer:
             clip_eps_low=self.args.eps_clip_low_high[0],
             clip_eps_high=self.args.eps_clip_low_high[1],
             policy_loss_type=self.args.policy_loss_type,
+            enable_vllm_is_correction=self.args.enable_vllm_is_correction,
+            vllm_is_truncated_threshold=self.args.vllm_is_truncated_threshold
         )
         self.train_iter = 0
-        self._install_vllm_weight_recorder()
-
-    def _install_vllm_weight_recorder(self):
-        if self.vllm_engine is None:
-            return
-        if hasattr(self.vllm_engine, "_weight_recorder_installed"):
-            return
-
-        self.vllm_engine._broadcasted_weight_cache = {}
-        original_update_weight = self.vllm_engine.update_weight
-
-        def wrapped_update_weight(name, dtype, shape, weight, empty_cache=False, **kwargs):
-            self.vllm_engine._broadcasted_weight_cache[name] = {
-                "shape": tuple(shape),
-                "dtype": str(dtype),
-                "digest": _tensor_digest(weight),
-            }
-            return original_update_weight(
-                name=name,
-                dtype=dtype,
-                shape=shape,
-                weight=weight,
-                empty_cache=empty_cache,
-                **kwargs,
-            )
-
-        self.vllm_engine.update_weight = wrapped_update_weight
-        self.vllm_engine._weight_recorder_installed = True
-
-
-    def _collect_actor_sync_signature(self):
-        model = self.actor.model.module if hasattr(self.actor.model, "module") else self.actor.model
-        sig = {}
-        with self._merged_lora_adapter(model):
-            for name, param in self._iter_vllm_sync_params(model):
-                sig[name] = _param_signature(param)
-        return sig
-
-
-    def compare_actor_vs_vllm_broadcasted(self, tag="WEIGHT_CHECK"):
-        if self.vllm_engine is None:
-            print(f"[{tag}] vllm_engine is None")
-            return False
-
-        actor_sig = self._collect_actor_sync_signature()
-        vllm_sig = getattr(self.vllm_engine, "_broadcasted_weight_cache", None)
-
-        if not vllm_sig:
-            print(f"[{tag}] no cached weights in vllm yet")
-            return False
-
-        return _compare_signature_dict(actor_sig, vllm_sig, title=tag)
-
-    def compute_logprob_from_vllm(self, action_log_probs, sequences: torch.LongTensor, action_mask: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        self.vllm_engine.wake_up()
-        from vllm import SamplingParams
-        sampling_params = SamplingParams(
-            temperature=1.0,
-            top_p=1.0,
-            top_k=-1,
-            max_tokens=1,                       
-            logprobs=None,
-            prompt_logprobs=5,
-        )
-        full_ids = []
-        for seq, attn in zip(sequences, attention_mask):
-            ids = seq[attn.bool()].tolist()
-            full_ids.append(ids)
-        
-        action_lengths = action_mask.sum(dim=-1).tolist()
-        
-        self.vllm_engine.add_requests(sampling_params=sampling_params, prompt_token_ids=full_ids)
-        outs = self.vllm_engine.get_responses()
-
-        old_action_logprob = []
-        old_full_logprob = []
-        for i, (out, ids, action_len) in enumerate(zip(outs, full_ids, action_lengths)):            
-            prompt_logprobs = getattr(out, "prompt_logprobs", None)
-            token_lps = []
-            
-            for j in range(1, len(ids)):
-                tok_id = ids[j]
-                lp_dict = prompt_logprobs[j]
-                
-                assert tok_id in lp_dict
-                token_lps.append(lp_dict[tok_id].logprob)
-
-            old_action_logprob.append(token_lps[-action_len :])
-            old_full_logprob.append(token_lps)
-        max_len = max(action_lengths)
-        result = torch.tensor(
-            [[0.0]*(max_len - len(x)) + x for x in old_action_logprob],
-            dtype=torch.float32
-        )
-        return result, old_full_logprob
         
     def train_batch(self, batch_data: Dict[str, torch.Tensor], kl_ctl: float, step_idx: int = 0) -> Dict[str, float]:
         device = torch.cuda.current_device()
@@ -396,8 +255,9 @@ class BatchPPOTrainer:
                 "attention_mask": batch_data['attention_mask'][start_idx:end_idx],
                 "action_mask": batch_data['action_mask'][start_idx:end_idx],
                 "advantages": batch_data['advantages'][start_idx:end_idx],
-                "old_action_logprob": batch_data['old_action_logprob'][start_idx:end_idx],
-                "log_status": batch_data['log_status'][start_idx:end_idx]
+                "old_action_log_probs": batch_data['old_action_log_probs'][start_idx:end_idx],
+                "log_status": batch_data['log_status'][start_idx:end_idx],
+                "rollout_action_logprob": batch_data['rollout_action_logprob'][start_idx:end_idx],
             }
             micro_batch['ref_action_log_probs'] = batch_data['ref_action_log_probs'][start_idx:end_idx] if batch_data['ref_action_log_probs'] is not None else None
             action_log_probs, output = self.actor(
@@ -407,17 +267,12 @@ class BatchPPOTrainer:
                 return_output=True,
                 return_entropy=True,
             )
-            # vllm_logprob, vllm_full_logprob = self.compute_logprob_from_vllm(
-            #     action_log_probs=action_log_probs,
-            #     sequences=micro_batch['input_ids'],
-            #     action_mask=micro_batch['action_mask'],
-            #     attention_mask=micro_batch['attention_mask']
-            # )
             actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
-                action_log_probs,
-                micro_batch['old_action_logprob'],
-                micro_batch['advantages'],
+                log_probs=action_log_probs,
+                old_log_probs=micro_batch['old_action_log_probs'],
+                advantages=micro_batch['advantages'],
                 action_mask=micro_batch['action_mask'],
+                rollout_log_probs=micro_batch['rollout_action_logprob']
             )
             
             if self.args.rft_kl_coef > 0 and micro_batch['ref_action_log_probs'] is not None:
@@ -464,6 +319,8 @@ class BatchPPOTrainer:
             metrics_buffer["input_length"].append(input_length_item)
             metrics_buffer["response_length"].append(response_length_item)
             metrics_buffer['entropy'].append(entropy_loss_item)
+            if vllm_kl is not None:
+                metrics_buffer['vllm_kl'].append(vllm_kl.item())
 
             log_status = micro_batch["log_status"]
             other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}
@@ -502,6 +359,8 @@ class BatchPPOTrainer:
                     status["final_advantage_min"] = np.min(metrics_buffer['final_advantage'])
                 if "fmt_rewards" in metrics_buffer:
                     status["fmt_rewards"] = np.mean(metrics_buffer['fmt_rewards'])
+                if "vllm_kl" in metrics_buffer:
+                    status["vllm_kl"] = np.mean(metrics_buffer['vllm_kl'])
                 metrics_buffer.clear()
 
                 status = self.strategy.all_reduce(status)
@@ -703,29 +562,21 @@ class PolicyModel:
     def forward(
         self,
         sequences: torch.LongTensor,
-        action_mask: Optional[Union[int, list[int], torch.Tensor]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        to_cpu: bool = False,
+        action_mask: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Return: action_log_probs [B, T_action]
+        """
         self.actor.eval()
-
-        if action_mask is None:
-            raise ValueError("action_mask is required for returning action_log_probs")
-
         device = torch.cuda.current_device()
-        sequences = sequences.to(device, non_blocking=True)
-        attention_mask = attention_mask.to(device, non_blocking=True) if attention_mask is not None else None
-        action_mask = action_mask.to(device, non_blocking=True) if torch.is_tensor(action_mask) else action_mask
+        
+        sequences = sequences.to(device)
+        attention_mask = attention_mask.to(device)
+        action_mask = action_mask.to(device) 
+        output = self.actor(sequences, action_mask=action_mask, attention_mask=attention_mask)
 
-        action_log_probs = self.actor(
-            sequences,
-            action_mask=action_mask,
-            attention_mask=attention_mask,
-            ring_attn_group=self.strategy.ring_attn_group, 
-        )
-
-        self.actor.train() 
-        return action_log_probs.to("cpu") if to_cpu else action_log_probs
+        return output
 
     def broadcast_to_vllm(self):
         # self.trainer._broadcast_to_vllm()

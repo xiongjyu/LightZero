@@ -114,8 +114,7 @@ class PriorZeroLLMConfig:
         "eval_freq": int(500),
     }))
     
-    attn_implementation: str = "sdpa" 
-    # attn_implementation: str = "flash_attention_2" 
+    attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
     use_cot: bool = False
     user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -131,6 +130,8 @@ class PriorZeroLLMConfig:
     enable_vllm: bool = True
     enable_prefix_caching: bool = False
     use_cuda_ipc: bool = False
+    enable_vllm_is_correction: bool = False
+    vllm_is_truncated_threshold:  Tuple[float, float] = (0.5, 5.0)
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
     vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
 
@@ -454,7 +455,7 @@ def get_priorzero_debug_config(
     game_segment_length = 50
 
     llm_config.train_batch_size = 8  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    llm_config.micro_train_batch_size = 2
+    llm_config.micro_train_batch_size = 1
     llm_config.train_schedule.wm_update_iters=2
     llm_config.train_schedule.llm_update_iters=1
 

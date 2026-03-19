@@ -182,7 +182,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
                 old_prefix_cot = llm_prior_per_tok_list[b][t+1]['prefix_cot']
                 old_current_obs = llm_prior_per_tok_list[b][t+1]['current_obs']
                 old_history = llm_prior_per_tok_list[b][t+1]['history']
-                old_logprob = llm_prior_per_tok_list[b][t+1]['old_action_logprob']
+                old_logprob = llm_prior_per_tok_list[b][t+1]['rollout_action_logprob']
                 cot_prefix = cot_prefix_list[b][t+1]
                 llm_action = llm_action_list[b][t+1]
                 

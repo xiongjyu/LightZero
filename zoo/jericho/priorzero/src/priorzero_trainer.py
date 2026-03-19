@@ -102,8 +102,8 @@ class PriorZeroLLMTrainer:
     def train_batch(self, data, collect_env_steps) -> Dict[str, float]:
         if data is None:
             return {}
-        input_ids, attention_mask, action_mask, advantage, old_lp, log_status = data
-        assert len(input_ids) == len(attention_mask) == len(action_mask) == len(advantage) == len(old_lp) == len(log_status)
+        input_ids, attention_mask, action_mask, advantage, rollout_lp, log_status = data
+        assert len(input_ids) == len(attention_mask) == len(action_mask) == len(advantage) == len(rollout_lp) == len(log_status)
         batch_input_stats = self._collect_input_ids_stats(input_ids)
         
         batch = {
@@ -111,7 +111,7 @@ class PriorZeroLLMTrainer:
             "attention_mask": attention_mask,
             "action_mask": action_mask,
             "advantages": advantage,     
-            "old_action_logprob": old_lp,
+            "rollout_action_logprob": rollout_lp,
             "log_status": log_status,     
         }
         if self.reference_model is not None:
@@ -123,6 +123,13 @@ class PriorZeroLLMTrainer:
             batch["ref_action_log_probs"] = base_action_log_probs
         else:
             batch["ref_action_log_probs"] = None
+        
+        old_action_log_probs = self.policy_model.forward(
+            sequences = batch['input_ids'],
+            action_mask = batch['action_mask'],
+            attention_mask=batch['attention_mask'],
+        )
+        batch["old_action_log_probs"] = old_action_log_probs
             
         if self.strategy.args.deepspeed_enable_sleep:
             self.policy_model.reload_states()
@@ -207,11 +214,7 @@ class PriorZeroLLMTrainer:
             self.vllm_engine.wake_up()
         
         print(f"[Rank {self.rank}]: vllm starting update weights....")
-        self.policy_model.trainer.compare_actor_vs_vllm_broadcasted(tag="BEFORE_BROADCAST")
-
         self.policy_model.broadcast_to_vllm()
-
-        self.policy_model.trainer.compare_actor_vs_vllm_broadcasted(tag="AFTER_BROADCAST")
         print(f"[Rank {self.rank}]: vllm has updating done.")
 
         if self.strategy.args.vllm_enable_sleep:

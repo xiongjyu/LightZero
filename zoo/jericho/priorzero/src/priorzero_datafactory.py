@@ -221,7 +221,7 @@ class DataProcessor:
                 prompt = self.build_chat_context(instruction)
                 
                 true_action = llm_action_list[b][t+1]
-                old_logprob = llm_prior_per_tok_list[b][t+1]['old_action_logprob'][true_action]
+                rollout_logprob = llm_prior_per_tok_list[b][t+1]['rollout_action_logprob'][true_action]
                 full_ids = llm_prior_per_tok_list[b][t+1]['full_ids'][true_action]
                 label_ids = llm_prior_per_tok_list[b][t+1]['label_ids'][true_action]
                 
@@ -245,7 +245,7 @@ class DataProcessor:
                         "target": true_action,
                         "pred_value": pred_value,
                         "target_value": target_value,
-                        "old_logprob": old_logprob,  # Reinforce++ ratio 需要
+                        "rollout_logprob": rollout_logprob,  # Reinforce++ ratio 需要
                         "prefix_cot": prefix_cot,  # CoT reuse optimization
                         "full_ids": full_ids, 
                         "label_ids": label_ids,
@@ -262,7 +262,7 @@ class DataProcessor:
                             CoT prefix list is added for CoT reuse optimization.
 
         Returns:
-            Tuple of (input_ids, attention_mask, action_mask, advantages, old_logprob)
+            Tuple of (input_ids, attention_mask, action_mask, advantages, rollout_logprob)
         """
         raw_obs_list, history_obs_list, llm_prior_per_tok_list, target_value, pred_value, cot_prefix_list, llm_action_list = priorzero_batch
 
@@ -424,20 +424,20 @@ class DataProcessor:
         ]
         
         for i, s in enumerate(real_samples):
-            if len(s['old_logprob']) != len(s['label_ids']):
+            if len(s['rollout_logprob']) != len(s['label_ids']):
                 raise ValueError(
                     f"Length mismatch at sample {i}: "
-                    f"len(old_logprob)={len(s['old_logprob'])}, "
+                    f"len(rollout_logprob)={len(s['rollout_logprob'])}, "
                     f"len(label_ids)={len(s['label_ids'])}, "
                     f"target={repr(s['target'])}"
                 )
-        old_seq_max_len = max([len(s['old_logprob']) for s in real_samples])
-        old_logprob = torch.zeros(len(real_samples), old_seq_max_len, dtype=torch.float32)
+        old_seq_max_len = max([len(s['rollout_logprob']) for s in real_samples])
+        rollout_logprob = torch.zeros(len(real_samples), old_seq_max_len, dtype=torch.float32)
         for idx in range(len(real_samples)):
-            logprob_token_list = real_samples[idx]['old_logprob']
-            old_logprob[idx, -len(logprob_token_list):] = torch.tensor(logprob_token_list, dtype=torch.float32)
+            logprob_token_list = real_samples[idx]['rollout_logprob']
+            rollout_logprob[idx, -len(logprob_token_list):] = torch.tensor(logprob_token_list, dtype=torch.float32)
         
-        return inputs.input_ids, inputs.attention_mask, action_mask, advantage, old_logprob, log_status
+        return inputs.input_ids, inputs.attention_mask, action_mask, advantage, rollout_logprob, log_status
         
     @torch.no_grad()
     def _build_cot_prefix_texts(self, all_user_prompts: List[str]) -> List[str]:
@@ -540,24 +540,24 @@ class DataProcessor:
                 all_env_indices.append(env_idx)
         assert len(all_prompts) == len(all_labels) == len(all_prefix_cots) == len(all_env_indices)
         
-        scores, old_action_logprob, full_ids, label_ids = self._score_labels_with_prompt_logprobs(all_prompts, all_labels, all_prefix_cots)
-        assert len(all_prompts) == len(scores) == len(old_action_logprob) == len(full_ids) == len(label_ids)
+        scores, rollout_action_logprob, full_ids, label_ids = self._score_labels_with_prompt_logprobs(all_prompts, all_labels, all_prefix_cots)
+        assert len(all_prompts) == len(scores) == len(rollout_action_logprob) == len(full_ids) == len(label_ids)
         
         llm_prior_per_seq, llm_prior_per_tok = [],[], 
         cur_env_idx = 0
         seq_dict = {}
-        tok_dict = {'old_action_logprob': {}, 'full_ids': {}, 'label_ids': {}}
+        tok_dict = {'rollout_action_logprob': {}, 'full_ids': {}, 'label_ids': {}}
         
         for idx, (env_idx, prompt, label, prefix_cot) in enumerate(zip(all_env_indices, all_prompts, all_labels, all_prefix_cots)):
             if env_idx != cur_env_idx:
                 llm_prior_per_seq.append(seq_dict)
                 llm_prior_per_tok.append(tok_dict)
                 seq_dict = {}
-                tok_dict = {'old_action_logprob': {}, 'full_ids': {}, 'label_ids': {}}
+                tok_dict = {'rollout_action_logprob': {}, 'full_ids': {}, 'label_ids': {}}
                 cur_env_idx = env_idx
             
             seq_dict[label] = scores[idx]
-            tok_dict['old_action_logprob'][label] = old_action_logprob[idx]  
+            tok_dict['rollout_action_logprob'][label] = rollout_action_logprob[idx]  
             tok_dict['full_ids'][label] = full_ids[idx]
             tok_dict['label_ids'][label] = label_ids[idx]
             tok_dict['prompt'] = prompt
@@ -620,7 +620,7 @@ class DataProcessor:
         outs = self.vllm_engine.get_responses()
 
         scores = []
-        old_action_logprob = []
+        rollout_action_logprob = []
         nan_found = False
         for i, (out, ids, p_len, l_len, l_no_cots_len) in enumerate(zip(outs, full_ids, p_lens, l_lens, l_no_cots_lens)):            
             prompt_logprobs = getattr(out, "prompt_logprobs", None)
@@ -635,7 +635,7 @@ class DataProcessor:
 
             if not token_lps:
                 scores.append(float("-inf"))
-                old_action_logprob.append([])
+                rollout_action_logprob.append([])
             else:
                 assert l_no_cots_len <= l_len
                 if self.llm_prior_with_cot:
@@ -681,13 +681,13 @@ class DataProcessor:
                         f"Detailed Mapping:\n" + "\n".join(token_level_debug[-l_no_cots_len:]) + "\n"
                         f"{'='*60}\n"
                     )
-                old_action_logprob.append(token_lps[-l_len:])
+                rollout_action_logprob.append(token_lps[-l_len:])
 
         if self.rank == 0:
             if nan_found:
                 self._logger.info(nan_debug_dump)
             
-        return scores, old_action_logprob, full_ids, label_ids
+        return scores, rollout_action_logprob, full_ids, label_ids
 
     @torch.no_grad()
     def get_llm_output_log(self, wm_train_iter: int = 0, llm_train_iter: int = 0):
