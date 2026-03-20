@@ -261,12 +261,13 @@ def train_priorzero(
         
         # 4. llm 训练阶段
         if llm_cfg.enable_rft and (not train_alternate or (train_alternate and current_phase == "llm")):
-            priorzero_batch = None
             new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
             logger.info(f"[LLM Training] Rank {rank} | Total transitions: {num_of_transitions} | New transitions: {new_num_of_transitions}")
             
             with prof.block("fetch_latest_batch", rank=rank):
                 priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
+                # 清理 policy的cahce，防止OOM
+                torch.cuda.empty_cache()
                 
             with prof.block("train_llm", rank=rank):
                 llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // world_size
@@ -281,7 +282,7 @@ def train_priorzero(
                 if min(gathered_llm_ready) == 0:
                     logger.info(
                         f"[Rank {rank}] Skip LLM training because not all ranks have enough samples. "
-                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples)}"
+                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples[0])}"
                     )
                     continue
                 

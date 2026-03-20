@@ -260,6 +260,8 @@ def train_priorzero(
                     with prof.block("fetch_latest_batch", rank=0):
                         print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t")
                         priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
+                        # 清理 policy的cahce，防止OOM
+                        torch.cuda.empty_cache()
                         print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
                         cmd = "llm"
 

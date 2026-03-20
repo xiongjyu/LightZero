@@ -485,7 +485,6 @@ class PriorZeroCollector(OriginalCollector):
                 # ==============================================================
                 if episode_timestep.done:
                     self._logger.info(f'[RANK {self._rank}] ======== Env {env_id} episode finished! ========')
-                    self._total_episode_count += 1
                     # Logging
                     info_log = {
                         'reward': episode_timestep.info['score'],
