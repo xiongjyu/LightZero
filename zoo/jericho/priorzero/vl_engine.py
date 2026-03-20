@@ -1,7 +1,7 @@
 """
-Vision-Language Model (VLM) Engine
+Vision-Language (VL) Engine
 
-This module provides a unified interface for various VLM models
+This module provides a unified interface for various VL models
 to generate action priors from image observations.
 
 Supported models:
@@ -22,14 +22,14 @@ try:
     VLLM_AVAILABLE = True
 except ImportError:
     VLLM_AVAILABLE = False
-    logger.warning("vLLM not available. VLM engine will use transformers backend.")
+    logger.warning("vLLM not available. VL engine will use transformers backend.")
 
 
-class VLMEngine:
+class VLEngine:
     """
-    Base VLM Engine class.
+    Base VL Engine class.
 
-    Provides a unified interface for different VLM implementations.
+    Provides a unified interface for different VL implementations.
     """
 
     def __init__(
@@ -59,11 +59,11 @@ class VLMEngine:
         self.tokenizer = None
         self.processor = None
 
-        logger.info(f"Initializing VLM Engine: {model_name}")
+        logger.info(f"Initializing VL Engine: {model_name}")
         self._load_model()
 
     def _load_model(self):
-        """Load the VLM model. To be implemented by subclasses."""
+        """Load the VL model. To be implemented by subclasses."""
         raise NotImplementedError("Subclasses must implement _load_model()")
 
     def generate(
@@ -137,9 +137,9 @@ class VLMEngine:
         # For non-vLLM engines, this is a no-op
 
 
-class VLLMVLMEngine(VLMEngine):
+class VLLMVLEngine(VLEngine):
     """
-    vLLM-based VLM Engine for multimodal models.
+    vLLM-based VL Engine for multimodal models.
 
     This engine uses vLLM's native multimodal support for efficient inference
     with sleep/wake_up functionality for memory management.
@@ -188,13 +188,13 @@ class VLLMVLMEngine(VLMEngine):
         )
 
     def _load_model(self):
-        """Load VLM model using vLLM."""
+        """Load VL model using vLLM."""
         try:
-            from vllm_utils.vlm_engine import create_vllm_vlm_engine
+            from vllm_utils.vl_engine import create_vllm_vl_engine
 
-            logger.info(f"Loading VLM with vLLM from {self.model_path}")
+            logger.info(f"Loading VL model with vLLM from {self.model_path}")
 
-            self.model = create_vllm_vlm_engine(
+            self.model = create_vllm_vl_engine(
                 tensor_parallel_size=self.tensor_parallel_size,
                 pretrain=self.model_path,
                 max_model_len=self.max_model_len,
@@ -203,10 +203,10 @@ class VLLMVLMEngine(VLMEngine):
                 limit_mm_per_prompt=self.limit_mm_per_prompt,
             )
 
-            logger.info("✓ vLLM VLM engine loaded successfully")
+            logger.info("✓ vLLM VL engine loaded successfully")
 
         except Exception as e:
-            logger.error(f"Failed to load vLLM VLM engine: {e}")
+            logger.error(f"Failed to load vLLM VL engine: {e}")
             raise
 
     def generate(
@@ -227,7 +227,7 @@ class VLLMVLMEngine(VLMEngine):
             **kwargs
         )
 
-        # Generate (VLMActor expects lists)
+        # Generate (VLActor expects lists)
         outputs = self.model.generate(
             images=[image],
             prompts=[prompt],
@@ -285,7 +285,7 @@ class VLLMVLMEngine(VLMEngine):
             self.model.sleep(level=level)
 
 
-class QwenVLEngine(VLMEngine):
+class QwenVLEngine(VLEngine):
     """
     Qwen-VL / Qwen2-VL / Qwen2.5-VL / Qwen3-VL Engine
 
@@ -310,7 +310,7 @@ class QwenVLEngine(VLMEngine):
                 trust_remote_code=True
             )
 
-            # Load model - Use AutoModelForVision2Seq for VLM models
+            # Load model - Use AutoModelForVision2Seq for VL models
             self.model = AutoModelForVision2Seq.from_pretrained(
                 self.model_path,
                 device_map="auto" if self.tensor_parallel_size > 1 else self.device,
@@ -374,7 +374,7 @@ class QwenVLEngine(VLMEngine):
             os.unlink(image_path)
 
 
-class LLaVAEngine(VLMEngine):
+class LLaVAEngine(VLEngine):
     """
     LLaVA Engine
 
@@ -459,7 +459,7 @@ class LLaVAEngine(VLMEngine):
         return response
 
 
-class InternVLEngine(VLMEngine):
+class InternVLEngine(VLEngine):
     """
     InternVL Engine
 
@@ -526,12 +526,12 @@ class InternVLEngine(VLMEngine):
         return response
 
 
-# VLM Model Registry
-VLM_MODEL_REGISTRY = {
+# VL Model Registry
+VL_MODEL_REGISTRY = {
     'qwen-vl': QwenVLEngine,
     'qwen2-vl': QwenVLEngine,
-    'qwen2.5-vl': VLLMVLMEngine,  # Use vLLM for Qwen2.5-VL
-    'qwen3-vl': VLLMVLMEngine,     # Use vLLM for Qwen3-VL
+    'qwen2.5-vl': VLLMVLEngine,  # Use vLLM for Qwen2.5-VL
+    'qwen3-vl': VLLMVLEngine,     # Use vLLM for Qwen3-VL
     'llava': LLaVAEngine,
     'llava-1.5': LLaVAEngine,
     'llava-1.6': LLaVAEngine,
@@ -540,16 +540,16 @@ VLM_MODEL_REGISTRY = {
 }
 
 
-def create_vlm_engine(
+def create_vl_engine(
     model_name: str,
     model_path: str,
     device: str = "cuda",
     tensor_parallel_size: int = 1,
     gpu_memory_utilization: float = 0.3,
     **kwargs
-) -> VLMEngine:
+) -> VLEngine:
     """
-    Factory function to create VLM engine.
+    Factory function to create VL engine.
 
     Args:
         model_name: Model identifier (e.g., 'qwen-vl', 'llava-1.5')
@@ -559,22 +559,22 @@ def create_vlm_engine(
         gpu_memory_utilization: GPU memory utilization ratio
 
     Returns:
-        VLMEngine instance
+        VLEngine instance
     """
     # Normalize model name
     model_name_lower = model_name.lower()
 
     # Find matching engine class
     engine_class = None
-    for key, cls in VLM_MODEL_REGISTRY.items():
+    for key, cls in VL_MODEL_REGISTRY.items():
         if key in model_name_lower:
             engine_class = cls
             break
 
     if engine_class is None:
         raise ValueError(
-            f"Unknown VLM model: {model_name}. "
-            f"Supported models: {list(VLM_MODEL_REGISTRY.keys())}"
+            f"Unknown VL model: {model_name}. "
+            f"Supported models: {list(VL_MODEL_REGISTRY.keys())}"
         )
 
     # Create engine
@@ -592,12 +592,12 @@ def create_vlm_engine(
 
 if __name__ == "__main__":
     # Example usage
-    print("VLM Engine Module")
+    print("VL Engine Module")
     print("=" * 80)
-    print("\nSupported VLM models:")
-    for model_name in VLM_MODEL_REGISTRY.keys():
+    print("\nSupported VL models:")
+    for model_name in VL_MODEL_REGISTRY.keys():
         print(f"  - {model_name}")
 
     print("\nUsage:")
-    print("  engine = create_vlm_engine('qwen-vl', '/path/to/model')")
+    print("  engine = create_vl_engine('qwen-vl', '/path/to/model')")
     print("  response = engine.generate(image, prompt)")

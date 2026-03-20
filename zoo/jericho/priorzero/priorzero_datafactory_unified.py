@@ -1,9 +1,9 @@
 """
-Unified DataProcessor supporting both text (LLM) and image (VLM) inputs
+Unified DataProcessor supporting both text (LLM) and image (VL) inputs
 
 This processor can handle:
 - Text observations with LLM (original functionality)
-- Image observations with VLM (new functionality)
+- Image observations with VL (new functionality)
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -22,14 +22,14 @@ class UnifiedDataProcessor:
     Unified DataProcessor supporting both text and image inputs.
 
     For text input: Uses LLM (vLLM engine)
-    For image input: Uses VLM (VLM engine)
+    For image input: Uses VL engine
     """
 
     def __init__(
         self,
         rank: int,
         world_size: int,
-        vllm_engine,  # Can be vLLM or VLM engine
+        vllm_engine,  # Can be vLLM or VL engine
         strategy,
         model_path: str,
         exp_name: Optional[str] = None,
@@ -42,7 +42,7 @@ class UnifiedDataProcessor:
         Args:
             rank: Process rank
             world_size: World size
-            vllm_engine: vLLM or VLM engine
+            vllm_engine: vLLM or VL engine
             strategy: Training strategy
             model_path: Model path
             exp_name: Experiment name
@@ -170,11 +170,11 @@ class UnifiedDataProcessor:
         return "\n".join(prompt_parts)
 
     # =========================================================================
-    # Image Input Methods (NEW VLM functionality)
+    # Image Input Methods (NEW VL functionality)
     # =========================================================================
 
     def get_system_prompt_image(self) -> str:
-        """System prompt for image-based games (VLM)."""
+        """System prompt for image-based games (VL)."""
         parts = [
             "You are an expert Atari game player.",
             "Your goal is to maximize the score by choosing the optimal next action based on the game screen.",
@@ -205,7 +205,7 @@ class UnifiedDataProcessor:
         valid_actions: Optional[List[str]] = None,
         game_context: Optional[str] = None
     ) -> str:
-        """User prompt for image-based games (VLM)."""
+        """User prompt for image-based games (VL)."""
         prompt_parts = []
 
         if game_context:
@@ -335,7 +335,7 @@ class UnifiedDataProcessor:
         temperature: float = 1.0,
         use_cot: bool = True,
     ) -> Dict[str, Any]:
-        """Get action prior for image observation using VLM."""
+        """Get action prior for image observation using VL."""
         # Convert to PIL Image if needed
         if isinstance(image_obs, np.ndarray):
             if image_obs.dtype != np.uint8:
@@ -358,7 +358,7 @@ class UnifiedDataProcessor:
         # Combine prompts
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
-        # Generate with VLM
+        # Generate with VL
         raw_output = self.vllm_engine.generate(
             image=image,
             prompt=full_prompt,
@@ -367,7 +367,7 @@ class UnifiedDataProcessor:
         )
 
         # Parse output to get action probabilities
-        action_probs = self._parse_vlm_output_to_probs(raw_output, action_candidates)
+        action_probs = self._parse_vl_output_to_probs(raw_output, action_candidates)
         action_logits = np.log(action_probs + 1e-10)
 
         return {
@@ -395,8 +395,8 @@ class UnifiedDataProcessor:
         # Fallback: uniform distribution
         return np.ones(len(action_candidates)) / len(action_candidates)
 
-    def _parse_vlm_output_to_probs(self, raw_output: str, action_candidates: List[str]) -> np.ndarray:
-        """Parse VLM output to action probabilities."""
+    def _parse_vl_output_to_probs(self, raw_output: str, action_candidates: List[str]) -> np.ndarray:
+        """Parse VL output to action probabilities."""
         # Similar to LLM parsing
         return self._parse_llm_output_to_probs(raw_output, action_candidates)
 
@@ -408,7 +408,7 @@ class UnifiedDataProcessor:
         return_cot: bool = False
     ) -> Tuple[List[np.ndarray], List[np.ndarray], List[Any]]:
         """
-        Batch get LLM/VLM priors (for backward compatibility).
+        Batch get LLM/VL priors (for backward compatibility).
 
         Args:
             states: List of observations (text or images)
@@ -452,7 +452,7 @@ class UnifiedDataProcessor:
             Tuple of (flag, train_samples) where flag indicates if enough samples were prepared.
         """
         if self.obs_type == 'image':
-            # VLM training samples: delegate to VLMPriorGenerator.build_vlm_train_samples()
+            # VL training samples: delegate to VLPriorGenerator.build_vl_train_samples()
             if prior_generator is None:
                 import logging
                 logging.getLogger(__name__).warning("[make_llm_train_samples] No prior_generator for image mode, returning empty.")
@@ -474,7 +474,7 @@ class UnifiedDataProcessor:
 
                 old_log_probs = np.array(action_log_probs, dtype=np.float32)
 
-                train_samples = prior_generator.build_vlm_train_samples(
+                train_samples = prior_generator.build_vl_train_samples(
                     game_segments=game_segments,
                     advantages=advantages,
                     old_action_log_probs=old_log_probs,
@@ -498,7 +498,7 @@ class UnifiedDataProcessor:
             pass
 
     def get_llm_output_log(self, wm_train_iter: int, llm_train_iter: int):
-        """Log LLM/VLM output statistics."""
+        """Log LLM/VL output statistics."""
         if self.rank == 0 and len(self.episode_output) > 0:
             self._logger.info(
                 f"[WM Iter {wm_train_iter} | LLM Iter {llm_train_iter}] "

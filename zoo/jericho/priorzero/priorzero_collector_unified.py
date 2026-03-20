@@ -1,9 +1,9 @@
 """
-Unified PriorZero Collector supporting both LLM and VLM priors
+Unified PriorZero Collector supporting both LLM and VL priors
 
 This collector uses a unified prior_generator interface to support:
 - Text input with LLM prior (Jericho games)
-- Image input with VLM prior (Atari games)
+- Image input with VL prior (Atari games)
 """
 import asyncio
 import logging
@@ -68,10 +68,10 @@ def extract_raw_obs_image(obs_dict: Dict[str, Any]) -> np.ndarray:
 @SERIAL_COLLECTOR_REGISTRY.register('priorzero_segment', force_overwrite=True)
 class PriorZeroCollector(OriginalCollector):
     """
-    Unified PriorZero Collector supporting both LLM and VLM priors.
+    Unified PriorZero Collector supporting both LLM and VL priors.
 
     Features:
-    - Unified prior_generator interface (supports LLM and VLM)
+    - Unified prior_generator interface (supports LLM and VL)
     - History buffer for each environment
     - Automatic detection of observation type (text vs image)
     - Backward compatible with existing LLM-based implementation
@@ -80,7 +80,7 @@ class PriorZeroCollector(OriginalCollector):
     def __init__(
         self,
         policy_config: Dict,
-        llm_config: Dict,  # Can be LLM or VLM config
+        llm_config: Dict,  # Can be LLM or VL config
         data_processor=None,  # Backward compatibility
         prior_generator=None,  # NEW: Unified prior generator
         prof=None,
@@ -93,7 +93,7 @@ class PriorZeroCollector(OriginalCollector):
 
         Args:
             policy_config: Policy configuration
-            llm_config: LLM/VLM configuration
+            llm_config: LLM/VL configuration
             data_processor: DataProcessor (for backward compatibility)
             prior_generator: Unified PriorGenerator instance (NEW)
             prof: Profiler
@@ -118,7 +118,7 @@ class PriorZeroCollector(OriginalCollector):
         self.llm_prior_temperature = getattr(llm_config, 'llm_prior_temperature', 1.0)
 
         # Logging
-        prior_type = "VLM" if obs_type == 'image' else "LLM"
+        prior_type = "VL" if obs_type == 'image' else "LLM"
         self._logger.info(f"✓ PriorZeroCollector initialized with {prior_type} prior")
         self._logger.info(f"  - Observation type: {obs_type}")
         if obs_type == 'image':
@@ -205,7 +205,7 @@ class PriorZeroCollector(OriginalCollector):
         """
         Collect game segments with prior-guided MCTS.
 
-        Supports both LLM (text) and VLM (image) priors through unified interface.
+        Supports both LLM (text) and VL (image) priors through unified interface.
 
         Args:
             num_segments: Number of segments to collect

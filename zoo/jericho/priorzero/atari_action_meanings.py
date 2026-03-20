@@ -1,7 +1,7 @@
 """
 Atari Action Space Mapping
 
-Maps integer action indices to semantic action names for better VLM understanding.
+Maps integer action indices to semantic action names for better VL understanding.
 """
 
 # Atari action space mappings

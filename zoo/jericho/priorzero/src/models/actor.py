@@ -89,12 +89,12 @@ class Actor(nn.Module):
         else:
             _ = None
 
-        # Detect if model is VLM (Vision-Language Model) or LLM (Language Model)
+        # Detect if model is VL (Vision-Language) or LLM (Language Model)
         config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
-        is_vlm = hasattr(config, 'vision_config') or 'VL' in config.__class__.__name__
+        is_vl = hasattr(config, 'vision_config') or 'VL' in config.__class__.__name__
 
-        if is_vlm:
-            # Use AutoModelForVision2Seq for VLM models (e.g., Qwen2.5-VL, Qwen3-VL)
+        if is_vl:
+            # Use AutoModelForVision2Seq for VL models (e.g., Qwen2.5-VL, Qwen3-VL)
             self.model = AutoModelForVision2Seq.from_pretrained(
                 pretrain_or_model,
                 trust_remote_code=True,

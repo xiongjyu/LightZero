@@ -1,7 +1,7 @@
 """
-vLLM-based VLM Engine for multimodal inference.
+vLLM-based VL Engine for multimodal inference.
 
-This module provides a vLLM wrapper for Vision-Language Models,
+This module provides a vLLM wrapper for Vision-Language (VL) models,
 similar to the text-only vLLM engine but with multimodal support.
 """
 import vllm
@@ -11,9 +11,9 @@ import numpy as np
 from loguru import logger
 
 
-class VLMActor:
+class VLActor:
     """
-    vLLM Actor for Vision-Language Models.
+    vLLM Actor for Vision-Language (VL) models.
 
     Similar to LLMActor but with multimodal support.
     """
@@ -26,14 +26,14 @@ class VLMActor:
     ):
         """
         Args:
-            model: Path to VLM model
+            model: Path to VL model
             limit_mm_per_prompt: Multimodal limits (e.g., {"image": 1})
             **kwargs: Additional vLLM arguments
         """
         self.kwargs = kwargs
         self.limit_mm_per_prompt = limit_mm_per_prompt or {"image": 1}
 
-        logger.info(f"Initializing VLMActor with model: {model}")
+        logger.info(f"Initializing VLActor with model: {model}")
         logger.info(f"  Multimodal limits: {self.limit_mm_per_prompt}")
 
         self.llm = vllm.LLM(
@@ -96,7 +96,7 @@ class VLMActor:
         return responses
 
 
-def create_vllm_vlm_engine(
+def create_vllm_vl_engine(
     tensor_parallel_size: int,
     pretrain: str,
     max_model_len: int,
@@ -105,25 +105,25 @@ def create_vllm_vlm_engine(
     limit_mm_per_prompt: Optional[Dict[str, int]] = None,
 ):
     """
-    Create a vLLM engine for Vision-Language Models.
+    Create a vLLM engine for Vision-Language (VL) models.
 
     Args:
         tensor_parallel_size: Number of GPUs for tensor parallelism
-        pretrain: Path to pretrained VLM model
+        pretrain: Path to pretrained VL model
         max_model_len: Maximum sequence length
         gpu_memory_utilization: GPU memory utilization ratio
         vllm_enable_sleep: Whether to enable sleep mode
         limit_mm_per_prompt: Multimodal limits per prompt
 
     Returns:
-        VLMActor instance
+        VLActor instance
     """
     distributed_executor_backend = "external_launcher"
 
     if limit_mm_per_prompt is None:
         limit_mm_per_prompt = {"image": 1}
 
-    logger.info("Creating vLLM VLM engine:")
+    logger.info("Creating vLLM VL engine:")
     logger.info(f"  Model: {pretrain}")
     logger.info(f"  Tensor Parallel Size: {tensor_parallel_size}")
     logger.info(f"  Max Model Length: {max_model_len}")
@@ -131,7 +131,7 @@ def create_vllm_vlm_engine(
     logger.info(f"  Enable Sleep: {vllm_enable_sleep}")
     logger.info(f"  Multimodal Limits: {limit_mm_per_prompt}")
 
-    vllm_engine = VLMActor(
+    vllm_engine = VLActor(
         model=pretrain,
         worker_extension_cls="vllm_utils.worker.WorkerWrap",
         tensor_parallel_size=tensor_parallel_size,
@@ -147,6 +147,6 @@ def create_vllm_vlm_engine(
     if vllm_enable_sleep:
         vllm_engine.sleep()
 
-    logger.info("✓ vLLM VLM engine created successfully")
+    logger.info("✓ vLLM VL engine created successfully")
 
     return vllm_engine

@@ -1,7 +1,7 @@
 """
-VLM Configuration for PriorZero with Image Input
+VL Configuration for PriorZero with Image Input
 
-This module provides configuration for using Vision-Language Models
+This module provides configuration for using Vision-Language (VL) models
 to generate action priors for image-based environments (e.g., Atari).
 """
 from typing import Dict, Tuple, Optional
@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 
 # ==============================================================================
-# Game Descriptions for VLM Prompts
+# Game Descriptions for VL Prompts
 # ==============================================================================
 GAME_DESCRIPTIONS = {
     'PongNoFrameskip-v4': (
@@ -48,9 +48,9 @@ GAME_DESCRIPTIONS = {
 
 
 # ==============================================================================
-# VLM Model Configuration Presets
+# VL Model Configuration Presets
 # ==============================================================================
-VLM_MODEL_CONFIGS = {
+VL_MODEL_CONFIGS = {
     "Qwen2.5-VL-2b": {
         "model_name": "Qwen2.5-VL",
         "model_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-VL-2B-Instruct",
@@ -75,28 +75,28 @@ VLM_MODEL_CONFIGS = {
 }
 
 
-def get_available_vlm_models():
-    """Get list of available VLM model configurations"""
-    return list(VLM_MODEL_CONFIGS.keys())
+def get_available_vl_models():
+    """Get list of available VL model configurations"""
+    return list(VL_MODEL_CONFIGS.keys())
 
 
-def get_vlm_model_config(model_key: str) -> Dict:
-    """Get VLM model configuration by key"""
-    if model_key not in VLM_MODEL_CONFIGS:
-        available = ", ".join(get_available_vlm_models())
+def get_vl_model_config(model_key: str) -> Dict:
+    """Get VL model configuration by key"""
+    if model_key not in VL_MODEL_CONFIGS:
+        available = ", ".join(get_available_vl_models())
         raise ValueError(
-            f"Unknown VLM model key: {model_key}\n"
+            f"Unknown VL model key: {model_key}\n"
             f"Available models: {available}"
         )
-    return VLM_MODEL_CONFIGS[model_key]
+    return VL_MODEL_CONFIGS[model_key]
 
 
-def print_available_vlm_models():
-    """Print all available VLM model configurations"""
+def print_available_vl_models():
+    """Print all available VL model configurations"""
     print("\n" + "="*80)
-    print("Available VLM Model Configurations:")
+    print("Available VL Model Configurations:")
     print("="*80)
-    for key, config in VLM_MODEL_CONFIGS.items():
+    for key, config in VL_MODEL_CONFIGS.items():
         print(f"\n  {key}:")
         print(f"    Path: {config['model_path']}")
         print(f"    Tensor Parallel Size: {config['tensor_parallel_size']}")
@@ -106,13 +106,13 @@ def print_available_vlm_models():
 
 
 @dataclass
-class PriorZeroVLMConfig:
-    """Configuration for VLM-based PriorZero (image input)"""
+class PriorZeroVLConfig:
+    """Configuration for VL-based PriorZero (image input)"""
 
-    # VLM model settings
+    # VL model settings
     model_name_or_path: str = "Qwen2.5-VL-7b"
 
-    vlm_model_type: str = "qwen-vl"  # 'qwen-vl', 'llava', 'internvl'
+    vl_model_type: str = "qwen-vl"  # 'qwen-vl', 'llava', 'internvl'
 
     # Game description for prompts
     game_description: str = ""
@@ -122,7 +122,7 @@ class PriorZeroVLMConfig:
     enable_rft: bool = True
     rft_loss_weight: float = 1.0
 
-    # VLM inference settings
+    # VL inference settings
     temperature: float = 1.0
     max_new_tokens: int = 256  # Shorter than LLM since we just need action probs
     tensor_parallel_size: int = 1
@@ -144,7 +144,7 @@ class PriorZeroVLMConfig:
 
 
     # Prior generation settings
-    use_prior: bool = True  # Whether to use VLM prior
+    use_prior: bool = True  # Whether to use VL prior
     llm_prior_temperature: float = 1.0  # Temperature for prior distribution
 
     # Evaluation settings
@@ -200,8 +200,8 @@ class PriorZeroVLMConfig:
     kl_estimator: str = "k3"
 
     # Training schedule
-    train_vlm_after_wm_warm_step: int = int(1e2)
-    vlm_save_freq: int = 500
+    train_vl_after_wm_warm_step: int = int(1e2)
+    vl_save_freq: int = 500
     save_path: str = ""
 
     # Alternating training schedule (matches LLM config)
@@ -216,7 +216,7 @@ class PriorZeroVLMConfig:
     enable_world_model: bool = True
     enable_rft: bool = True
     max_rollout_staleness: int = 1
-    vlm_fixed: bool = False  # If True, VLM is frozen (inference only, no VLM training)
+    vl_fixed: bool = False  # If True, VL is frozen (inference only, no VL training)
 
     # Value normalization
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -240,31 +240,31 @@ class PriorZeroVLMConfig:
     )
 
 
-def get_priorzero_vlm_config(
+def get_priorzero_vl_config(
     env_id: str = 'PongNoFrameskip-v4',
     seed: int = 0,
     exp_name: str = None,
-    vlm_model_key: Optional[str] = None,
+    vl_model_key: Optional[str] = None,
     use_prior: bool = True,
     multi_gpu: bool = False,
     quick_test: bool = False,
-) -> Tuple[EasyDict, EasyDict, PriorZeroVLMConfig]:
+) -> Tuple[EasyDict, EasyDict, PriorZeroVLConfig]:
     """
-    Generate complete PriorZero configuration with VLM for image input.
+    Generate complete PriorZero configuration with VL for image input.
 
     Args:
         env_id: Atari environment ID
         seed: Random seed
         exp_name: Experiment name
-        vlm_model_key: VLM model key (e.g., 'qwen-vl-chat', 'llava-1.5-7b')
-        use_prior: Whether to use VLM prior
+        vl_model_key: VL model key (e.g., 'qwen-vl-chat', 'llava-1.5-7b')
+        use_prior: Whether to use VL prior
         multi_gpu: Whether to use multi-GPU training
         quick_test: Whether to use quick test configuration
 
     Returns:
         main_config: Main configuration dictionary
         create_config: Creation configuration
-        vlm_config: VLM configuration
+        vl_config: VL configuration
     """
     from zoo.atari.config.atari_env_action_space_map import atari_env_action_space_map
 
@@ -359,7 +359,7 @@ def get_priorzero_vlm_config(
                 num_layers=num_layers,
                 num_heads=8,
                 embed_dim=768,
-                obs_type='image',  # KEY: Image input with VLM prior
+                obs_type='image',  # KEY: Image input with VL prior
                 env_num=max(collector_env_num, evaluator_env_num),
                 num_simulations=num_simulations,
                 game_segment_length=game_segment_length,
@@ -428,7 +428,7 @@ def get_priorzero_vlm_config(
     main_config = EasyDict(dict(
         env=env_config,
         policy=policy_config,
-        exp_name=exp_name or f'data_priorzero_vlm/{env_id}_seed{seed}',
+        exp_name=exp_name or f'data_priorzero_vl/{env_id}_seed{seed}',
         seed=seed
     ))
 
@@ -464,50 +464,50 @@ def get_priorzero_vlm_config(
         ),
     ))
 
-    # VLM configuration
-    vlm_config = PriorZeroVLMConfig(use_prior=use_prior)
+    # VL configuration
+    vl_config = PriorZeroVLConfig(use_prior=use_prior)
 
     # Set game description
-    vlm_config.game_description = GAME_DESCRIPTIONS.get(env_id, "")
+    vl_config.game_description = GAME_DESCRIPTIONS.get(env_id, "")
 
-    # Auto-configure VLM model
+    # Auto-configure VL model
     if use_prior:
-        if vlm_model_key is None:
-            vlm_model_key = "qwen-vl-chat"  # Default VLM
-            print(f"[Config] Using default VLM model: {vlm_model_key}")
+        if vl_model_key is None:
+            vl_model_key = "qwen-vl-chat"  # Default VL
+            print(f"[Config] Using default VL model: {vl_model_key}")
 
-        vlm_model_config = get_vlm_model_config(vlm_model_key)
-        vlm_config.model_name_or_path = vlm_model_config["model_path"]
-        vlm_config.vlm_model_type = vlm_model_config["model_name"]
-        vlm_config.tensor_parallel_size = vlm_model_config["tensor_parallel_size"]
-        vlm_config.gpu_memory_utilization = vlm_model_config["gpu_memory_utilization"]
+        vl_model_config = get_vl_model_config(vl_model_key)
+        vl_config.model_name_or_path = vl_model_config["model_path"]
+        vl_config.vl_model_type = vl_model_config["model_name"]
+        vl_config.tensor_parallel_size = vl_model_config["tensor_parallel_size"]
+        vl_config.gpu_memory_utilization = vl_model_config["gpu_memory_utilization"]
 
-        print(f"[Config] VLM configuration applied:")
-        print(f"  - Model: {vlm_model_key}")
-        print(f"  - Path: {vlm_config.model_name_or_path}")
-        print(f"  - Tensor Parallel Size: {vlm_config.tensor_parallel_size}")
-        print(f"  - GPU Memory Utilization: {vlm_config.gpu_memory_utilization}")
+        print(f"[Config] VL configuration applied:")
+        print(f"  - Model: {vl_model_key}")
+        print(f"  - Path: {vl_config.model_name_or_path}")
+        print(f"  - Tensor Parallel Size: {vl_config.tensor_parallel_size}")
+        print(f"  - GPU Memory Utilization: {vl_config.gpu_memory_utilization}")
     else:
-        print(f"[Config] VLM prior disabled (use_prior=False)")
-        vlm_config = None
+        print(f"[Config] VL prior disabled (use_prior=False)")
+        vl_config = None
 
-    return main_config, create_config, vlm_config
+    return main_config, create_config, vl_config
 
 
 if __name__ == "__main__":
     # Test configuration generation
-    print("PriorZero VLM Configuration")
+    print("PriorZero VL Configuration")
     print("=" * 80)
 
     # List available models
-    print_available_vlm_models()
+    print_available_vl_models()
 
     # Generate test config
     print("\nGenerating test configuration...")
-    main_cfg, create_cfg, vlm_cfg = get_priorzero_vlm_config(
+    main_cfg, create_cfg, vl_cfg = get_priorzero_vl_config(
         env_id='PongNoFrameskip-v4',
         seed=0,
-        vlm_model_key='qwen-vl-chat',
+        vl_model_key='qwen-vl-chat',
         use_prior=True,
         quick_test=True,
     )
@@ -517,6 +517,6 @@ if __name__ == "__main__":
     print(f"  - Environment: {main_cfg.env.env_id}")
     print(f"  - Observation shape: {main_cfg.policy.model.observation_shape}")
     print(f"  - obs_type: {main_cfg.policy.model.world_model_cfg.obs_type}")
-    if vlm_cfg:
-        print(f"  - VLM model: {vlm_cfg.model_name_or_path}")
-        print(f"  - Use prior: {vlm_cfg.use_prior}")
+    if vl_cfg:
+        print(f"  - VL model: {vl_cfg.model_name_or_path}")
+        print(f"  - Use prior: {vl_cfg.use_prior}")

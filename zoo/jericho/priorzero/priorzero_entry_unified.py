@@ -1,8 +1,8 @@
 """
-Complete PriorZero Entry with VLM Support
+Complete PriorZero Entry with VL (Vision-Language) Support
 
 This is the COMPLETE implementation with full training loop.
-Supports both text (LLM) and image (VLM) inputs.
+Supports both text (LLM) and image (VL) inputs.
 """
 import sys
 import os
@@ -14,6 +14,18 @@ project_root = current_file_path.parents[3]
 if str(project_root) not in sys.path:
     print(f"[SYSTEM] Inserting project root to sys.path: {project_root}")
     sys.path.insert(0, str(project_root))
+
+# Add src/ directory to path so that modules like strategy, models, vllm_utils, utils can be found
+src_dir = current_file_path.parent / 'src'
+if str(src_dir) not in sys.path:
+    print(f"[SYSTEM] Inserting src dir to sys.path: {src_dir}")
+    sys.path.insert(0, str(src_dir))
+
+# Add priorzero/ directory itself so sibling modules (prior_generator, vl_config, etc.) can be found
+priorzero_dir = str(current_file_path.parent)
+if priorzero_dir not in sys.path:
+    print(f"[SYSTEM] Inserting priorzero dir to sys.path: {priorzero_dir}")
+    sys.path.insert(0, priorzero_dir)
 
 import argparse
 from functools import partial
@@ -43,7 +55,7 @@ def all_gather_cmd(world_size, obj) -> List:
 
 
 def prepare_common_components(rank, cfg, create_cfg, seed):
-    """Prepare components common to both LLM and VLM."""
+    """Prepare components common to both LLM and VL."""
     cfg = compile_config(cfg, seed=seed, auto=True, create_cfg=create_cfg)
 
     # Create environments
@@ -191,46 +203,46 @@ def prepare_llm_components(rank, cfg, llm_cfg, strategy, collector_env, evaluato
     }
 
 
-def prepare_vlm_components(rank, cfg, vlm_cfg, strategy, collector_env, evaluator_env, policy, tb_logger, seed):
-    """Prepare VLM-specific components for image input."""
+def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_env, policy, tb_logger, seed):
+    """Prepare VL-specific components for image input."""
     from utils import Profiler, dump_dataclass_cfg_py
     from models.actor import PolicyModel, ReferenceModel
-    from vlm_engine import create_vlm_engine
+    from vl_engine import create_vl_engine
     from priorzero_datafactory_unified import UnifiedDataProcessor
-    from priorzero_trainer import PriorZeroLLMTrainer  # Can reuse for VLM
+    from priorzero_trainer import PriorZeroLLMTrainer  # Can reuse for VL
     from priorzero_collector_unified import PriorZeroCollector
     from priorzero_evaluator import PriorZeroEvaluator
-    from prior_generator import VLMPriorGenerator
+    from prior_generator import VLPriorGenerator
 
     prof = Profiler(log_interval=10, stats_file=f'./{cfg.exp_name}/log/profiler.txt', enable_profile=False)
 
     if rank == 0:
-        dump_dataclass_cfg_py(vlm_cfg, path=f"{cfg.exp_name}/vlm_cfg.py")
-        vlm_cfg.save_path = f'./{cfg.exp_name}/vlm_ckpt/'
+        dump_dataclass_cfg_py(vl_cfg, path=f"{cfg.exp_name}/vl_cfg.py")
+        vl_cfg.save_path = f'./{cfg.exp_name}/vl_ckpt/'
 
-    logger.info(f"[Rank {rank}] Initializing VLM components...")
+    logger.info(f"[Rank {rank}] Initializing VL components...")
     set_pkg_seed(seed + rank, use_cuda=True)
 
     # Reference model
-    ref_model = ReferenceModel(strategy=strategy, pretrain=vlm_cfg.model_name_or_path) if vlm_cfg.rft_kl_coef > 0 else None
+    ref_model = ReferenceModel(strategy=strategy, pretrain=vl_cfg.model_name_or_path) if vl_cfg.rft_kl_coef > 0 else None
 
-    # VLM engine
-    vlm_engine = create_vlm_engine(
-        model_name=vlm_cfg.vlm_model_type,
-        model_path=vlm_cfg.model_name_or_path,
-        tensor_parallel_size=vlm_cfg.tensor_parallel_size,
-        gpu_memory_utilization=vlm_cfg.gpu_memory_utilization,
+    # VL engine
+    vl_engine = create_vl_engine(
+        model_name=vl_cfg.vl_model_type,
+        model_path=vl_cfg.model_name_or_path,
+        tensor_parallel_size=vl_cfg.tensor_parallel_size,
+        gpu_memory_utilization=vl_cfg.gpu_memory_utilization,
     )
-    logger.info(f'[Rank {rank}] VLM engine created: {vlm_cfg.vlm_model_type}')
+    logger.info(f'[Rank {rank}] VL engine created: {vl_cfg.vl_model_type}')
 
     # Data processor
     world_size = getattr(strategy, "world_size", 1)
     data_processor = UnifiedDataProcessor(
         rank=rank,
         world_size=world_size,
-        vllm_engine=vlm_engine,
+        vllm_engine=vl_engine,
         strategy=strategy,
-        model_path=vlm_cfg.model_name_or_path,
+        model_path=vl_cfg.model_name_or_path,
         exp_name=cfg.exp_name if rank == 0 else None,
         obs_type='image',
     )
@@ -238,37 +250,37 @@ def prepare_vlm_components(rank, cfg, vlm_cfg, strategy, collector_env, evaluato
     # Policy model
     policy_model = PolicyModel(
         strategy=strategy,
-        pretrain=vlm_cfg.model_name_or_path,
-        vllm_engine=vlm_engine,
-        max_steps=vlm_cfg.max_steps
+        pretrain=vl_cfg.model_name_or_path,
+        vllm_engine=vl_engine,
+        max_steps=vl_cfg.max_steps
     )
 
     # Trainer
     trainer = PriorZeroLLMTrainer(
-        cfg=vlm_cfg,
-        pretrain=vlm_cfg.model_name_or_path,
+        cfg=vl_cfg,
+        pretrain=vl_cfg.model_name_or_path,
         strategy=strategy,
-        vllm_engine=vlm_engine,
+        vllm_engine=vl_engine,
         policy_model=policy_model,
         reference_model=ref_model,
         exp_name=cfg.exp_name if rank == 0 else None,
         tb_logger=tb_logger if rank == 0 else None,
-        llm_save_freq=vlm_cfg.vlm_save_freq
+        llm_save_freq=vl_cfg.vl_save_freq
     )
 
     # Prior generator
-    prior_generator = VLMPriorGenerator(
-        vlm_engine=vlm_engine,
-        model_name=vlm_cfg.model_name_or_path,
-        prompt_template=vlm_cfg.prompt_template,
-        game_description=getattr(vlm_cfg, 'game_description', ''),
+    prior_generator = VLPriorGenerator(
+        vl_engine=vl_engine,
+        model_name=vl_cfg.model_name_or_path,
+        prompt_template=vl_cfg.prompt_template,
+        game_description=getattr(vl_cfg, 'game_description', ''),
     )
 
     # Collector
     collector = PriorZeroCollector(
         env=collector_env,
         policy=policy.collect_mode,
-        llm_config=vlm_cfg,
+        llm_config=vl_cfg,
         tb_logger=tb_logger,
         exp_name=cfg.exp_name,
         policy_config=cfg.policy,
@@ -289,15 +301,15 @@ def prepare_vlm_components(rank, cfg, vlm_cfg, strategy, collector_env, evaluato
         tb_logger=tb_logger,
         exp_name=cfg.exp_name,
         policy_config=cfg.policy,
-        llm_config=vlm_cfg,
+        llm_config=vl_cfg,
         data_processor=data_processor,
     )
 
-    logger.info(f"[Rank {rank}] ✓ VLM components initialized")
+    logger.info(f"[Rank {rank}] ✓ VL components initialized")
 
     return {
         'prior_generator': prior_generator,
-        'vlm_engine': vlm_engine,
+        'vl_engine': vl_engine,
         'policy_model': policy_model,
         'ref_model': ref_model,
         'trainer': trainer,
@@ -311,7 +323,7 @@ def prepare_vlm_components(rank, cfg, vlm_cfg, strategy, collector_env, evaluato
 def train_unified(
     cfg: dict,
     create_cfg: dict,
-    prior_cfg,  # LLM or VLM config
+    prior_cfg,  # LLM or VL config
     seed: int = 0,
     max_train_iter: int = int(1e6),
     max_env_step: Optional[int] = int(1e10),
@@ -319,12 +331,12 @@ def train_unified(
     is_text_input: bool = True,
 ):
     """
-    Unified training function supporting both LLM and VLM.
+    Unified training function supporting both LLM and VL.
 
     Args:
         cfg: Main configuration
         create_cfg: Creation configuration
-        prior_cfg: LLM or VLM configuration
+        prior_cfg: LLM or VL configuration
         seed: Random seed
         max_train_iter: Maximum training iterations
         max_env_step: Maximum environment steps
@@ -353,13 +365,13 @@ def train_unified(
         )
         engine_name = "vLLM"
     else:
-        components = prepare_vlm_components(
+        components = prepare_vl_components(
             rank, cfg, prior_cfg, strategy, collector_env, evaluator_env, policy, tb_logger, seed
         )
-        engine_name = "VLM"
+        engine_name = "VL"
 
     # Extract components
-    prior_engine = components['vllm_engine'] if is_text_input else components['vlm_engine']
+    prior_engine = components['vllm_engine'] if is_text_input else components['vl_engine']
     policy_model = components['policy_model']
     trainer = components['trainer']
     data_processor = components['data_processor']
@@ -378,7 +390,7 @@ def train_unified(
     train_schedule = prior_cfg.train_schedule
     train_alternate = train_schedule["alternate"]
     enable_world_model = prior_cfg.enable_world_model
-    enable_rft = prior_cfg.enable_rft and not getattr(prior_cfg, 'vlm_fixed', False)
+    enable_rft = prior_cfg.enable_rft and not getattr(prior_cfg, 'vl_fixed', False)
 
     if train_alternate:
         current_phase = train_schedule["start_phase"]
@@ -428,12 +440,12 @@ def train_unified(
                 llm_train_iter=policy_model.train_iter
             )
         else:
-            # VLM: use prior_generator's log method
+            # VL: use prior_generator's log method
             prior_generator = components.get('prior_generator')
-            if prior_generator and hasattr(prior_generator, 'get_vlm_output_log'):
-                prior_generator.get_vlm_output_log(
+            if prior_generator and hasattr(prior_generator, 'get_vl_output_log'):
+                prior_generator.get_vl_output_log(
                     wm_train_iter=learner.train_iter,
-                    vlm_train_iter=policy_model.train_iter
+                    vl_train_iter=policy_model.train_iter
                 )
 
         # Sleep engine
@@ -495,16 +507,16 @@ def train_unified(
             if tb_logger is not None:
                 tb_logger.add_scalar('train/wm_train_iter', learner.train_iter, collector.envstep)
 
-            # Phase switching: WM -> LLM/VLM
+            # Phase switching: WM -> LLM/VL
             if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
                 current_phase = "llm"
                 last_wm_train_iter = learner.train_iter
                 replay_buffer.mark_latest_transitions_consumed()
-                logger.info(f"[WM Training][Rank {rank}] Switching to {'VLM' if not is_text_input else 'LLM'} training phase at wm iter: {learner.train_iter}")
+                logger.info(f"[WM Training][Rank {rank}] Switching to {'VL' if not is_text_input else 'LLM'} training phase at wm iter: {learner.train_iter}")
                 continue
 
         # =====================================================================
-        # LLM/VLM Training (gated by schedule)
+        # LLM/VL Training (gated by schedule)
         # =====================================================================
         if enable_rft and (not train_alternate or current_phase == "llm"):
             new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
@@ -544,7 +556,7 @@ def train_unified(
 
                 torch_dist_barrier_and_cuda_sync()
 
-                # Phase switching: LLM/VLM -> WM
+                # Phase switching: LLM/VL -> WM
                 if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
                     current_phase = "wm"
                     last_llm_train_iter = trainer.global_step
@@ -557,7 +569,7 @@ def train_unified(
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='PriorZero with VLM Support')
+    parser = argparse.ArgumentParser(description='PriorZero with VL Support')
 
     # Common arguments
     parser.add_argument('--input_type', type=str, required=True, choices=['text', 'image'])
@@ -572,13 +584,13 @@ def main():
     parser.add_argument('--use_cot', action='store_true', default=True)
 
     # Image-specific
-    parser.add_argument('--vlm_model', type=str, default='Qwen2.5-VL-7b')
+    parser.add_argument('--vl_model', type=str, default='Qwen2.5-VL-7b')
     parser.add_argument('--use_prior', action='store_true', default=True)
 
     args = parser.parse_args()
 
     print(f"\n{'='*80}")
-    print(f"PriorZero Training with {'LLM' if args.input_type == 'text' else 'VLM'} Prior")
+    print(f"PriorZero Training with {'LLM' if args.input_type == 'text' else 'VL'} Prior")
     print(f"{'='*80}")
     print(f"Input Type: {args.input_type}")
     print(f"Environment: {args.env_id}")
@@ -612,19 +624,19 @@ def main():
         )
 
     else:
-        from vlm_config import get_priorzero_vlm_config
+        from vl_config import get_priorzero_vl_config
 
-        main_cfg, create_cfg, vlm_cfg = get_priorzero_vlm_config(
+        main_cfg, create_cfg, vl_cfg = get_priorzero_vl_config(
             args.env_id, args.seed,
             exp_name=f'data_priorzero_complete/image_{args.env_id[:-14]}_seed{args.seed}',
-            vlm_model_key=args.vlm_model,
+            vl_model_key=args.vl_model,
             use_prior=args.use_prior,
             multi_gpu=int(os.environ.get('WORLD_SIZE', '1')) > 1,
             quick_test=args.quick_test,
         )
 
         train_unified(
-            main_cfg, create_cfg, vlm_cfg,
+            main_cfg, create_cfg, vl_cfg,
             seed=args.seed,
             max_train_iter=args.max_iter,
             enable_profile=args.enable_profile,
