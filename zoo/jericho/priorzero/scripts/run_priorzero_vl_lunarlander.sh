@@ -6,13 +6,13 @@
 #
 # Examples:
 #   bash run_priorzero_vl_lunarlander.sh 4 Qwen2.5-VL-7b 0
-#   bash run_priorzero_vl_lunarlander.sh 2 Qwen2.5-VL-2b 42
-#   bash run_priorzero_vl_lunarlander.sh 1 Qwen2.5-VL-2b 0 --quick_test
+#   bash run_priorzero_vl_lunarlander.sh 2 Qwen3-VL-2b 42
+#   bash run_priorzero_vl_lunarlander.sh 1 Qwen3-VL-2b 0 --quick_test
 
 set -euo pipefail
 
 NUM_GPUS=${1:-4}
-VL_MODEL=${2:-"Qwen2.5-VL-7b"}
+VL_MODEL=${2:-"Qwen3-VL-2b"}
 SEED=${3:-0}
 EXTRA_ARGS="${@:4}"
 
@@ -41,3 +41,4 @@ torchrun \
     --vl_model "${VL_MODEL}" \
     --seed "${SEED}" \
     ${EXTRA_ARGS}
+    | tee "/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/priorzero/logs/lunarlander.log"

@@ -137,15 +137,33 @@ class PriorZeroVLConfig:
     vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行 (Fixed: 1.5B model should use 1 GPU)
 
     vllm_enable_sleep: bool = True # 是否可以休眠
+    enable_vllm_is_correction: bool = False
+    vllm_is_truncated_threshold: Tuple[float, float] = (0.5, 5.0)
     top_p: float = 1.0
     seed: int = 0
     reduction: str = "mean"
-    
+
+    # User prompt settings
+    user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "history_with_reward": True,
+        "observation_with_valid_actions": False,
+    }))
+
 
 
     # Prior generation settings
     use_prior: bool = True  # Whether to use VL prior
     llm_prior_temperature: float = 1.0  # Temperature for prior distribution
+
+    # MCTS root logits configuration
+    mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "mode": "llm_plus_wm_logits",
+        "plus_method": "fixed",
+        "wm_weight": 0.5,
+        "llm_max_weight": 0.7,
+        "llm_min_weight": 0.3,
+        "max_envsteps": 1e5,
+    }))
 
     # Evaluation settings
     eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -171,6 +189,25 @@ class PriorZeroVLConfig:
 
     zero_stage: int = 2
     gradient_checkpointing: bool = False
+    gradient_checkpointing_use_reentrant: bool = False
+
+    # Training mode (full or lora)
+    train_mode_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "mode": "full",  # "full" or "lora"
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "lora_bias": "none",
+        "lora_target_modules": (
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ),
+    }))
     max_norm: float = 1.0
     ds_tensor_parallel_size: int = 1
     ring_attn_size: int = 1
@@ -448,15 +485,15 @@ def get_priorzero_vl_config(
         env_manager=dict(type='subprocess'),
         policy=dict(
             type='priorzero',
-            import_names=['zoo.jericho.priorzero.priorzero_policy'],
+            import_names=['zoo.jericho.priorzero.src.priorzero_policy'],
         ),
         collector=dict(
             type='priorzero_segment',
-            import_names=['zoo.jericho.priorzero.priorzero_collector'],
+            import_names=['zoo.jericho.priorzero.priorzero_collector_unified'],
         ),
         evaluator=dict(
             type='priorzero',
-            import_names=['zoo.jericho.priorzero.priorzero_evaluator'],
+            import_names=['zoo.jericho.priorzero.src.priorzero_evaluator'],
         ),
         replay_buffer=dict(
             type='game_buffer_muzero',

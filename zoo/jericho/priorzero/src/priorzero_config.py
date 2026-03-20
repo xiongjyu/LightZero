@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 # ============================================================================
 MODEL_CONFIGS = {
     "qwen2.5-0.5b": {
-        "model_name_or_path": "/mnt/afs/wanzunian/niuyazhe/xiongjyu/models/Qwen2.5-0.5B-Instruct",
+        "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-0.5B-Instruct",
         "vllm_tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.2,
         "description": "Qwen2.5-0.5B-Instruct (smallest, fastest)",
@@ -30,7 +30,6 @@ MODEL_CONFIGS = {
     "qwen2.5-7b": {
         # "model_name_or_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-7B-Instruct",
         # "vllm_tensor_parallel_size": 2,
-
         "model_name_or_path": "/mnt/shared-storage-user/puyuan/xiongjyu/models/Qwen2.5-7B-Instruct",
         "vllm_tensor_parallel_size": 1,
 

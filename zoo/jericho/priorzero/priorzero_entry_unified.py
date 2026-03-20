@@ -379,6 +379,9 @@ def train_unified(
     evaluator = components['evaluator']
     prof = components['prof']
 
+    # Set llm_cfg on policy so _forward_eval/_forward_collect can access it
+    policy.llm_cfg = prior_cfg
+
     torch_dist_barrier_and_cuda_sync()
     learner.call_hook('before_run')
 
@@ -415,7 +418,6 @@ def train_unified(
             if prior_cfg.vllm_enable_sleep and prior_engine is not None:
                 prior_engine.wake_up()
             stop, reward = evaluator.eval(
-                save_ckpt_fn=learner.save_checkpoint,
                 train_iter=learner.train_iter,
                 envstep=collector.envstep
             )

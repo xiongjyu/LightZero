@@ -119,6 +119,7 @@ class LunarLanderImageEnv(LunarLanderEnv):
         self._eval_episode_return += rew
         if done:
             info['eval_episode_return'] = self._eval_episode_return
+            info['score'] = self._eval_episode_return
             if self._save_replay_gif:
                 import os
                 from datetime import datetime
