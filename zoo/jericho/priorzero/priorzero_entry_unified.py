@@ -232,6 +232,7 @@ def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_
         model_path=vl_cfg.model_name_or_path,
         tensor_parallel_size=vl_cfg.tensor_parallel_size,
         gpu_memory_utilization=vl_cfg.gpu_memory_utilization,
+        max_model_len=vl_cfg.prompt_max_len + vl_cfg.generate_max_len,
     )
     logger.info(f'[Rank {rank}] VL engine created: {vl_cfg.vl_model_type}')
 
@@ -303,6 +304,9 @@ def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_
         policy_config=cfg.policy,
         llm_config=vl_cfg,
         data_processor=data_processor,
+        prior_generator=prior_generator,
+        obs_type='image',
+        env_id=cfg.env.env_id,
     )
 
     logger.info(f"[Rank {rank}] ✓ VL components initialized")

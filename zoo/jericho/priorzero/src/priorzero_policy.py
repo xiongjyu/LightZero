@@ -304,7 +304,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         current_envstep = kwargs.get('current_env_step', 0)
         mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
         
-        if llm_prior_logprob is None or not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
+        if llm_prior_logprob is None or all(x is None for x in llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_collect(
                 data, action_mask, temperature, to_play, epsilon,
@@ -449,7 +449,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         valid_actions_list = kwargs.get('valid_actions_list', None)
         mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
         
-        if llm_prior_logprob is None or not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
+        if llm_prior_logprob is None or all(x is None for x in llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_eval(
                 data, action_mask, to_play=to_play, ready_env_id=ready_env_id, timestep=timestep
@@ -463,14 +463,24 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         
         policy_priors = []
         for env_id in range(active_eval_env_num):
+            prior_data = llm_prior_logprob[env_id]
             actions = valid_actions_list[env_id]
-            prior = []
-            if len(actions) == 0:
-                print("When valid actions is None, the action must be 'go'")
-                prior.append(llm_prior_logprob[env_id]['go'])
+
+            if isinstance(prior_data, np.ndarray):
+                # Image mode: numpy array with log-probs for each action index
+                prior = prior_data.tolist()
+            elif isinstance(prior_data, dict):
+                # Text mode: dict mapping action names to log-probs
+                prior = []
+                if len(actions) == 0:
+                    print("When valid actions is None, the action must be 'go'")
+                    prior.append(prior_data['go'])
+                else:
+                    for action in actions:
+                        prior.append(prior_data[action])
             else:
-                for action in actions:
-                    prior.append(llm_prior_logprob[env_id][action])
+                # Fallback: uniform
+                prior = [0.0] * len(actions) if len(actions) > 0 else [0.0]
             policy_priors.append(prior)
         policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
         

@@ -39,10 +39,9 @@ GAME_DESCRIPTIONS = {
         "Clear all dots to advance to the next level."
     ),
     'LunarLander-v2': (
-        "This is Lunar Lander. You control a spacecraft descending toward a landing pad. "
-        "Use the MAIN ENGINE to slow descent, and LEFT/RIGHT engines to adjust position. "
-        "Land gently on the pad between the flags. Fuel is limited. "
-        "Reward: +100-140 for landing on pad, -100 for crash, -0.3 per engine fire."
+        "This is Lunar Lander. You control a spacecraft descending toward a landing pad (between two flags). "
+        "NOOP=do nothing, LEFT_ENGINE=push right, MAIN_ENGINE=slow descent, RIGHT_ENGINE=push left. "
+        "Goal: land gently on the pad. Firing engines costs fuel (-0.3/fire). Crash=-100, safe landing=+100~140."
     ),
 }
 
@@ -124,7 +123,7 @@ class PriorZeroVLConfig:
 
     # VL inference settings
     temperature: float = 1.0
-    max_new_tokens: int = 256  # Shorter than LLM since we just need action probs
+    max_new_tokens: int = 128  # CoT reasoning + action selection, no need for 256
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.3
 
@@ -175,8 +174,8 @@ class PriorZeroVLConfig:
 
     attn_implementation: str = "flash_attention_2" 
     use_cot: bool = True
-    prompt_max_len: int = 8192
-    generate_max_len: int = 512
+    prompt_max_len: int = 4096  # Image + prompt tokens; 4096 is enough for image VL
+    generate_max_len: int = 128  # CoT + action output
     bf16: bool = True
 
     history_length: int = 3  # Number of recent steps to include in context

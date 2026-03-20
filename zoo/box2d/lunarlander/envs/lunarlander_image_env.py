@@ -97,8 +97,10 @@ class LunarLanderImageEnv(LunarLanderEnv):
     def step(self, action: np.ndarray):
         from ding.envs import BaseEnvTimestep
 
-        if action.shape == (1,):
+        if isinstance(action, np.ndarray) and action.shape == (1,):
             action = action.item()
+        elif not isinstance(action, np.ndarray):
+            action = int(action)
         if self._save_replay_gif:
             self._frames.append(self._env.render())
 

@@ -206,18 +206,16 @@ class VLPriorGenerator(PriorGenerator):
         self.batch_call_count = 0
 
     def _default_prompt_template(self) -> str:
-        """Default prompt template for Atari games with Qwen-VL format."""
+        """Default prompt template for VL, mirrors LLM format with vision tokens."""
         if self.use_cot:
             return (
                 "<|vision_start|><|image_pad|><|vision_end|>"
-                "You are an expert Atari game player. "
-                "Based on the current game screen shown in the image above, "
-                "analyze the situation and choose the best action.\n\n"
+                "You are an expert player in an image-based game. "
+                "Your goal is to maximize the score by choosing the optimal next action.\n\n"
                 "Available actions:\n{action_list}\n\n"
                 "OUTPUT FORMAT:\n"
                 "You MUST produce exactly TWO parts in the following order:\n"
-                "1. Reasoning: Analyze the current game state, positions of objects, "
-                "available actions, and your strategy. Do NOT reveal the final choice here.\n"
+                "1. Reasoning: Analyze the current situation, available actions, constraints, and uncertainties. Do NOT reveal the final choice here.\n"
                 "2. Action: The final chosen action.\n\n"
                 "Strict Format Example:\n"
                 "Reasoning: <detailed_analysis>\n"
@@ -226,10 +224,9 @@ class VLPriorGenerator(PriorGenerator):
         else:
             return (
                 "<|vision_start|><|image_pad|><|vision_end|>"
-                "You are an expert Atari game player. "
-                "Based on the current game screen shown in the image above, "
-                "choose the best action from the following options:\n"
-                "{action_list}\n\n"
+                "You are an expert player in an image-based game. "
+                "Your goal is to maximize the score by choosing the optimal next action.\n"
+                "Available actions:\n{action_list}\n\n"
                 "Output exactly one line starting with 'Action:'.\n"
                 "Example:\n"
                 "Action: <your_action_here>"
@@ -368,11 +365,11 @@ class VLPriorGenerator(PriorGenerator):
 
     def get_system_prompt(self) -> str:
         """
-        System prompt for VL (similar to LLM version).
-        Defines role, goal, and output protocol.
+        System prompt for VL — mirrors LLM's get_system_prompt(),
+        only replacing "text-based adventure game" with image-based context.
         """
         parts = [
-            "You are an expert Atari game player. Your goal is to maximize the score by choosing the optimal next action.",
+            "You are an expert player in an image-based game. Your goal is to maximize the score by choosing the optimal next action.",
             "Please analyze the game screen and history to decide the single best next action.",
             "OUTPUT FORMAT:",
         ]
@@ -380,7 +377,7 @@ class VLPriorGenerator(PriorGenerator):
         if self.use_cot:
             parts.append(
                 "You MUST produce exactly TWO parts in the following order:\n"
-                "1. Reasoning: Analyze the current game state, positions of objects, available actions, and your strategy. Do NOT reveal the final choice here.\n"
+                "1. Reasoning: Analyze the current situation, available actions, constraints, and uncertainties. Do NOT reveal the final choice here.\n"
                 "2. Action: The final chosen action.\n"
                 "Strict Format Example:\n"
                 "Reasoning: <detailed_analysis>\n"
@@ -400,40 +397,28 @@ class VLPriorGenerator(PriorGenerator):
         history: Optional[List[Tuple[str, str, float]]] = None
     ) -> str:
         """
-        User prompt for VL: inject history and trigger output.
-
-        Args:
-            action_candidates: List of valid action names
-            history: Optional history of (obs, action, reward) tuples
-
-        Returns:
-            Formatted user prompt
+        User prompt for VL — mirrors LLM's get_user_prompt() structure,
+        replacing text observation with image vision tokens.
         """
         prompt_parts = []
 
-        # Add vision tokens at the start
-        prompt_parts.append("<|vision_start|><|image_pad|><|vision_end|>")
-
-        # Add game description if available
-        if self.game_description:
-            prompt_parts.append(f"\n=== GAME DESCRIPTION ===")
-            prompt_parts.append(self.game_description)
-            prompt_parts.append("")
-
         if history and len(history) > 0:
-            prompt_parts.append("\n=== GAME HISTORY ===")
-            for i, (obs, action, reward) in enumerate(history[-3:], start=1):
+            prompt_parts.append("=== GAME HISTORY ===")
+            for i, (obs, action, reward) in enumerate(history, start=1):
                 prompt_parts.append(f"Step {i}:")
+                # For image obs, skip printing the observation itself
                 prompt_parts.append(f"Action: {action}")
                 prompt_parts.append(f"Reward: {reward}")
-            prompt_parts.append("")  # Empty line separator
+            prompt_parts.append("")  # empty line separator
 
-        prompt_parts.append("=== CURRENT GAME SCREEN ===")
-        prompt_parts.append("(See image above)")
+        prompt_parts.append("=== CURRENT OBSERVATION ===")
+        prompt_parts.append("<|vision_start|><|image_pad|><|vision_end|>")
+        if self.game_description:
+            prompt_parts.append(self.game_description)
 
-        prompt_parts.append("\n=== AVAILABLE ACTIONS ===")
-        for action in action_candidates:
-            prompt_parts.append(f"- {action}")
+        if action_candidates and len(action_candidates) > 0:
+            actions_str = ", ".join([f"'{act}'" for act in action_candidates])
+            prompt_parts.append(f"\n[Valid Actions]\nYou can choose from the following actions: {actions_str}")
 
         prompt_parts.append("\n=== INSTRUCTION ===")
         if self.use_cot:
@@ -447,7 +432,6 @@ class VLPriorGenerator(PriorGenerator):
                 "Decide on the best next move and output it in the following format:\n"
                 "Action: <your_action_here>"
             )
-
         return "\n".join(prompt_parts)
 
     def _parse_vl_output_with_cot(
@@ -535,9 +519,10 @@ class VLPriorGenerator(PriorGenerator):
             # If chosen action not in candidates, uniform distribution
             logits = np.zeros(num_actions)
 
-        # Apply temperature and convert to log probabilities
+        # Apply temperature and convert to log probabilities (numerically stable)
         logits = logits / temperature
-        log_probs = logits - np.log(np.sum(np.exp(logits)))
+        max_logit = np.max(logits)
+        log_probs = logits - max_logit - np.log(np.sum(np.exp(logits - max_logit)) + 1e-10)
 
         return log_probs
 
@@ -672,7 +657,7 @@ class VLPriorGenerator(PriorGenerator):
         else:
             # Legacy: parse as probability distribution
             action_probs = self._parse_vl_output(raw_output, action_candidates)
-            action_logits = np.log(action_probs + 1e-10) * temperature
+            action_logits = np.log(action_probs + 1e-10) / max(temperature, 1e-8)
 
             return {
                 'action_probs': action_probs,
@@ -805,7 +790,7 @@ class VLPriorGenerator(PriorGenerator):
             else:
                 # Legacy: probability distribution
                 action_probs = self._parse_vl_output(raw_output, action_candidates)
-                action_logits = np.log(action_probs + 1e-10) * temperature
+                action_logits = np.log(action_probs + 1e-10) / max(temperature, 1e-8)
 
                 results.append({
                     'action_probs': action_probs,
