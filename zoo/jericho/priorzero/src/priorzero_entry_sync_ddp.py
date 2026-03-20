@@ -202,56 +202,46 @@ def train_priorzero(
         last_llm_train_iter = 0
     
     while True:
-        cmd = 0 # 0 表示当前循环contiune, 1 表示继续，2 表示break
-        priorzero_batch = None
+        if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
+            break
+        
+        # 1.评估阶段
         if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
-            logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
-            
+            logger.info(f"[Evaluator][Rank {rank}: Iter {learner.train_iter}] Evaluating...")
             if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                 vllm_engine.wake_up()
             evaluator.eval(train_iter=learner.train_iter, envstep=collector.envstep)
             if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                 vllm_engine.sleep()
-                    
+        
+        # 2.数据收集阶段         
         if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
-            vllm_engine.wake_up()
-                
+            vllm_engine.wake_up()      
+            
         new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
         data_processor.get_llm_output_log(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter)
         
         if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
             vllm_engine.sleep()
         
-        torch_dist_barrier_and_cuda_sync()
-        update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=world_size)                
-        
         replay_buffer.push_game_segments(new_data)
         replay_buffer.remove_oldest_data_to_fit()
-        
         num_of_transitions = replay_buffer.get_num_of_transitions() 
-        new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
-        logger.info(
-            f"[Data Collection] Rank {rank} | "
-            f"Total transitions: {num_of_transitions} | "
-            f"New transitions: {new_num_of_transitions}"
-        )
-        if not (num_of_transitions > batch_size):
-            logger.warning(
-                f'  ⚠ Data in replay_buffer is not sufficient: '
-                f'batch_size: {batch_size}, replay_buffer: {replay_buffer}. Continue to collect...'
-            )
-            cmd = 0
-        else:
-            cmd = 1
-            
-        if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
-            continue
         
+        torch_dist_barrier_and_cuda_sync()   
+              
+        # 3.world model训练阶段
         if llm_cfg.enable_world_model and (not train_alternate or (train_alternate and current_phase == "wm")):
-            logger.info(
-                f"[World Model Training] Rank {rank} | Iter {learner.train_iter} | "
-                f"Updates: {update_per_collect}"
-            )
+            if not (num_of_transitions > batch_size):
+                logger.warning(f'[WM Training] Data in replay_buffer is not sufficient: batch_size: {batch_size}, replay_buffer: {replay_buffer}. Continue to collect...')
+                cmd = 0
+            else:
+                cmd = 1
+            if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
+                continue
+            
+            update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=world_size)
+            logger.info(f"[WM Training] Rank {rank} | Iter {learner.train_iter} | Updates: {update_per_collect}")
             
             for i in range(update_per_collect):
                 with prof.block("train_world_model", rank=rank):
@@ -266,41 +256,32 @@ def train_priorzero(
                 current_phase = "llm"
                 last_wm_train_iter = learner.train_iter
                 replay_buffer.mark_latest_transitions_consumed()
-                print(f"[Rank {rank}] Switching to LLM training phase at wm iter: {learner.train_iter}")
+                print(f"[WM Training][Rank {rank}] Switching to LLM training phase at wm iter: {learner.train_iter}")
                 continue
-
+        
+        # 4. llm 训练阶段
         if llm_cfg.enable_rft and (not train_alternate or (train_alternate and current_phase == "llm")):
-            cmd = 1
-        else:
-            cmd = 0
-
-        if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
-            cmd = 2
+            priorzero_batch = None
+            new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
+            logger.info(f"[LLM Training] Rank {rank} | Total transitions: {num_of_transitions} | New transitions: {new_num_of_transitions}")
             
-        all_cmd = all_gather_cmd(world_size=world_size, obj=cmd)
-        if max(all_cmd) == 2:
-            break
-        elif min(all_cmd) == 1:
             with prof.block("fetch_latest_batch", rank=rank):
                 priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
                 
             with prof.block("train_llm", rank=rank):
-                sample_count = len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 0
-                logger.info(f"[LLM Training] Rank {rank} | Samples: {sample_count}")
-                
                 llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // world_size
-                
                 train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True, max_samples=llm_need_sample_cnt)
-                if len(train_samples) == 0 or not train_samples:
+                
+                if len(train_samples) == 0:
                     local_llm_ready = 0
                 else:
                     local_llm_ready = 1
                 gathered_llm_ready = all_gather_cmd(world_size=world_size, obj=local_llm_ready)
+                
                 if min(gathered_llm_ready) == 0:
                     logger.info(
                         f"[Rank {rank}] Skip LLM training because not all ranks have enough samples. "
-                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, "
-                        f"required_samples_per_rank={llm_need_sample_cnt}"
+                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples)}"
                     )
                     continue
                 
@@ -314,9 +295,6 @@ def train_priorzero(
                     if data_processor.value_normalizer is not None:
                         data_processor.value_normalizer.clear()
                     print(f"[Rank {rank}] Switching to World Model training phase at llm iter: {trainer.global_step}")
-                    
-        else:
-            continue
             
 def main():
     """

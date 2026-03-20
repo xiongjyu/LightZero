@@ -41,6 +41,22 @@ def _format_reward(text: str) -> int:
 
     return 1
 
+
+
+def unique_dicts_hash(lst):
+    import hashlib
+    import pickle
+    seen = set()
+    res = []
+    for d in lst:
+        b = pickle.dumps(d)
+        h = hashlib.md5(b).hexdigest()
+
+        if h not in seen:
+            seen.add(h)
+            res.append(d)
+    return res
+
 class DataProcessor:
     """
       - build_llm_prompt / build_chat_context
@@ -275,8 +291,14 @@ class DataProcessor:
             raw_obs_list, history_obs_list, llm_prior_per_tok_list, pred_value, target_value, cot_prefix_list, llm_action_list
         )
         random.Random(0).shuffle(samples)
-
         if len(samples) >= max_samples:
+            # 先进行去重，在提取去重后的sample
+            unique_samples = unique_dicts_hash(samples)
+            if len(unique_samples) >= max_samples:
+                samples = unique_samples[:max_samples]
+            else:
+                remain = max_samples - len(unique_samples)
+                samples = unique_samples + samples[:remain]
             samples = samples[:max_samples]
         else:
             return []
