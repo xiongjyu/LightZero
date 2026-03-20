@@ -267,6 +267,7 @@ class PriorZeroCollector(OriginalCollector):
 
         eps_steps_lst = np.zeros(env_nums)
         visit_entropies_lst = np.zeros(env_nums)
+        llm_weight_lst = np.zeros(env_nums)
 
         if collect_with_pure_policy:
             temp_visit_list = [0.0 for _ in range(self._env.action_space.n)]
@@ -299,39 +300,48 @@ class PriorZeroCollector(OriginalCollector):
 
                 if collect_with_pure_policy:
                     continue
-                elif self.llm_cfg.enable_rft or self.llm_cfg.mcts_root_logits_dict.mode != "wm_logits":
-                    # Extract text observations and valid actions
-                    raw_obs_list = []
-                    histories_list = []
-                    valid_actions_list = [] 
-                    for env_id in sorted(list(ready_env_id)):
-                        raw_obs_text = extract_raw_obs_text(obs[env_id])
-                        raw_obs_list.append(raw_obs_text)
 
-                        history = list(self.history_buffers[env_id])
-                        histories_list.append(history)
+                # Extract text observations and valid actions
+                raw_obs_list = []
+                histories_list = []
+                valid_actions_list = [] 
+                ready_env_ids = sorted(list(ready_env_id))
+                for env_id in ready_env_ids:
+                    raw_obs_text = extract_raw_obs_text(obs[env_id])
+                    raw_obs_list.append(raw_obs_text)
 
-                        valid_actions = obs[env_id].get('valid_actions', [])
-                        valid_actions_list.append(valid_actions)
-                    with self.prof.block("collect_step_get_llm_prior", rank=self._rank):
-                        # CoT reuse optimization: request CoT prefixes to store in game segments
-                        llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
-                            states=raw_obs_list,
-                            valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
-                            histories=histories_list,
-                            return_cot=True  # Request CoT prefixes for reuse in training
-                        )
-                        assert len(llm_prior_per_seq) == len(ready_env_id) == len(valid_actions_list)
-                        for idx, llm_prior in enumerate(llm_prior_per_seq):
-                            scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
-                            llm_prior_per_seq[idx] = scaled_llm_prior
-                            
-                else:
-                    llm_prior_per_seq, llm_prior_per_tok = None, None
+                    history = list(self.history_buffers[env_id])
+                    histories_list.append(history)
+
+                    valid_actions = obs[env_id].get('valid_actions', [])
+                    valid_actions_list.append(valid_actions)
+                with self.prof.block("collect_step_get_llm_prior", rank=self._rank):
+                    # CoT reuse optimization: request CoT prefixes to store in game segments
+                    llm_prior_per_seq, llm_prior_per_tok, cot_prefixes = self.data_processor.get_llm_prior(
+                        states=raw_obs_list,
+                        valid_actions_list=valid_actions_list,  # [PRIORZERO] Pass valid actions
+                        histories=histories_list,
+                        return_cot=True  # Request CoT prefixes for reuse in training
+                    )
+                    assert len(llm_prior_per_seq) == len(ready_env_id) == len(valid_actions_list)
+                    for idx, llm_prior in enumerate(llm_prior_per_seq):
+                        scaled_llm_prior = self.apply_temperature_scaling(llm_prior, return_logprobs=True)
+                        llm_prior_per_seq[idx] = scaled_llm_prior
                         
+                llm_prior_per_seq_by_env = {
+                    env_id: llm_prior_per_seq[idx] for idx, env_id in enumerate(ready_env_ids)
+                }
+                llm_prior_per_tok_by_env = {
+                    env_id: llm_prior_per_tok[idx] for idx, env_id in enumerate(ready_env_ids)
+                }
+                cot_prefixes_by_env = {
+                    env_id: cot_prefixes[idx] for idx, env_id in enumerate(ready_env_ids)
+                }
+
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
                     'valid_actions_list': valid_actions_list,
+                    "current_env_step": self._total_envstep_count
                 }
 
                 if self.task_id is not None:
@@ -354,6 +364,7 @@ class PriorZeroCollector(OriginalCollector):
                     visit_entropy_dict_with_env_id = {
                         k: v['visit_count_distribution_entropy'] for k, v in policy_output.items()
                     }
+                llm_weight_dict_with_env_id = {k: v['llm_weight'] for k, v in policy_output.items()}
 
                 actions: Dict[int, Any] = {
                     env_id: actions_with_env_id.pop(env_id)
@@ -400,8 +411,8 @@ class PriorZeroCollector(OriginalCollector):
                         timestep=to_ndarray(self.timestep_dict[env_id]),
                         raw_obs_text=extract_raw_obs_text(obs_new),
                         history_obs=list(self.history_buffers[env_id]),
-                        llm_prior_per_tok=llm_prior_per_tok[env_id],
-                        cot_prefix=cot_prefixes[env_id],
+                        llm_prior_per_tok=llm_prior_per_tok_by_env[env_id],
+                        cot_prefix=cot_prefixes_by_env[env_id],
                         llm_action=action
                     )
 
@@ -413,6 +424,7 @@ class PriorZeroCollector(OriginalCollector):
 
                     if not collect_with_pure_policy:
                         visit_entropies_lst[env_id] += visit_entropy_dict_with_env_id[env_id]
+                        llm_weight_lst[env_id] += llm_weight_dict_with_env_id[env_id]
 
                     eps_steps_lst[env_id] += 1
 
@@ -458,8 +470,8 @@ class PriorZeroCollector(OriginalCollector):
                         game_segments[env_id].reset(observation_window_stack[env_id], init_raw_obs=extract_raw_obs_text(obs_new), init_history_obs=list(self.history_buffers[env_id]))
 
                     self._env_info[env_id]['step'] += 1
-                    if llm_prior_per_seq is not None and llm_prior_per_seq[env_id] is not None:
-                        llm_prior_tensor = torch.tensor([logit for k, logit in llm_prior_per_seq[env_id].items()]) 
+                    if llm_prior_per_seq is not None and llm_prior_per_seq_by_env[env_id] is not None:
+                        llm_prior_tensor = torch.tensor([logit for k, logit in llm_prior_per_seq_by_env[env_id].items()]) 
                         llm_prior_prob = torch.softmax(llm_prior_tensor, dim=-1)
                         llm_prior_entropy[env_id].append(-torch.sum(llm_prior_prob * torch.log(llm_prior_prob + 1e-9), dim=-1))
                     else:
@@ -473,7 +485,6 @@ class PriorZeroCollector(OriginalCollector):
                 # ==============================================================
                 if episode_timestep.done:
                     self._logger.info(f'[RANK {self._rank}] ======== Env {env_id} episode finished! ========')
-                    self._total_episode_count += 1
                     # Logging
                     info_log = {
                         'reward': episode_timestep.info['score'],
@@ -494,6 +505,8 @@ class PriorZeroCollector(OriginalCollector):
                             visit_entropies_lst[env_id] / eps_steps_lst[env_id]
                             if eps_steps_lst[env_id] > 0 else 0
                         )
+                        info_log['llm_weight'] = llm_weight_lst[env_id] / eps_steps_lst[env_id] if eps_steps_lst[env_id] > 0 else 0
+                        
 
                     collected_episode += 1
                     self._episode_info.append(info_log)
@@ -512,6 +525,7 @@ class PriorZeroCollector(OriginalCollector):
                     # Reset
                     pred_values_lst[env_id], search_values_lst[env_id] = [], []
                     eps_steps_lst[env_id], visit_entropies_lst[env_id] = 0, 0
+                    llm_weight_lst[env_id] = 0
 
                     self._policy.reset([env_id], task_id=self.task_id)
                     self._reset_stat(env_id)
@@ -569,6 +583,7 @@ class PriorZeroCollector(OriginalCollector):
             local_step, local_episode = collected_step, collected_episode
             collected_step = allreduce_data(collected_step, 'sum')
             collected_episode = allreduce_data(collected_episode, 'sum')
+            collected_duration = float(collected_duration)
             collected_duration = allreduce_data(collected_duration, 'sum')
             # After allreduce
             self._logger.info(
@@ -623,6 +638,8 @@ class PriorZeroCollector(OriginalCollector):
             if not self.collect_with_pure_policy:
                 visit_entropy = [d['visit_entropy'] for d in self._episode_info]
                 info['visit_entropy_mean'] = np.mean(visit_entropy)
+                llm_weight = [d['llm_weight'] for d in self._episode_info]
+                info['llm_weight_mean'] = np.mean(llm_weight)
             if self.policy_config.gumbel_algo:
                 completed_value = [d['completed_value'] for d in self._episode_info]
                 info['completed_value_mean'] = np.mean(completed_value)

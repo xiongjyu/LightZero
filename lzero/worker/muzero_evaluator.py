@@ -98,6 +98,7 @@ class MuZeroEvaluator(ISerialEvaluator):
             self._tb_logger = tb_logger
 
         self._rank = get_rank()
+        self._world_size = get_world_size()
         print(f'rank {self._rank}, self.task_id: {self.task_id}')
 
         self.reset(policy, env)
@@ -405,7 +406,7 @@ class MuZeroEvaluator(ISerialEvaluator):
             duration = self._timer.value
             episode_return = eval_monitor.get_episode_return()
             mean_episode_return = np.mean(episode_return)
-            if mean_episode_return > self._max_episode_return:
+            if mean_episode_return >= self._max_episode_return:
                 if save_ckpt_fn:
                     save_ckpt_fn('WM_ckpt_best.pth.tar')
                 self._max_episode_return = mean_episode_return

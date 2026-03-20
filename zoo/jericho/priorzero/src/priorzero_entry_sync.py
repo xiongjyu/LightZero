@@ -46,6 +46,10 @@ def prepare_unizero(rank, cfg, create_cfg, llm_cfg, seed):
     
     policy = create_policy( cfg.policy, enable_field=['learn', 'collect', 'eval'], exp_name=cfg.exp_name, llm_cfg=llm_cfg)
     logger.info(f"[Rank {rank}]  Policy created")
+    
+    if cfg.policy.model_path is not None:
+        logging.info(f"Loading pretrained model from {cfg.policy.model_path}...")
+        policy.learn_mode.load_state_dict(torch.load(cfg.policy.model_path, map_location=cfg.policy.device))
 
     os.makedirs(f'./{cfg.exp_name}/log/', exist_ok=True)
     tb_logger = SummaryWriter(os.path.join(f'./{cfg.exp_name}/log/', 'serial')) if get_rank() == 0 else None
@@ -188,6 +192,13 @@ def train_priorzero(
         
     torch_dist_barrier_and_cuda_sync()
     
+    train_schedule = llm_cfg.train_schedule
+    train_alternate = train_schedule["alternate"]
+    if train_alternate:
+        current_phase = train_schedule["start_phase"]
+        last_wm_train_iter = 0
+        last_llm_train_iter = 0
+        
     while True:
         cmd = "noop"
         priorzero_batch = None
@@ -228,9 +239,8 @@ def train_priorzero(
                     cmd = bcast_obj(world_size, cmd, rank, src=0)
                     continue
                 
-                logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
-                
-                if llm_cfg.enable_world_model:
+                if llm_cfg.enable_world_model and (not train_alternate or (train_alternate and current_phase == "wm")):
+                    logger.info(f"[Rank {rank}: World Model] [Iter {learner.train_iter}] Training for {update_per_collect} updates......")
                     for i in range(update_per_collect):
                         with prof.block("train_world_model", rank=0):
                             train_data = replay_buffer.sample(batch_size, policy)
@@ -240,17 +250,18 @@ def train_priorzero(
                             if cfg.policy.use_priority:
                                 replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
                     policy.recompute_pos_emb_diff_and_clear_cache()
-                
-                # 计算需要收集多少样本才能满足 llm 的训练
-                # 一次参数更新是train_batch_size，off次数为broadcast_every，1是因为只有一个rank收集数据
-                # 此外， 需要的 transitions是样本数 / unroll_steps，即轨迹数
-                llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.broadcast_every // 1
-                llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps 
-                
-                if learner.train_iter >= llm_cfg.train_llm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt and llm_cfg.enable_rft:
+                    if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
+                        current_phase = "llm"
+                        last_wm_train_iter = learner.train_iter
+                        replay_buffer.mark_latest_transitions_consumed()
+                        continue
+
+                if llm_cfg.enable_rft and (not train_alternate or (train_alternate and current_phase == "llm")):
                     with prof.block("fetch_latest_batch", rank=0):
-                        print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t llm_need_transition_cnt={llm_need_transition_cnt}")
-                        priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
+                        print(f"[Rank 0] world_model: train_iter ={learner.train_iter} \t replay_buffer.fetch_latest_batch begin \t")
+                        priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
+                        # 清理 policy的cahce，防止OOM
+                        torch.cuda.empty_cache()
                         print(f"[Rank 0] fetch_latest_batch returned: type={type(priorzero_batch)}, len={len(priorzero_batch)}")
                         cmd = "llm"
 
@@ -265,9 +276,22 @@ def train_priorzero(
                 logger.info(f"[Rank {rank}] Waiting for broadcast of train_samples from Rank 0...")
                 priorzero_batch = bcast_obj(world_size, priorzero_batch, rank, src=0)
                 logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
-                train_samples = data_processor.make_llm_train_samples(priorzero_batch)
+                
+                llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // 1
+                flag, train_samples = data_processor.make_llm_train_samples(priorzero_batch, max_samples=llm_need_sample_cnt)
+                if not flag:  # 检查样本是否有效
+                    logger.warning(f"[Rank {rank}] No valid LLM training samples were created. Skipping this LLM training phase.")
+                    continue
+                
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
+                replay_buffer.mark_latest_transitions_consumed()
                 torch_dist_barrier_and_cuda_sync()
+                
+                if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
+                    current_phase = "wm"
+                    last_llm_train_iter = trainer.global_step
+                    if data_processor.value_normalizer is not None:
+                        data_processor.value_normalizer.clear()
             
 
 def main():
@@ -302,7 +326,7 @@ Examples:
     # Model selection
     parser.add_argument('--model', type=str, default="qwen2.5-3b", choices=get_available_models())
     parser.add_argument('--enable_profile', action='store_true', default=False)
-    parser.add_argument('--use_cot', action='store_true', default=True)
+    parser.add_argument('--use_cot', action='store_true', default=False)
     args = parser.parse_args()
 
     model_key = args.model if args.model else "qwen2.5-1.5b"

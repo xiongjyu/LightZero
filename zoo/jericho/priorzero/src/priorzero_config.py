@@ -78,10 +78,39 @@ class PriorZeroLLMConfig:
     local_rank: int = -1
     enable_rft: bool = True
     enable_world_model: bool = True
+    train_mode_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "mode": "full",  # "full" or "lora"
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "lora_bias": "none",  # "none" / "all" / "lora_only"
+        "lora_target_modules": (
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ),
+    }))
+    
+    train_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "alternate": True, # False 两者都训练（默认配置）；True: 严格交替训练：phase=wm 时仅训练 wm；phase=llm 时仅训练 llm
+        "wm_update_iters": 1e3, # alternate=True. wm 的 train_iter 
+        "llm_update_iters": 1e2, # alternate=True. llm 的 train_iter
+        "start_phase": "wm",   # alternate=True. 从哪个阶段开始： "wm" 或 "llm"
+        "wm_warmup_updates": 0, # alternate=True/False， 在训练初期，先单独训练 wm 一段时间（更新次数），让 wm 学习到一些基本的环境动态
+    }))
+
     llm_prior_temperature: float = 2.0  # LLM prior 分布的温度参数
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "mode": "llm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
-        "wm_weight": 0.5,            # 当 value = "LLMPrior_WM" 时，WM logits 的权重；LLMPrior 的权重 = 1 - WM_weight
+        "mode": "llm_plus_wm_logits",        # collect/eval阶段保持一致。"llm_logits"是仅用llm prior的logits; "wm_logits"是仅用 world_model 的policy给出的logits; "llm_plus_wm_logits"是两者的加权求和。
+        "plus_method": "fixed",        # 当 plus_method = "fixed" 时，使用固定权重；否则使用自适应权重"adaptive"
+        "wm_weight": 0.5,            # 当 plus_method = "fixed" 时，WM logits 的权重；LLMPrior 的权重 = 1 - WM_weight
+        "llm_max_weight": 0.7,        # 当 plus_method = "adaptive" 时，LLM 的最大权重；WM 的最小权重 = 1 - llm_max_weight
+        "llm_min_weight": 0.3,
+        "max_envsteps": 1e5,           # 当 plus_method = "adaptive" 时，随着环境交互步数增加，逐渐降低 llm prior 的权重
     }))
     eval_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "world_model": True,              # 评估模式1：完全与 unizero 的 eval 一致；mcts 的根节点仅使用 WM 的logits
@@ -92,7 +121,7 @@ class PriorZeroLLMConfig:
     
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
-    use_cot: bool = True
+    use_cot: bool = False
     user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "history_with_reward": True,   # 是否在 prompt 中加入历史交互的 reward 信息
         "observation_with_valid_actions": False,  # 是否在 prompt 中加入当前 observation 中可执行的 action 信息  
@@ -106,6 +135,8 @@ class PriorZeroLLMConfig:
     enable_vllm: bool = True
     enable_prefix_caching: bool = True
     use_cuda_ipc: bool = False
+    enable_vllm_is_correction: bool = False
+    vllm_is_truncated_threshold:  Tuple[float, float] = (0.5, 5.0)
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
     vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
 
@@ -126,6 +157,7 @@ class PriorZeroLLMConfig:
     
     zero_stage: int = 2
     gradient_checkpointing: bool = False
+    gradient_checkpointing_use_reentrant: bool = False
     max_norm: float = 1.0     # Gradient clipping
     ds_tensor_parallel_size: int = 1
     ring_attn_size: int = 1
@@ -133,7 +165,7 @@ class PriorZeroLLMConfig:
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
     micro_train_batch_size: int = 4 # 一次micro_train_batch_size 用来计算梯度；只有一次 train_batch_size 才会更新参数
-    broadcast_every: int = 4 # 每次训练多少次 train_batch_size 才同步 vllm 参数；也就是说 vllm 中的模型 off 多少次参数更新
+    max_rollout_staleness: int = 1 # off 次数，用来训练的数据和当前策略之间允许的最大差距
 
     learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
@@ -149,14 +181,13 @@ class PriorZeroLLMConfig:
         ),
     }))
     # advantage = target_value - pred_value 
-    advantage_type: str = "advantage_running_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    advantage_type: str = "advantage_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     entropy_loss_coef: float = 0.0
     kl_estimator: str = "k3"
     
-    train_llm_after_wm_warm_step: int = int(2e2)
-    llm_save_freq: int = 500  # 每多少步保存一次 llm 模型,一步代表一次参数更新而不是梯度累积
+    llm_save_freq: int = 1000  # 每多少步保存一次 llm 模型,一步代表一次参数更新而不是梯度累积
     save_path: str = "" # 该参数将被 exp_name 目录覆盖
     
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -176,7 +207,7 @@ def get_priorzero_config(
     exp_name: str = None,
     use_cot: bool = False,
     model_key: Optional[str] = "qwen2.5-3b",
-    multi_gpu: bool = False
+    multi_gpu: bool = False,
 ) -> Tuple[EasyDict, EasyDict]:
     """
     Generate complete PriorZero configuration with automatic model configuration.
@@ -358,7 +389,18 @@ def get_priorzero_config(
 
     if exp_name is None:
         env_name = env_id.replace(".z5", "")
-        exp_name = f"data_priorzero/priorzero_{env_name}_{model_key}_{llm_config.policy_loss_type}_WM_{llm_config.enable_world_model}_RFT_{llm_config.enable_rft}_useCot_{llm_config.use_cot}_seed{seed}"
+        if llm_config.enable_rft:
+            exp_name = (
+                f"data_priorzero/llm_rft/priorzero_{env_name}_{model_key}_"
+                f"train_{llm_config.train_mode_dict.mode}_WM_{llm_config.enable_world_model}_"
+                f"useCot_{llm_config.use_cot}_seed{seed}"
+            )
+        else:
+            exp_name = (
+                f"data_priorzero/llm_frozen/priorzero_{env_name}_{model_key}_"
+                f"train_{llm_config.train_mode_dict.mode}_WM_{llm_config.enable_world_model}_"
+                f"useCot_{llm_config.use_cot}_seed{seed}"
+            )
     
     priorzero_config = dict(
         env=env_config,
@@ -397,8 +439,17 @@ def get_priorzero_config(
     print(f"[Config] Model configuration applied:")
     print(f"  - Model: {model_key}")
     print(f"  - Path: {llm_config.model_name_or_path}")
+    print(f"  - Train Mode: {llm_config.train_mode_dict.mode}")
     print(f"  - Tensor Parallel Size: {llm_config.vllm_tensor_parallel_size}")
     print(f"  - GPU Memory Utilization: {llm_config.gpu_memory_utilization}")
+    if llm_config.train_mode_dict.mode == "lora":
+        print(
+            f"  - LoRA r/alpha/dropout: "
+            f"{llm_config.train_mode_dict.lora_r}/"
+            f"{llm_config.train_mode_dict.lora_alpha}/"
+            f"{llm_config.train_mode_dict.lora_dropout}"
+        )
+        print(f"  - LoRA target modules: {', '.join(llm_config.train_mode_dict.lora_target_modules)}")
 
     return main_config, create_config, llm_config
 
@@ -422,9 +473,10 @@ def get_priorzero_debug_config(
     num_layers=1
     game_segment_length = 50
 
-    llm_config.train_batch_size = 40  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    llm_config.micro_train_batch_size = 8
-    llm_config.train_llm_after_wm_warm_step = 0
+    llm_config.train_batch_size = 8  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
+    llm_config.micro_train_batch_size = 1
+    llm_config.train_schedule.wm_update_iters=2
+    llm_config.train_schedule.llm_update_iters=1
 
     create_config.max_steps = max_steps
     

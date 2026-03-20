@@ -6,6 +6,7 @@ import sys
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Union, Optional
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -300,13 +301,10 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
 
         llm_prior_logprob = kwargs.pop('llm_prior_logprob', None)
         valid_actions_list = kwargs.get('valid_actions_list', None)
-<<<<<<< HEAD:zoo/jericho/priorzero/priorzero_policy.py
-        if llm_prior_logprob is None or (isinstance(llm_prior_logprob, np.ndarray) and llm_prior_logprob.size == 0):
-=======
+        current_envstep = kwargs.get('current_env_step', 0)
         mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
         
-        if not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
->>>>>>> origin-xjy/dev-multitask-balance-clean-rft:zoo/jericho/priorzero/src/priorzero_policy.py
+        if llm_prior_logprob is None or not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_collect(
                 data, action_mask, temperature, to_play, epsilon,
@@ -360,18 +358,29 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
         
         with torch.no_grad():
-            network_output = self._collect_model.initial_inference(self.last_batch_obs, self.last_batch_action, data, timestep)
+            network_output = self._collect_model.initial_inference(self.last_batch_obs_collect, self.last_batch_action_collect, data, timestep)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
             
             if mcts_root_logits_dict.mode == "llm_logits":
                 root_logits = policy_priors
                 
             elif mcts_root_logits_dict.mode == "llm_plus_wm_logits":
+                llm_weight_min = mcts_root_logits_dict.llm_min_weight 
+                llm_weight_max = mcts_root_logits_dict.llm_max_weight
+                
                 llm_probs = F.softmax(policy_priors, dim=-1)
                 mask_tensor = torch.from_numpy(np.stack(action_mask))
                 policy_logits = policy_logits.cpu().masked_fill(mask_tensor == 0, -1e9)
                 wm_probs = F.softmax(policy_logits, dim=-1)
-                combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
+                if mcts_root_logits_dict.plus_method == "adaptive": 
+                    wm_entropy = -(wm_probs * (wm_probs + 1e-8).log()).sum(dim=-1) 
+                    wm_entropy_norm = wm_entropy / torch.log(mask_tensor.sum(dim=-1).clamp(min=2.0))
+                    llm_weight = llm_weight_min + (llm_weight_max - llm_weight_min)*(1 - wm_entropy_norm)
+                    combined_probs = (1 - llm_weight) * wm_probs + llm_probs * llm_weight
+                    
+                elif mcts_root_logits_dict.plus_method == "fixed":
+                    combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
+                
                 root_logits = torch.log(combined_probs + 1e-8)
 
             network_output.policy_logits = root_logits
@@ -420,9 +429,17 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     'predicted_policy_logits': policy_logits[i],
                     'timestep': timestep[i],
                 }
+                if mcts_root_logits_dict.mode == "llm_plus_wm_logits":
+                    if mcts_root_logits_dict.plus_method == "adaptive":
+                        output[env_id]['llm_weight'] = llm_weight[i].item()
+                    else:
+                        output[env_id]['llm_weight'] = 1 - mcts_root_logits_dict.wm_weight
+                elif mcts_root_logits_dict.mode == "llm_logits":
+                    output[env_id]['llm_weight'] = 1
+                    
                 batch_action.append(action)
-            self.last_batch_obs = data
-            self.last_batch_action = batch_action
+            self.last_batch_obs_collect = data
+            self.last_batch_action_collect = batch_action
         return output
     
     def _forward_eval(self, data: torch.Tensor, action_mask: list, to_play: int = -1,
@@ -442,6 +459,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         if ready_env_id is None:
             ready_env_id = np.arange(active_eval_env_num)
         output = {i: None for i in ready_env_id}
+        mcts_info = {i: defaultdict(dict) for i in ready_env_id}
         
         policy_priors = []
         for env_id in range(active_eval_env_num):
@@ -457,11 +475,15 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         policy_priors = self.pad_to_fixed_length(data=policy_priors, target_len=self.cfg.model.action_space_size, pad_val=-1e9)
         
         with torch.no_grad():
-            network_output = self._eval_model.initial_inference(self.last_batch_obs_eval, self.last_batch_action, data, timestep)
+            network_output = self._eval_model.initial_inference(self.last_batch_obs_eval, self.last_batch_action_eval, data, timestep)
             latent_state_roots, reward_roots, pred_values, policy_logits = mz_network_output_unpack(network_output)
             
             if mcts_root_logits_dict.mode == "llm_logits":
                 root_logits = policy_priors
+                for env_id, prior, valid_actions in zip(ready_env_id, policy_priors, valid_actions_list):
+                    llm_probs = F.softmax(prior, dim=-1).cpu().tolist()
+                    for i in range(len(valid_actions)):
+                        mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_probs[i]
                 
             elif mcts_root_logits_dict.mode == "llm_plus_wm_logits":
                 llm_probs = F.softmax(policy_priors, dim=-1)
@@ -470,6 +492,12 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 wm_probs = F.softmax(policy_logits, dim=-1)
                 combined_probs = wm_probs * mcts_root_logits_dict.wm_weight + llm_probs * (1 - mcts_root_logits_dict.wm_weight)
                 root_logits = torch.log(combined_probs + 1e-8)
+                
+                for env_id, llm_prob, wm_prob, combined_prob, valid_actions in zip(ready_env_id, llm_probs, wm_probs, combined_probs, valid_actions_list):
+                    for i in range(len(valid_actions)):
+                        mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_prob[i].item()
+                        mcts_info[env_id]["root_wm_prob"][valid_actions[i]] = wm_prob[i].item()
+                        mcts_info[env_id]["root_combined_prob"][valid_actions[i]] = combined_prob[i].item()
             
             network_output.policy_logits = root_logits
 
@@ -522,8 +550,10 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                     'timestep': timestep[i],
                 }
                 batch_action.append(action)
+                for idx, action in enumerate(valid_actions_list[i]):
+                    mcts_info[env_id]["visit_count_distributions"][action] = distributions[idx]
 
             self.last_batch_obs_eval = data
-            self.last_batch_action = batch_action
+            self.last_batch_action_eval = batch_action
 
-        return output
+        return output, mcts_info

@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from typing import Optional, Union, List, Dict
 from collections import defaultdict
 import os
@@ -10,10 +11,44 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoModelForVision2Seq, AutoConfig, BitsAndBytesConfig
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 from transformers.trainer import get_scheduler
 
 from utils import compute_approx_kl, compute_entropy, masked_mean, torch_dist_barrier_and_cuda_sync, log_probs_from_logits
+
+def _normalize_vllm_weight_name(name: str) -> str:
+    if name.startswith("base_model.model."):
+        name = name[len("base_model.model."):]
+    name = name.replace(".base_layer.", ".")
+    return name
+
+
+def _should_skip_vllm_sync_param(name: str) -> bool:
+    return any(marker in name for marker in ("lora_A", "lora_B", "lora_embedding_A", "lora_embedding_B"))
+
+
+def _validate_vllm_sync_config(args, train_mode: str, vllm_engine) -> None:
+    if vllm_engine is None:
+        return
+
+    ds_tensor_parallel_size = getattr(args, "ds_tensor_parallel_size", 1)
+    zero_stage = getattr(args, "zero_stage", 2)
+
+    if ds_tensor_parallel_size != 1:
+        raise NotImplementedError(
+            "PolicyModel._deepspeed_broadcast currently supports only ds_tensor_parallel_size == 1. "
+            f"Got ds_tensor_parallel_size={ds_tensor_parallel_size}. "
+            "The active vLLM sync path does not safely handle DeepSpeed tensor parallel shards yet."
+        )
+
+    if zero_stage == 3 and train_mode == "lora":
+        raise NotImplementedError(
+            "PolicyModel._deepspeed_broadcast does not support train_mode='lora' with zero_stage=3. "
+            "This path needs adapter merge/unmerge together with ZeRO-3 sharded parameters, which is not "
+            "validated in the current implementation."
+        )
 
 class Actor(nn.Module):
     """
@@ -38,11 +73,15 @@ class Actor(nn.Module):
         ds_config=None,
         device_map=None,
         temperature=1.0,
+        train_mode_cfg=None,
         **kwargs,
     ) -> None:
         super().__init__()
         
         self.temperature = temperature
+        self.pretrain_or_model = pretrain_or_model
+        self.train_mode_cfg = train_mode_cfg if train_mode_cfg is not None else {"mode": "full"}
+        self.train_mode = self.train_mode_cfg.get("mode", "full")
         attn_impl = attn_implementation
 
         if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
@@ -72,6 +111,25 @@ class Actor(nn.Module):
                 torch_dtype=torch.bfloat16 if bf16 else "auto",
                 device_map=device_map,
             )
+        self.model.config.use_cache = False
+
+        if self.train_mode == "lora":
+            self.model.enable_input_require_grads()
+            target_modules = self.train_mode_cfg.get("lora_target_modules")
+            target_modules = list(target_modules) if target_modules else None
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=False,
+                r=self.train_mode_cfg.get("lora_r", 16),
+                lora_alpha=self.train_mode_cfg.get("lora_alpha", 32),
+                lora_dropout=self.train_mode_cfg.get("lora_dropout", 0.05),
+                bias=self.train_mode_cfg.get("lora_bias", "none"),
+                target_modules=target_modules,
+            )
+            self.model = get_peft_model(self.model, lora_config)
+        elif self.train_mode != "full":
+            raise ValueError(f"Unsupported train_mode: {self.train_mode}")
+        
         self.model.config.use_cache = False
 
     def forward(
@@ -110,7 +168,8 @@ class Actor(nn.Module):
         self.model.gradient_checkpointing_disable()
 
     def print_trainable_parameters(self):
-        self.model.print_trainable_parameters()
+        if hasattr(self.model, "print_trainable_parameters"):
+            self.model.print_trainable_parameters()
 
 class ReferenceModel:
     def __init__(self, strategy, pretrain):
@@ -184,9 +243,11 @@ class BatchPPOTrainer:
             clip_eps_low=self.args.eps_clip_low_high[0],
             clip_eps_high=self.args.eps_clip_low_high[1],
             policy_loss_type=self.args.policy_loss_type,
+            enable_vllm_is_correction=self.args.enable_vllm_is_correction,
+            vllm_is_truncated_threshold=self.args.vllm_is_truncated_threshold
         )
         self.train_iter = 0
-
+        
     def train_batch(self, batch_data: Dict[str, torch.Tensor], kl_ctl: float, step_idx: int = 0) -> Dict[str, float]:
         device = torch.cuda.current_device()
         for k, v in batch_data.items():
@@ -210,11 +271,11 @@ class BatchPPOTrainer:
                 "attention_mask": batch_data['attention_mask'][start_idx:end_idx],
                 "action_mask": batch_data['action_mask'][start_idx:end_idx],
                 "advantages": batch_data['advantages'][start_idx:end_idx],
-                "old_action_logprob": batch_data['old_action_logprob'][start_idx:end_idx],
-                "log_status": batch_data['log_status'][start_idx:end_idx]
+                "old_action_log_probs": batch_data['old_action_log_probs'][start_idx:end_idx],
+                "log_status": batch_data['log_status'][start_idx:end_idx],
+                "rollout_action_logprob": batch_data['rollout_action_logprob'][start_idx:end_idx],
             }
             micro_batch['ref_action_log_probs'] = batch_data['ref_action_log_probs'][start_idx:end_idx] if batch_data['ref_action_log_probs'] is not None else None
-
             action_log_probs, output = self.actor(
                 micro_batch['input_ids'],
                 micro_batch['action_mask'],
@@ -223,10 +284,11 @@ class BatchPPOTrainer:
                 return_entropy=True,
             )
             actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
-                action_log_probs,
-                micro_batch['old_action_logprob'],
-                micro_batch['advantages'],
+                log_probs=action_log_probs,
+                old_log_probs=micro_batch['old_action_log_probs'],
+                advantages=micro_batch['advantages'],
                 action_mask=micro_batch['action_mask'],
+                rollout_log_probs=micro_batch['rollout_action_logprob']
             )
             
             if self.args.rft_kl_coef > 0 and micro_batch['ref_action_log_probs'] is not None:
@@ -241,10 +303,9 @@ class BatchPPOTrainer:
             
             loss = actor_loss + kl_loss * float(kl_ctl.value)
             
-            if self.args.entropy_loss_coef is not None:
-                entropy_loss = masked_mean(output.entropy[:, -micro_batch["action_mask"].shape[1] :], micro_batch["action_mask"])
-                if self.args.entropy_loss_coef != 0:
-                    loss -= entropy_loss * self.args.entropy_loss_coef  
+            entropy_loss = masked_mean(output.entropy[:, -micro_batch["action_mask"].shape[1] :], micro_batch["action_mask"])
+            if self.args.entropy_loss_coef != 0:
+                loss -= entropy_loss * self.args.entropy_loss_coef  
             
             self.strategy.backward(loss, self.actor, self.actor_optim)
             self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
@@ -257,7 +318,7 @@ class BatchPPOTrainer:
             input_response_length_item = micro_batch["attention_mask"].sum().detach().float().item() / micro_batch["attention_mask"].shape[0]
             response_length_item = micro_batch["action_mask"].sum().detach().float().item() / micro_batch["action_mask"].shape[0]
             input_length_item = input_response_length_item - response_length_item
-            entropy_loss_item = entropy_loss.detach().float().item() if self.args.entropy_loss_coef is not None else None
+            entropy_loss_item = entropy_loss.detach().float().item()
             
             pbar.set_postfix({
                 "policy_loss": policy_loss_item,
@@ -274,6 +335,8 @@ class BatchPPOTrainer:
             metrics_buffer["input_length"].append(input_length_item)
             metrics_buffer["response_length"].append(response_length_item)
             metrics_buffer['entropy'].append(entropy_loss_item)
+            if vllm_kl is not None:
+                metrics_buffer['vllm_kl'].append(vllm_kl.item())
 
             log_status = micro_batch["log_status"]
             other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}
@@ -288,7 +351,7 @@ class BatchPPOTrainer:
                     "clip_ratio": np.mean(metrics_buffer['clip_ratio']),
                     "approx_kl": np.mean(metrics_buffer['approx_kl']),
                     "ref_kl": np.mean(metrics_buffer['ref_kl']),
-                    "entropy": np.mean(metrics_buffer['entropy']) if self.args.entropy_loss_coef is not None else None,
+                    "entropy": np.mean(metrics_buffer['entropy']),
                     
                     "iter": self.train_iter,
                     "lr": self.actor_scheduler.get_last_lr()[0],
@@ -301,15 +364,19 @@ class BatchPPOTrainer:
                     "response_length_max": np.max(metrics_buffer['response_length']),
                     "response_length_mean": np.mean(metrics_buffer['response_length']),
                     "response_length_min": np.min(metrics_buffer['response_length']),
-                    
-                    "fmt_rewards": np.mean(metrics_buffer['fmt_rewards']) if "fmt_rewards" in metrics_buffer else None,
+
                     "value_advantage_max": np.max(metrics_buffer['value_advantage']),
                     "value_advantage_mean": np.mean(metrics_buffer['value_advantage']),
                     "value_advantage_min": np.min(metrics_buffer['value_advantage']),
-                    "final_advantage_max": np.max(metrics_buffer['final_advantage']),
-                    "final_advantage_mean": np.mean(metrics_buffer['final_advantage']),
-                    "final_advantage_min": np.min(metrics_buffer['final_advantage']),
                 }
+                if "final_advantage" in metrics_buffer:
+                    status["final_advantage_max"] = np.max(metrics_buffer['final_advantage'])
+                    status["final_advantage_mean"] = np.mean(metrics_buffer['final_advantage'])
+                    status["final_advantage_min"] = np.min(metrics_buffer['final_advantage'])
+                if "fmt_rewards" in metrics_buffer:
+                    status["fmt_rewards"] = np.mean(metrics_buffer['fmt_rewards'])
+                if "vllm_kl" in metrics_buffer:
+                    status["vllm_kl"] = np.mean(metrics_buffer['vllm_kl'])
                 metrics_buffer.clear()
 
                 status = self.strategy.all_reduce(status)
@@ -318,19 +385,22 @@ class BatchPPOTrainer:
         return status_list
     
     def _deepspeed_broadcast(self):
+        _validate_vllm_sync_config(self.strategy.args, self.actor.train_mode, self.vllm_engine)
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
         if use_prefix_cache:
             self.vllm_engine.reset_prefix_cache()
 
         torch.cuda.empty_cache()
         model = self.actor.model.module
-        count, num_params = 0, len(list(model.named_parameters()))
-        for name, param in model.named_parameters():
-            count += 1  # empty_cache at last param
-            # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
-            with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
-                shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
-                self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params)) 
+        with self._merged_lora_adapter(model):
+            sync_params = list(self._iter_vllm_sync_params(model))
+            count, num_params = 0, len(sync_params)
+            for name, param in sync_params:
+                count += 1  # empty_cache at last param
+                # For ZeRO-3, allgather sharded parameter and broadcast to all vllm engines by rank 0
+                with deepspeed.zero.GatheredParameters([param], enabled=self.strategy.args.zero_stage == 3):
+                    shape = param.shape if self.strategy.args.zero_stage != 3 else param.ds_shape
+                    self.vllm_engine.update_weight(name, dtype=param.dtype, shape=shape, weight=param.data, empty_cache=(count == num_params)) 
     
     def _broadcast_to_vllm(self):
         use_prefix_cache = getattr(self.strategy.args, "enable_prefix_caching", False)
@@ -398,6 +468,25 @@ class BatchPPOTrainer:
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()
 
+    def _iter_vllm_sync_params(self, model):
+        for name, param in model.named_parameters():
+            if _should_skip_vllm_sync_param(name):
+                continue
+            yield _normalize_vllm_weight_name(name), param
+
+    @contextmanager
+    def _merged_lora_adapter(self, model):
+        if isinstance(model, PeftModel):
+            if not hasattr(model, "merge_adapter") or not hasattr(model, "unmerge_adapter"):
+                raise RuntimeError("Current PEFT version does not support merge_adapter/unmerge_adapter required for vLLM sync.")
+            model.merge_adapter()
+            try:
+                yield model
+            finally:
+                model.unmerge_adapter()
+        else:
+            yield model
+
 
 class PolicyModel:
     def __init__(
@@ -423,8 +512,11 @@ class PolicyModel:
             bf16=args.bf16,
             ds_config=strategy.get_ds_train_config(is_actor=True),
             temperature=args.temperature,
+            train_mode_cfg=args.train_mode_dict,
         )
         strategy.print(actor)
+        if args.train_mode_dict.mode == "lora":
+            actor.print_trainable_parameters()
 
         from transformers import AutoTokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -473,6 +565,7 @@ class PolicyModel:
             micro_train_batch_size=args.micro_train_batch_size,
             vllm_engine = vllm_engine,
         )
+        self.micro_train_batch_size = self.strategy.args.micro_train_batch_size
 
     def fit(self, batch_data, kl_ctl: float = 0.0):
         torch.cuda.empty_cache()
@@ -486,30 +579,33 @@ class PolicyModel:
     def forward(
         self,
         sequences: torch.LongTensor,
-        action_mask: Optional[Union[int, list[int], torch.Tensor]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        to_cpu: bool = False,
+        action_mask: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> torch.Tensor:
+        """
+        Return: action_log_probs [B, T_action]
+        """
         self.actor.eval()
-
-        if action_mask is None:
-            raise ValueError("action_mask is required for returning action_log_probs")
-
         device = torch.cuda.current_device()
-        sequences = sequences.to(device, non_blocking=True)
-        attention_mask = attention_mask.to(device, non_blocking=True) if attention_mask is not None else None
-        action_mask = action_mask.to(device, non_blocking=True) if torch.is_tensor(action_mask) else action_mask
+        B = sequences.size(0)
 
-        action_log_probs = self.actor(
-            sequences,
-            action_mask=action_mask,
-            attention_mask=attention_mask,
-            ring_attn_group=self.strategy.ring_attn_group, 
-            packed_seq_lens=packed_seq_lens,
-        )
+        outs = []
+        chunk_size = max(self.micro_train_batch_size, 32)
+        sequences = sequences.to(device)
+        attention_mask = attention_mask.to(device)
+        action_mask = action_mask.to(device) 
 
-        self.actor.train() 
-        return action_log_probs.to("cpu") if to_cpu else action_log_probs
+        for i in range(0, B, chunk_size):
+            s = sequences[i : i + chunk_size].to(device)
+            am = action_mask[i : i + chunk_size].to(device)
+            attn = attention_mask[i : i + chunk_size].to(device)
+            out = self.actor(
+                s,
+                action_mask=am,
+                attention_mask=attn,
+            )  
+            outs.append(out)
+        return torch.cat(outs, dim=0)
 
     def broadcast_to_vllm(self):
         # self.trainer._broadcast_to_vllm()

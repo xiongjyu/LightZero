@@ -274,6 +274,7 @@ class DeepspeedStrategy(ABC):
 
         # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
         # deepspeed.init_distributed(dist_backend="nccl", timeout=timeout)
+
         if not dist.is_initialized():
             print(f"[System] Initializing Distributed Process Group via torch.distributed...")
             dist.init_process_group(backend="nccl", timeout=timeout)

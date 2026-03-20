@@ -142,4 +142,15 @@ class AdaptiveValueNormalizer:
             "recent_max": float(np.max(recent)) if recent else 0.0,
             "clip_method": self.clip_method,
         }
+    
+    def clear(self):
+        """
+        Reset all running statistics so the normalizer behaves like a fresh instance.
+        Useful when starting a new experiment or episode.
+        """
+        self.running_mean = 0.0
+        self.running_std = 1.0
+        self.update_count = 0
+
+        self.value_history.clear()
 

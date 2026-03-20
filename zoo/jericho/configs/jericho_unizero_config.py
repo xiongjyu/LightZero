@@ -18,7 +18,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
     """
     env_id = 'detective.z5'
 
-    collector_env_num: int = 4       # Number of collector environments
+    collector_env_num: int = 8       # Number of collector environments
     n_episode = int(collector_env_num)
     batch_size=64
 
@@ -39,7 +39,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
     # ------------------------------------------------------------------
     # User frequently modified configurations
     # ------------------------------------------------------------------
-    evaluator_env_num: int = 3       # Number of evaluator environments
+    evaluator_env_num: int = 8       # Number of evaluator environments
     num_simulations: int = 50        # Number of simulations
 
     # Project training parameters
@@ -169,7 +169,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
             n_episode=n_episode,
             train_start_after_envsteps=0,  # TODO: Adjust training start trigger if needed.
             replay_buffer_size=int(5e5),
-            eval_freq=int(5e2),
+            eval_freq=int(300),
             collector_env_num=collector_env_num,
             evaluator_env_num=evaluator_env_num,
             buffer_reanalyze_freq=buffer_reanalyze_freq,
@@ -204,7 +204,7 @@ def main(env_id: str = 'detective.z5', seed: int = 0, max_env_step: int = int(1e
 
     # Construct experiment name containing key parameters
     main_config.exp_name = (
-        f"data_lz/data_unizero_jericho/bge-base-en-v1.5/{env_id}/uz_gpu_cen{collector_env_num}_rr{replay_ratio}_ftemp025_{env_id[:8]}_ms{max_steps}_ass-{action_space_size}_"
+        f"data_lz_fixed2/data_unizero_jericho/bge-base-en-v1.5/{env_id}/uz_gpu_cen{collector_env_num}_rr{replay_ratio}_ftemp025_{env_id[:8]}_ms{max_steps}_ass-{action_space_size}_"
         f"nlayer{num_layers}_embed{embed_dim}_Htrain{num_unroll_steps}-"
         f"Hinfer{infer_context_length}_bs{batch_size}_seed{seed}"
     )
