@@ -261,6 +261,7 @@ def prepare_vlm_components(rank, cfg, vlm_cfg, strategy, collector_env, evaluato
         vlm_engine=vlm_engine,
         model_name=vlm_cfg.model_name_or_path,
         prompt_template=vlm_cfg.prompt_template,
+        game_description=getattr(vlm_cfg, 'game_description', ''),
     )
 
     # Collector
@@ -372,20 +373,42 @@ def train_unified(
     logger.info(f"[Rank {rank}] Starting training loop with {engine_name} prior...")
 
     # =========================================================================
+    # Alternating Training Schedule Setup (aligned with sync_ddp)
+    # =========================================================================
+    train_schedule = prior_cfg.train_schedule
+    train_alternate = train_schedule["alternate"]
+    enable_world_model = prior_cfg.enable_world_model
+    enable_rft = prior_cfg.enable_rft and not getattr(prior_cfg, 'vlm_fixed', False)
+
+    if train_alternate:
+        current_phase = train_schedule["start_phase"]
+        last_wm_train_iter = 0
+        last_llm_train_iter = 0
+    else:
+        current_phase = None
+
+    # =========================================================================
     # Main Training Loop
     # =========================================================================
     while True:
+        if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
+            break
+
         cmd = 0
         priorzero_batch = None
 
         # Evaluation
-        if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter):
+        if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
             logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
+            if prior_cfg.vllm_enable_sleep and prior_engine is not None:
+                prior_engine.wake_up()
             stop, reward = evaluator.eval(
                 save_ckpt_fn=learner.save_checkpoint,
                 train_iter=learner.train_iter,
                 envstep=collector.envstep
             )
+            if prior_cfg.vllm_enable_sleep and prior_engine is not None:
+                prior_engine.sleep()
 
         # Wake up engine
         if prior_cfg.vllm_enable_sleep and prior_engine is not None:
@@ -413,20 +436,16 @@ def train_unified(
                     vlm_train_iter=policy_model.train_iter
                 )
 
-
         # Sleep engine
         if prior_cfg.vllm_enable_sleep and prior_engine is not None:
             prior_engine.sleep()
-
-        # Calculate updates
-        update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=world_size)
 
         # Push to replay buffer
         replay_buffer.push_game_segments(new_data)
         replay_buffer.remove_oldest_data_to_fit()
 
         num_of_transitions = replay_buffer.get_num_of_transitions()
-        new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
+        new_num_of_transitions = num_of_transitions - replay_buffer.last_pos_in_transition
 
         logger.info(
             f"[Data Collection] Rank {rank} | "
@@ -434,69 +453,104 @@ def train_unified(
             f"New transitions: {new_num_of_transitions}"
         )
 
-        # Check if we have enough data
-        if not (num_of_transitions > batch_size):
-            logger.warning(
-                f'  ⚠ Data insufficient: batch_size={batch_size}, buffer={num_of_transitions}'
+        # TB logging for collect metrics
+        if tb_logger is not None:
+            tb_logger.add_scalar('collect/num_transitions', num_of_transitions, collector.envstep)
+            tb_logger.add_scalar('collect/new_transitions', new_num_of_transitions, collector.envstep)
+
+        torch_dist_barrier_and_cuda_sync()
+
+        # =====================================================================
+        # World Model Training (gated by schedule)
+        # =====================================================================
+        if enable_world_model and (not train_alternate or current_phase == "wm"):
+            if not (num_of_transitions > batch_size):
+                logger.warning(
+                    f'[WM Training] Data insufficient: batch_size={batch_size}, buffer={num_of_transitions}'
+                )
+                cmd = 0
+            else:
+                cmd = 1
+
+            if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
+                continue
+
+            update_per_collect = calculate_update_per_collect(cfg, new_data, world_size=world_size)
+            logger.info(
+                f"[WM Training] Rank {rank} | Iter {learner.train_iter} | "
+                f"Updates: {update_per_collect}"
             )
-            cmd = 0
-        else:
-            cmd = 1
 
-        if min(all_gather_cmd(world_size=world_size, obj=cmd)) == 0:
-            continue
+            for i in range(update_per_collect):
+                with prof.block("train_world_model", rank=rank):
+                    train_data = replay_buffer.sample(batch_size, policy)
+                    train_data.append(learner.train_iter)
+                    log_vars = learner.train(train_data, collector.envstep)
+                    if cfg.policy.use_priority:
+                        replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
 
-        # =====================================================================
-        # World Model Training
-        # =====================================================================
-        logger.info(
-            f"[World Model Training] Rank {rank} | Iter {learner.train_iter} | "
-            f"Updates: {update_per_collect}"
-        )
+            policy.recompute_pos_emb_diff_and_clear_cache()
 
-        for i in range(update_per_collect):
-            with prof.block("train_world_model", rank=rank):
-                train_data = replay_buffer.sample(batch_size, policy)
-                train_data.append(learner.train_iter)
-                log_vars = learner.train(train_data, collector.envstep)
-                if cfg.policy.use_priority:
-                    replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
+            # TB logging for WM training
+            if tb_logger is not None:
+                tb_logger.add_scalar('train/wm_train_iter', learner.train_iter, collector.envstep)
 
-        policy.recompute_pos_emb_diff_and_clear_cache()
+            # Phase switching: WM -> LLM/VLM
+            if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
+                current_phase = "llm"
+                last_wm_train_iter = learner.train_iter
+                replay_buffer.mark_latest_transitions_consumed()
+                logger.info(f"[WM Training][Rank {rank}] Switching to {'VLM' if not is_text_input else 'LLM'} training phase at wm iter: {learner.train_iter}")
+                continue
 
         # =====================================================================
-        # LLM/VLM Training
+        # LLM/VLM Training (gated by schedule)
         # =====================================================================
-        llm_need_sample_cnt = prior_cfg.train_batch_size * prior_cfg.broadcast_every // world_size
-        llm_need_transition_cnt = (llm_need_sample_cnt + cfg.policy.num_unroll_steps - 1) // cfg.policy.num_unroll_steps
+        if enable_rft and (not train_alternate or current_phase == "llm"):
+            new_num_of_transitions = replay_buffer.get_num_of_transitions() - replay_buffer.last_pos_in_transition
+            logger.info(
+                f"[{engine_name} Training] Rank {rank} | "
+                f"Total transitions: {num_of_transitions} | "
+                f"New transitions: {new_num_of_transitions}"
+            )
 
-        if learner.train_iter >= prior_cfg.train_vlm_after_wm_warm_step and new_num_of_transitions >= llm_need_transition_cnt:
-            cmd = 1
-        else:
-            cmd = 0
-
-        # Check stopping criteria
-        if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
-            cmd = 2
-
-        all_cmd = all_gather_cmd(world_size=world_size, obj=cmd)
-        if max(all_cmd) == 2:
-            break
-        elif min(all_cmd) == 1:
             with prof.block("fetch_latest_batch", rank=rank):
-                logger.info(f"[Batch Fetch] Rank {rank} | Required transitions: {llm_need_transition_cnt}")
-                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_need_transition_cnt, policy=policy)
+                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
+                torch.cuda.empty_cache()
 
             with prof.block("train_prior_model", rank=rank):
-                sample_count = len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 0
-                logger.info(f"[{engine_name} Training] Rank {rank} | Samples: {sample_count}")
+                llm_need_sample_cnt = prior_cfg.train_batch_size * prior_cfg.max_rollout_staleness // world_size
+                flag, train_samples = data_processor.make_llm_train_samples(
+                    priorzero_batch, ddp=True, max_samples=llm_need_sample_cnt,
+                    prior_generator=components.get('prior_generator') if not is_text_input else None,
+                )
 
-                train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True)
+                if not flag:
+                    local_llm_ready = 0
+                else:
+                    local_llm_ready = 1
+
+                gathered_llm_ready = all_gather_cmd(world_size=world_size, obj=local_llm_ready)
+
+                if min(gathered_llm_ready) == 0:
+                    logger.info(
+                        f"[Rank {rank}] Skip {engine_name} training: not all ranks ready. "
+                        f"ready_flags={gathered_llm_ready}, local={local_llm_ready}, required={llm_need_sample_cnt}, got={len(train_samples)}"
+                    )
+                    continue
+
                 trainer.train_batch(train_samples, collect_env_steps=collector.envstep)
+                replay_buffer.mark_latest_transitions_consumed()
 
                 torch_dist_barrier_and_cuda_sync()
-        else:
-            continue
+
+                # Phase switching: LLM/VLM -> WM
+                if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
+                    current_phase = "wm"
+                    last_llm_train_iter = trainer.global_step
+                    if data_processor.value_normalizer is not None:
+                        data_processor.value_normalizer.clear()
+                    logger.info(f"[Rank {rank}] Switching to World Model training phase at {engine_name} iter: {trainer.global_step}")
 
     logger.info(f"[Rank {rank}] Training completed!")
 
@@ -565,7 +619,7 @@ def main():
             exp_name=f'data_priorzero_complete/image_{args.env_id[:-14]}_seed{args.seed}',
             vlm_model_key=args.vlm_model,
             use_prior=args.use_prior,
-            multi_gpu=False,
+            multi_gpu=int(os.environ.get('WORLD_SIZE', '1')) > 1,
             quick_test=args.quick_test,
         )
 

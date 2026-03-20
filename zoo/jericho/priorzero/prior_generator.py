@@ -178,6 +178,7 @@ class VLMPriorGenerator(PriorGenerator):
         prompt_template: Optional[str] = None,
         use_cot: bool = True,
         tokenizer=None,
+        game_description: str = "",
         **kwargs
     ):
         """
@@ -187,12 +188,14 @@ class VLMPriorGenerator(PriorGenerator):
             prompt_template: Optional custom prompt template
             use_cot: Whether to use Chain-of-Thought reasoning
             tokenizer: Tokenizer for building training samples
+            game_description: Game-specific description for prompts
         """
         super().__init__(model_name, obs_type='image')
         self.vlm_engine = vlm_engine
         self.prompt_template = prompt_template or self._default_prompt_template()
         self.use_cot = use_cot
         self.tokenizer = tokenizer
+        self.game_description = game_description
 
         # For logging VLM outputs
         self.episode_output = []
@@ -348,6 +351,11 @@ class VLMPriorGenerator(PriorGenerator):
         # Build base prompt (already contains vision tokens at the start)
         prompt = self.prompt_template.format(action_list=action_list)
 
+        # Inject game description after vision tokens
+        if self.game_description:
+            game_desc_text = f"\n\nGame: {self.game_description}\n"
+            prompt = prompt.replace("<|vision_end|>", "<|vision_end|>" + game_desc_text)
+
         # Add history context if available (AFTER the vision tokens)
         if history and len(history) > 0:
             history_text = "\n\nRecent history:\n"
@@ -405,6 +413,12 @@ class VLMPriorGenerator(PriorGenerator):
 
         # Add vision tokens at the start
         prompt_parts.append("<|vision_start|><|image_pad|><|vision_end|>")
+
+        # Add game description if available
+        if self.game_description:
+            prompt_parts.append(f"\n=== GAME DESCRIPTION ===")
+            prompt_parts.append(self.game_description)
+            prompt_parts.append("")
 
         if history and len(history) > 0:
             prompt_parts.append("\n=== GAME HISTORY ===")
@@ -713,6 +727,23 @@ class VLMPriorGenerator(PriorGenerator):
 
         # Increment batch call counter
         self.batch_call_count += 1
+
+        # First-call validation logging: image shapes, dtypes, PIL sizes, prompt preview
+        if self.batch_call_count == 1:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"[VLM Batch Validation] === FIRST CALL DATA FLOW CHECK ===")
+            logger.info(f"  Batch size: {len(observations)}")
+            for i, obs in enumerate(observations[:3]):
+                if isinstance(obs, np.ndarray):
+                    logger.info(f"  Obs[{i}]: ndarray shape={obs.shape}, dtype={obs.dtype}, min={obs.min()}, max={obs.max()}")
+                elif isinstance(obs, Image.Image):
+                    logger.info(f"  Obs[{i}]: PIL Image size={obs.size}, mode={obs.mode}")
+            for i, img in enumerate(images[:3]):
+                logger.info(f"  PIL Image[{i}]: size={img.size}, mode={img.mode}")
+            logger.info(f"  Prompt[0] preview: {prompts[0][:300]}")
+            logger.info(f"  Actions[0]: {action_candidates_list[0]}")
+            logger.info(f"[VLM Batch Validation] === END FIRST CALL CHECK ===")
 
         # Log batch info at intervals (every 10 batch calls)
         if self.batch_call_count % 10 == 1:

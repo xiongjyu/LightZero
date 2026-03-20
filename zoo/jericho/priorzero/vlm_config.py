@@ -10,6 +10,44 @@ from dataclasses import dataclass, field
 
 
 # ==============================================================================
+# Game Descriptions for VLM Prompts
+# ==============================================================================
+GAME_DESCRIPTIONS = {
+    'PongNoFrameskip-v4': (
+        "This is Pong. You control the right paddle. "
+        "Move the paddle UP or DOWN to hit the ball past the opponent's paddle on the left. "
+        "Score points when the opponent misses. First to 21 points wins."
+    ),
+    'BreakoutNoFrameskip-v4': (
+        "This is Breakout. You control a paddle at the bottom of the screen. "
+        "Move LEFT or RIGHT to bounce the ball upward and break the colored bricks. "
+        "Each brick broken scores points. Don't let the ball fall below the paddle."
+    ),
+    'SpaceInvadersNoFrameskip-v4': (
+        "This is Space Invaders. You control a cannon at the bottom of the screen. "
+        "Move LEFT/RIGHT and FIRE to shoot the descending rows of aliens. "
+        "Destroy all aliens before they reach the bottom. Use shields for cover."
+    ),
+    'QbertNoFrameskip-v4': (
+        "This is Q*bert. You control Q*bert on a pyramid of cubes. "
+        "Jump on each cube to change its color to the target color. "
+        "Avoid enemies like Coily the snake. Change all cubes to complete the level."
+    ),
+    'MsPacmanNoFrameskip-v4': (
+        "This is Ms. Pac-Man. Navigate the maze eating dots and power pellets. "
+        "Avoid the ghosts unless you've eaten a power pellet, which lets you eat them. "
+        "Clear all dots to advance to the next level."
+    ),
+    'LunarLander-v2': (
+        "This is Lunar Lander. You control a spacecraft descending toward a landing pad. "
+        "Use the MAIN ENGINE to slow descent, and LEFT/RIGHT engines to adjust position. "
+        "Land gently on the pad between the flags. Fuel is limited. "
+        "Reward: +100-140 for landing on pad, -100 for crash, -0.3 per engine fire."
+    ),
+}
+
+
+# ==============================================================================
 # VLM Model Configuration Presets
 # ==============================================================================
 VLM_MODEL_CONFIGS = {
@@ -75,6 +113,9 @@ class PriorZeroVLMConfig:
     model_name_or_path: str = "Qwen2.5-VL-7b"
 
     vlm_model_type: str = "qwen-vl"  # 'qwen-vl', 'llava', 'internvl'
+
+    # Game description for prompts
+    game_description: str = ""
 
     # Training settings (similar to LLM config)
     enable_sft: bool = False
@@ -163,6 +204,20 @@ class PriorZeroVLMConfig:
     vlm_save_freq: int = 500
     save_path: str = ""
 
+    # Alternating training schedule (matches LLM config)
+    train_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
+        "alternate": True,
+        "wm_update_iters": 1e3,
+        "llm_update_iters": 1e2,
+        "start_phase": "wm",
+        "wm_warmup_updates": 0,
+    }))
+
+    enable_world_model: bool = True
+    enable_rft: bool = True
+    max_rollout_staleness: int = 1
+    vlm_fixed: bool = False  # If True, VLM is frozen (inference only, no VLM training)
+
     # Value normalization
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         'enable_stability_optimizer': True,
@@ -213,7 +268,13 @@ def get_priorzero_vlm_config(
     """
     from zoo.atari.config.atari_env_action_space_map import atari_env_action_space_map
 
-    action_space_size = atari_env_action_space_map[env_id]
+    # Detect environment type
+    is_lunarlander = 'LunarLander' in env_id
+
+    if is_lunarlander:
+        action_space_size = 4
+    else:
+        action_space_size = atari_env_action_space_map[env_id]
 
     # Base configuration parameters
     if quick_test:
@@ -243,6 +304,14 @@ def get_priorzero_vlm_config(
     num_unroll_steps = 10
     infer_context_length = 4
 
+    # Episode step limits
+    if is_lunarlander:
+        collect_max_episode_steps = int(1000)
+        eval_max_episode_steps = int(1000)
+    else:
+        collect_max_episode_steps = int(5e3)
+        eval_max_episode_steps = int(5e3)
+
     # Environment configuration
     env_config = dict(
         stop_value=int(1e6),
@@ -253,10 +322,8 @@ def get_priorzero_vlm_config(
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False,),
-        # collect_max_episode_steps=int(50),  # Maximum steps for collection episodes
-        # eval_max_episode_steps=int(50),     # Maximum steps for evaluation episodes
-        collect_max_episode_steps=int(5e3),  # Maximum steps for collection episodes
-        eval_max_episode_steps=int(5e3),     # Maximum steps for evaluation episodes
+        collect_max_episode_steps=collect_max_episode_steps,
+        eval_max_episode_steps=eval_max_episode_steps,
     )
 
     # Policy configuration
@@ -361,15 +428,23 @@ def get_priorzero_vlm_config(
     main_config = EasyDict(dict(
         env=env_config,
         policy=policy_config,
-        exp_name=exp_name or f'data_priorzero_vlm/{env_id[:-14]}_seed{seed}',
+        exp_name=exp_name or f'data_priorzero_vlm/{env_id}_seed{seed}',
         seed=seed
     ))
 
-    create_config = EasyDict(dict(
-        env=dict(
+    if is_lunarlander:
+        env_create_cfg = dict(
+            type='lunarlander_image',
+            import_names=['zoo.box2d.lunarlander.envs.lunarlander_image_env'],
+        )
+    else:
+        env_create_cfg = dict(
             type='atari_lightzero',
             import_names=['zoo.atari.envs.atari_lightzero_env'],
-        ),
+        )
+
+    create_config = EasyDict(dict(
+        env=env_create_cfg,
         env_manager=dict(type='subprocess'),
         policy=dict(
             type='priorzero',
@@ -391,6 +466,9 @@ def get_priorzero_vlm_config(
 
     # VLM configuration
     vlm_config = PriorZeroVLMConfig(use_prior=use_prior)
+
+    # Set game description
+    vlm_config.game_description = GAME_DESCRIPTIONS.get(env_id, "")
 
     # Auto-configure VLM model
     if use_prior:

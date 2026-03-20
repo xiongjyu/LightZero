@@ -126,6 +126,9 @@ class PriorZeroCollector(OriginalCollector):
         self._logger.info(f"  - History length: {history_length}")
         self._logger.info(f"  - Prior generator: {type(prior_generator).__name__ if prior_generator else 'None'}")
 
+        # First-call validation flag
+        self._first_collect_logged = False
+
     def _get_prior_from_generator(
         self,
         observations: List[Any],
@@ -348,6 +351,20 @@ class PriorZeroCollector(OriginalCollector):
                             valid_actions = [action_meanings[i] for i in range(action_space_size)]
                         valid_actions_list.append(valid_actions)
 
+                    # First-call validation logging for image data flow
+                    if not self._first_collect_logged and self.obs_type == 'image' and len(observations_list) > 0:
+                        self._first_collect_logged = True
+                        obs_sample = observations_list[0]
+                        if isinstance(obs_sample, np.ndarray):
+                            self._logger.info(
+                                f"[Collector Validation] === FIRST COLLECT IMAGE CHECK ===\n"
+                                f"  Image shape: {obs_sample.shape}, dtype: {obs_sample.dtype}, "
+                                f"min: {obs_sample.min()}, max: {obs_sample.max()}\n"
+                                f"  Num envs: {len(observations_list)}\n"
+                                f"  Actions: {valid_actions_list[0]}\n"
+                                f"[Collector Validation] === END CHECK ==="
+                            )
+
                     # Get priors using unified interface
                     with self.prof.block("collect_step_get_prior", rank=self._rank):
                         if self.prior_generator is not None:
@@ -540,11 +557,17 @@ class PriorZeroCollector(OriginalCollector):
 
                         # Log episode statistics
                         collected_episode += 1
+                        episode_return = info.get('eval_episode_return', reward)
                         self._logger.info(
                             f"Episode {collected_episode} | Env {env_id} | "
                             f"Steps: {eps_steps_lst[env_id]} | "
-                            f"Reward: {reward:.2f}"
+                            f"Reward: {episode_return:.2f}"
                         )
+
+                        # TB logging for episode metrics
+                        if hasattr(self, '_tb_logger') and self._tb_logger is not None:
+                            self._tb_logger.add_scalar('collect/episode_reward', episode_return, self.envstep)
+                            self._tb_logger.add_scalar('collect/episode_length', eps_steps_lst[env_id], self.envstep)
 
                         # Reset for next episode
                         eps_steps_lst[env_id] = 0

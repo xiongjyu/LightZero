@@ -444,23 +444,54 @@ class UnifiedDataProcessor:
         else:
             return prior_per_seq, prior_per_tok, [None] * len(states)
 
-    def make_llm_train_samples(self, priorzero_batch, ddp: bool = True):
+    def make_llm_train_samples(self, priorzero_batch, ddp: bool = True, max_samples: int = None, prior_generator=None):
         """
         Make training samples from PriorZero batch.
 
-        This method needs to be adapted for VLM training.
-        For now, we keep the original implementation for text input.
+        Returns:
+            Tuple of (flag, train_samples) where flag indicates if enough samples were prepared.
         """
-        # TODO: Implement VLM-specific training sample preparation
-        # For image input, we need to handle image observations differently
-
         if self.obs_type == 'image':
-            # VLM training samples
-            # This requires storing images in the batch and preparing multimodal inputs
-            raise NotImplementedError(
-                "VLM training sample preparation not yet implemented. "
-                "This requires modifications to the replay buffer to store images."
-            )
+            # VLM training samples: delegate to VLMPriorGenerator.build_vlm_train_samples()
+            if prior_generator is None:
+                import logging
+                logging.getLogger(__name__).warning("[make_llm_train_samples] No prior_generator for image mode, returning empty.")
+                return (False, [])
+
+            try:
+                game_segments, target_values, pred_values, action_log_probs = priorzero_batch
+
+                # Compute advantages with value normalization
+                target_values_np = np.array(target_values, dtype=np.float32)
+                pred_values_np = np.array(pred_values, dtype=np.float32)
+
+                if self.value_normalizer is not None:
+                    advantages = self.value_normalizer.normalize_advantages(
+                        target_values_np - pred_values_np
+                    )
+                else:
+                    advantages = target_values_np - pred_values_np
+
+                old_log_probs = np.array(action_log_probs, dtype=np.float32)
+
+                train_samples = prior_generator.build_vlm_train_samples(
+                    game_segments=game_segments,
+                    advantages=advantages,
+                    old_action_log_probs=old_log_probs,
+                )
+
+                if max_samples is not None and len(train_samples) > max_samples:
+                    train_samples = train_samples[:max_samples]
+
+                flag = len(train_samples) > 0
+                return (flag, train_samples)
+
+            except Exception as e:
+                import traceback
+                import logging
+                if self.rank == 0:
+                    logging.getLogger(__name__).error(f"[make_llm_train_samples] Image mode error: {e}\n{traceback.format_exc()}")
+                return (False, [])
         else:
             # Original LLM training samples (text input)
             # Keep existing implementation
