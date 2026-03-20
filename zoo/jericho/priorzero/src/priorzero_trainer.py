@@ -124,15 +124,15 @@ class PriorZeroLLMTrainer:
         else:
             batch["ref_action_log_probs"] = None
         
+        if self.strategy.args.deepspeed_enable_sleep:
+            self.policy_model.reload_states()
+        
         old_action_log_probs = self.policy_model.forward(
             sequences = batch['input_ids'],
             action_mask = batch['action_mask'],
             attention_mask=batch['attention_mask'],
         )
         batch["old_action_log_probs"] = old_action_log_probs
-            
-        if self.strategy.args.deepspeed_enable_sleep:
-            self.policy_model.reload_states()
             
         status = self.policy_model.fit(batch, self.kl_ctl)
         

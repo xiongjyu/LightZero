@@ -549,6 +549,7 @@ class PolicyModel:
             micro_train_batch_size=args.micro_train_batch_size,
             vllm_engine = vllm_engine,
         )
+        self.micro_train_batch_size = self.strategy.args.micro_train_batch_size
 
     def fit(self, batch_data, kl_ctl: float = 0.0):
         torch.cuda.empty_cache()
@@ -570,13 +571,25 @@ class PolicyModel:
         """
         self.actor.eval()
         device = torch.cuda.current_device()
-        
+        B = sequences.size(0)
+
+        outs = []
+        chunk_size = max(self.micro_train_batch_size, 32)
         sequences = sequences.to(device)
         attention_mask = attention_mask.to(device)
         action_mask = action_mask.to(device) 
-        output = self.actor(sequences, action_mask=action_mask, attention_mask=attention_mask)
 
-        return output
+        for i in range(0, B, chunk_size):
+            s = sequences[i : i + chunk_size].to(device)
+            am = action_mask[i : i + chunk_size].to(device)
+            attn = attention_mask[i : i + chunk_size].to(device)
+            out = self.actor(
+                s,
+                action_mask=am,
+                attention_mask=attn,
+            )  
+            outs.append(out)
+        return torch.cat(outs, dim=0)
 
     def broadcast_to_vllm(self):
         # self.trainer._broadcast_to_vllm()
