@@ -271,9 +271,9 @@ def train_priorzero(
                 
             with prof.block("train_llm", rank=rank):
                 llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // world_size
-                train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True, max_samples=llm_need_sample_cnt)
+                flag, train_samples = data_processor.make_llm_train_samples(priorzero_batch, ddp=True, max_samples=llm_need_sample_cnt)
                 
-                if len(train_samples) == 0:
+                if not flag:
                     local_llm_ready = 0
                 else:
                     local_llm_ready = 1
@@ -282,7 +282,7 @@ def train_priorzero(
                 if min(gathered_llm_ready) == 0:
                     logger.info(
                         f"[Rank {rank}] Skip LLM training because not all ranks have enough samples. "
-                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples[0])}"
+                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples)}"
                     )
                     continue
                 

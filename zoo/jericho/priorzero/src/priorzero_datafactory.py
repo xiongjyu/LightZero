@@ -301,7 +301,7 @@ class DataProcessor:
                 samples = unique_samples + samples[:remain]
             samples = samples[:max_samples]
         else:
-            return []
+            return False, samples
         
         if ddp:
             print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")
@@ -459,7 +459,7 @@ class DataProcessor:
             logprob_token_list = real_samples[idx]['rollout_logprob']
             rollout_logprob[idx, -len(logprob_token_list):] = torch.tensor(logprob_token_list, dtype=torch.float32)
         
-        return inputs.input_ids, inputs.attention_mask, action_mask, advantage, rollout_logprob, log_status
+        return True, (inputs.input_ids, inputs.attention_mask, action_mask, advantage, rollout_logprob, log_status)
         
     @torch.no_grad()
     def _build_cot_prefix_texts(self, all_user_prompts: List[str]) -> List[str]:

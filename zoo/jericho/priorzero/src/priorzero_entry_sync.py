@@ -278,8 +278,8 @@ def train_priorzero(
                 logger.info(f"[Rank {rank}] Received broadcast. train_samples count: {len(priorzero_batch[0]) if priorzero_batch and len(priorzero_batch) > 0 else 'UNKNOWN'}. Starting LLM training...")
                 
                 llm_need_sample_cnt = llm_cfg.train_batch_size * llm_cfg.max_rollout_staleness // 1
-                train_samples = data_processor.make_llm_train_samples(priorzero_batch, max_samples=llm_need_sample_cnt)
-                if len(train_samples) == 0 or not train_samples:  # 检查样本是否有效
+                flag, train_samples = data_processor.make_llm_train_samples(priorzero_batch, max_samples=llm_need_sample_cnt)
+                if not flag:  # 检查样本是否有效
                     logger.warning(f"[Rank {rank}] No valid LLM training samples were created. Skipping this LLM training phase.")
                     continue
                 
