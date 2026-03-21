@@ -57,6 +57,13 @@ VL_MODEL_CONFIGS = {
         "gpu_memory_utilization": 0.25,
         "description": "Qwen2.5-VL-2B-Instruct (smaller, faster)",
     },
+    "Qwen2.5-VL-3b": {
+        "model_name": "Qwen2.5-VL",
+        "model_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-VL-3B-Instruct",
+        "tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.25,
+        "description": "Qwen2.5-VL-3B-Instruct",
+    },
     "Qwen2.5-VL-7b": {
         "model_name": "Qwen2.5-VL",
         "model_path": "/mnt/shared-storage-user/puyuan/model/Qwen2.5-VL-7B-Instruct",
@@ -138,7 +145,7 @@ class PriorZeroVLConfig:
     vllm_enable_sleep: bool = True # 是否可以休眠
     enable_vllm_is_correction: bool = False
     vllm_is_truncated_threshold: Tuple[float, float] = (0.5, 5.0)
-    top_p: float = 1.0
+    top_p: float = 0.95
     seed: int = 0
     reduction: str = "mean"
 
@@ -152,7 +159,7 @@ class PriorZeroVLConfig:
 
     # Prior generation settings
     use_prior: bool = True  # Whether to use VL prior
-    llm_prior_temperature: float = 1.0  # Temperature for prior distribution
+    llm_prior_temperature: float = 2.0  # Temperature for prior distribution (aligned with LLM converged config)
 
     # MCTS root logits configuration
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -169,7 +176,7 @@ class PriorZeroVLConfig:
         "world_model": True,
         "world_model_llm_prior": True,
         "llm_prior": True,
-        "eval_freq": int(500),
+        "eval_freq": int(20000),
     }))
 
     attn_implementation: str = "flash_attention_2" 
@@ -212,12 +219,12 @@ class PriorZeroVLConfig:
     ring_attn_size: int = 1
 
     # Batch sizes
-    train_batch_size: int = 640
-    micro_train_batch_size: int = 8
+    train_batch_size: int = 128
+    micro_train_batch_size: int = 4
     broadcast_every: int = 1
 
     # Optimizer settings
-    learning_rate: float = 5e-7
+    learning_rate: float = 1e-6
     adam_betas: Tuple[float, float] = (0.9, 0.95)
     weight_decay: float = 0.01
     lr_scheduler: str = "cosine_with_min_lr"
@@ -227,9 +234,12 @@ class PriorZeroVLConfig:
     # Loss settings
     policy_loss_type: str = "ppo"
     reward_func: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "format_reward": False,  # No format reward for Atari
+        "format_reward": True,
+        "format_param": EasyDict(
+            {"format_weight": 0.5, }
+        ),
     }))
-    advantage_type: str = "advantage_running_norm"
+    advantage_type: str = "advantage_batch_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     entropy_loss_coef: float = 0.0
@@ -265,14 +275,16 @@ class PriorZeroVLConfig:
         "value_norm_history_size": 1000,
     }))
 
-    # Prompt template (Qwen-VL format)
+    # Prompt template (Qwen-VL format, used when use_cot=False)
+    # When use_cot=True, VLPriorGenerator.get_user_prompt() is used instead.
     prompt_template: str = (
         "<|vision_start|><|image_pad|><|vision_end|>"
-        "You are an expert Atari game player. "
-        "Based on the current game screen, choose the best action. "
-        "Available actions: {action_list}\n"
-        "Provide probabilities for each action as JSON: "
-        "{{'action': probability, ...}}"
+        "You are an expert game player. "
+        "Based on the current game screen, choose the best action.\n"
+        "Available actions:\n{action_list}\n\n"
+        "Output exactly one line starting with 'Action:'.\n"
+        "Example:\n"
+        "Action: <your_action_here>"
     )
 
 
@@ -385,7 +397,7 @@ def get_priorzero_vl_config(
                 final_norm_option_in_obs_head='LayerNorm',
                 final_norm_option_in_encoder='LayerNorm',
                 predict_latent_loss_type='mse',
-                policy_entropy_weight=5e-3,
+                policy_entropy_weight=5e-2,
                 continuous_action_space=False,
                 max_blocks=num_unroll_steps,
                 max_tokens=2 * num_unroll_steps,
@@ -393,7 +405,7 @@ def get_priorzero_vl_config(
                 device='cuda',
                 action_space_size=action_space_size,
                 num_layers=num_layers,
-                num_heads=8,
+                num_heads=24,
                 embed_dim=768,
                 obs_type='image',  # KEY: Image input with VL prior
                 env_num=max(collector_env_num, evaluator_env_num),
@@ -408,9 +420,9 @@ def get_priorzero_vl_config(
                 multiplication_moe_in_transformer=False,
             )
         ),
-        optim_type='AdamW_mix_lr_wdecay',
-        weight_decay=1e-2,
-        learning_rate=0.0001,
+        optim_type='AdamW',
+        weight_decay=1e-4,
+        learning_rate=3e-4,
         num_unroll_steps=num_unroll_steps,
         update_per_collect=None,
         replay_ratio=replay_ratio,
@@ -421,7 +433,7 @@ def get_priorzero_vl_config(
         train_start_after_envsteps=0,
         game_segment_length=game_segment_length,
         replay_buffer_size=int(5e5),
-        eval_freq=int(5e3),
+        eval_freq=int(2e4),
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
 
@@ -523,6 +535,24 @@ def get_priorzero_vl_config(
         print(f"  - Path: {vl_config.model_name_or_path}")
         print(f"  - Tensor Parallel Size: {vl_config.tensor_parallel_size}")
         print(f"  - GPU Memory Utilization: {vl_config.gpu_memory_utilization}")
+
+        # Override VL config for quick_test to avoid stuck training
+        if quick_test:
+            # Reduce WM warmup so VL training phase can be reached sooner
+            vl_config.train_schedule = EasyDict({
+                "alternate": True,
+                "wm_update_iters": 50,      # Reduced from 1000
+                "llm_update_iters": 20,      # Reduced from 100
+                "start_phase": "wm",
+                "wm_warmup_updates": 0,
+            })
+            # Only run WM+VL prior eval in quick_test (skip slow pure-VL and pure-WM eval)
+            vl_config.eval_dict = EasyDict({
+                "world_model": False,
+                "world_model_llm_prior": True,
+                "llm_prior": False,
+                "eval_freq": int(50),       # Reduced from 500
+            })
     else:
         print(f"[Config] VL prior disabled (use_prior=False)")
         vl_config = None

@@ -417,7 +417,8 @@ def train_unified(
         priorzero_batch = None
 
         # Evaluation
-        if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
+        # if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
+        if learner.train_iter > 0 and evaluator.should_eval(learner.train_iter):
             logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
             if prior_cfg.vllm_enable_sleep and prior_engine is not None:
                 prior_engine.wake_up()
@@ -632,9 +633,23 @@ def main():
     else:
         from vl_config import get_priorzero_vl_config
 
+        # Build a clean env short name: strip common suffixes
+        env_short = args.env_id
+        for suffix in ['NoFrameskip-v4', '-v2', '-v1', '-v0', '-v5']:
+            if env_short.endswith(suffix):
+                env_short = env_short[:-len(suffix)]
+                break
+
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+        exp_name = (
+            f'data_priorzero_complete/'
+            f'{env_short}_{args.vl_model}_seed{args.seed}_{timestamp}'
+        )
+
         main_cfg, create_cfg, vl_cfg = get_priorzero_vl_config(
             args.env_id, args.seed,
-            exp_name=f'data_priorzero_complete/image_{args.env_id[:-14]}_seed{args.seed}',
+            exp_name=exp_name,
             vl_model_key=args.vl_model,
             use_prior=args.use_prior,
             multi_gpu=int(os.environ.get('WORLD_SIZE', '1')) > 1,

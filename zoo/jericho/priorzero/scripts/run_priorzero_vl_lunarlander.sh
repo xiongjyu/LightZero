@@ -18,7 +18,12 @@ EXTRA_ARGS="${@:4}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_ID="LunarLander-v2"
-EXP_NAME="data_priorzero_complete/image_LunarLander_${VL_MODEL}_seed${SEED}"
+TIMESTAMP="$(date +%y%m%d_%H%M%S)"
+
+# Build structured log directory: logs/<env>/<model>/
+LOG_DIR="${SCRIPT_DIR}/logs/LunarLander/${VL_MODEL}"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/seed${SEED}_gpu${NUM_GPUS}_${TIMESTAMP}.log"
 
 echo "========================================"
 echo "PriorZero VL - LunarLander-v2 (Image)"
@@ -26,8 +31,8 @@ echo "========================================"
 echo "GPUs: ${NUM_GPUS}"
 echo "VL Model: ${VL_MODEL}"
 echo "Seed: ${SEED}"
-echo "Exp Name: ${EXP_NAME}"
 echo "Extra Args: ${EXTRA_ARGS}"
+echo "Log File: ${LOG_FILE}"
 echo "========================================"
 
 cd "${SCRIPT_DIR}"
@@ -40,5 +45,5 @@ torchrun \
     --env_id "${ENV_ID}" \
     --vl_model "${VL_MODEL}" \
     --seed "${SEED}" \
-    ${EXTRA_ARGS}
-    | tee "/mnt/shared-storage-user/puyuan/code/LightZero/zoo/jericho/priorzero/logs/lunarlander.log"
+    ${EXTRA_ARGS} \
+    2>&1 | tee "${LOG_FILE}"

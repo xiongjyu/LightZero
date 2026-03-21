@@ -509,12 +509,14 @@ class VLPriorGenerator(PriorGenerator):
         """
         num_actions = len(action_candidates)
 
-        # Create peaked distribution: high prob for chosen action, low for others
-        logits = np.ones(num_actions) * (-10.0)  # Very low logit for non-chosen
+        # Create peaked but NOT one-hot distribution to preserve MCTS exploration.
+        # Use moderate logit gap (2.0 vs 0.0) instead of extreme (10.0 vs -10.0),
+        # so the prior is informative but not deterministic.
+        logits = np.zeros(num_actions, dtype=np.float32)
 
         try:
             chosen_idx = action_candidates.index(chosen_action)
-            logits[chosen_idx] = 10.0  # High logit for chosen action
+            logits[chosen_idx] = 2.0  # Moderate logit for chosen action
         except ValueError:
             # If chosen action not in candidates, uniform distribution
             logits = np.zeros(num_actions)
@@ -735,12 +737,9 @@ class VLPriorGenerator(PriorGenerator):
             import logging
             logger = logging.getLogger(__name__)
             logger.info(
-                f"[VL Batch Generation] Batch #{self.batch_call_count} | "
-                f"Batch size: {len(observations)} | "
-                f"Avg actions: {sum(len(a) for a in action_candidates_list) / len(action_candidates_list):.1f}"
+                f"[VL Batch] #{self.batch_call_count} | "
+                f"size={len(observations)} | actions={sum(len(a) for a in action_candidates_list) / len(action_candidates_list):.0f}"
             )
-            # logger.debug(f"[VL Debug] First prompt preview: {prompts[0][:200]}")
-            logger.debug(f"[VL Debug] First prompt preview: {prompts[0]}")
             if "<|vision_start|>" not in prompts[0]:
                 logger.error(f"[VL Error] Missing <|vision_start|> token in prompt!")
 

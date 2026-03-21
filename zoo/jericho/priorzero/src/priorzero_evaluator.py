@@ -173,8 +173,19 @@ class PriorZeroEvaluator(OriginalEvaluator):
             metrics_str = " | ".join([f"{k}: {info.get(k, 0):.2f}" for k in ['avg_envstep_per_episode', 'reward_mean', 'reward_max', 'reward_min']])
             self._logger.info(f"[RANK {self._rank}] {tag} >> {metrics_str}")
 
+        # Determine stop flag and best reward from available modes
+        stop_flag = False
+        best_reward = None
+        for tag, info in modes:
+            mean_r = info.get('reward_mean', None)
+            if mean_r is not None:
+                if best_reward is None or mean_r > best_reward:
+                    best_reward = mean_r
+            if mean_r is not None and mean_r >= self._stop_value:
+                stop_flag = True
+
         if self._rank != 0:
-            return
+            return stop_flag, best_reward
 
         # Detailed episode logging (text-only, image obs not printable)
         if wm_llm_eval_episode_info is not None and self.obs_type == 'text':
@@ -213,14 +224,27 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 self._logger_eval_episode.info("-" * 100)
             self._logger_eval_episode.info("="*100)
 
-        # Image mode: log summary only
+        # Image mode: structured summary log
         if self.obs_type == 'image':
-            if wm_llm_eval_episode_info is not None:
-                ep_return = wm_llm_eval_episode_info[0][-1]['info'].get('eval_episode_return', 'N/A')
-                self._logger_eval_episode.info(f"[WM_VLPrior] episode_steps={len(wm_llm_eval_episode_info[0])} | episode_return={ep_return}")
-            if llm_eval_episode_info is not None:
-                ep_return = llm_eval_episode_info[0][-1]['info'].get('eval_episode_return', 'N/A')
-                self._logger_eval_episode.info(f"[VLPrior] episode_steps={len(llm_eval_episode_info[0])} | episode_return={ep_return}")
+            self._logger_eval_episode.info("=" * 80)
+            self._logger_eval_episode.info(f"[Eval Summary] obs_type=image | env={self.env_id}")
+            self._logger_eval_episode.info("-" * 80)
+            for tag, info in modes:
+                self._logger_eval_episode.info(
+                    f"  [{tag}] reward_mean={info.get('reward_mean', 0):.2f} | "
+                    f"reward_max={info.get('reward_max', 0):.2f} | "
+                    f"reward_min={info.get('reward_min', 0):.2f} | "
+                    f"avg_steps={info.get('avg_envstep_per_episode', 0):.1f}"
+                )
+            if wm_llm_eval_episode_info is not None and len(wm_llm_eval_episode_info[0]) > 0:
+                ep = wm_llm_eval_episode_info[0]
+                ep_return = ep[-1]['info'].get('eval_episode_return', ep[-1]['info'].get('score', 'N/A'))
+                self._logger_eval_episode.info(f"  [WM_VLPrior ep0] steps={len(ep)} | return={ep_return}")
+            if llm_eval_episode_info is not None and len(llm_eval_episode_info[0]) > 0:
+                ep = llm_eval_episode_info[0]
+                ep_return = ep[-1]['info'].get('eval_episode_return', ep[-1]['info'].get('score', 'N/A'))
+                self._logger_eval_episode.info(f"  [VLPrior ep0] steps={len(ep)} | return={ep_return}")
+            self._logger_eval_episode.info("=" * 80)
 
         keys = ['avg_envstep_per_episode', 'reward_mean', 'reward_std', 'reward_max', 'reward_min']
         for k in keys:
@@ -233,6 +257,8 @@ class PriorZeroEvaluator(OriginalEvaluator):
             if llm_prior_info is not None:
                 self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_LLMPrior', llm_prior_info[k], train_iter)
                 self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_LLMPrior', llm_prior_info[k], envstep)
+
+        return stop_flag, best_reward
 
     # ==================================================================
     # eval_with_llm_prior: WM + VL/LLM prior → MCTS

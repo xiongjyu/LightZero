@@ -316,7 +316,7 @@ class PriorZeroCollector(OriginalCollector):
                     stack_obs_array,
                     self.policy_config.model.model_type
                 )
-                stack_obs_tensor = torch.from_numpy(stack_obs_tensor).to(self.policy_config.device)
+                stack_obs_tensor = torch.from_numpy(stack_obs_tensor).to(self.policy_config.device).float()
 
                 if collect_with_pure_policy:
                     continue
