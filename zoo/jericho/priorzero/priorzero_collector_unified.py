@@ -548,12 +548,18 @@ class PriorZeroCollector(OriginalCollector):
                         self._env.reset({env_id: None})
                         self._policy.reset([env_id])
 
-                        # Save final segment
+                        # Save second-to-last segment (if exists)
                         if last_game_segments[env_id] is not None:
                             self.pad_and_save_last_trajectory(
                                 env_id, last_game_segments, last_game_priorities,
                                 game_segments, done
                             )
+
+                        # Save the final segment of the episode
+                        game_segments[env_id].game_segment_to_array()
+                        if len(game_segments[env_id].reward_segment) > 0:
+                            priorities = self._compute_priorities(game_segments[env_id])
+                            self.game_segment_pool.append((game_segments[env_id], priorities, done))
 
                         # Log episode statistics
                         collected_episode += 1
@@ -572,14 +578,60 @@ class PriorZeroCollector(OriginalCollector):
                         # Reset for next episode
                         eps_steps_lst[env_id] = 0
                         visit_entropies_lst[env_id] = 0
+                        search_values_lst[env_id] = []
+                        pred_values_lst[env_id] = []
                         self.history_buffers[env_id].clear()
+
+                        # Re-initialize game segment for next episode
+                        init_obs = self._env.ready_obs
+                        if env_id in init_obs:
+                            game_segments[env_id] = GameSegment(
+                                self._env.action_space,
+                                game_segment_length=self.policy_config.game_segment_length,
+                                config=self.policy_config,
+                                task_id=self.task_id
+                            )
+                            observation_window_stack[env_id] = deque(maxlen=self.policy_config.model.frame_stack_num)
+                            initial_frames = [
+                                to_ndarray(init_obs[env_id]['observation'])
+                                for _ in range(self.policy_config.model.frame_stack_num)
+                            ]
+                            observation_window_stack[env_id].extend(initial_frames)
+
+                            if self.obs_type == 'text':
+                                init_raw_obs = extract_raw_obs_text(init_obs[env_id])
+                            else:
+                                init_raw_obs = extract_raw_obs_image(init_obs[env_id])
+
+                            game_segments[env_id].reset(
+                                observation_window_stack[env_id],
+                                init_raw_obs=init_raw_obs,
+                                init_history_obs=list(self.history_buffers[env_id])
+                            )
+
+                            self.action_mask_dict[env_id] = to_ndarray(init_obs[env_id]['action_mask'])
+                            self.to_play_dict[env_id] = to_ndarray(init_obs[env_id]['to_play'])
+
+                            last_game_segments[env_id] = None
+                            last_game_priorities[env_id] = None
 
             # Check if collection is complete
             if collected_episode >= num_segments:
                 break
 
-        # Return collected data
-        return_data = [self.game_segment_pool, {}]
+        # Return collected data in the format expected by push_game_segments:
+        # [list_of_game_segments, list_of_meta_dicts]
+        return_data = [
+            [seg for seg, _, _ in self.game_segment_pool],
+            [
+                {
+                    'priorities': priorities,
+                    'done': done,
+                    'unroll_plus_td_steps': self.unroll_plus_td_steps,
+                }
+                for _, priorities, done in self.game_segment_pool
+            ]
+        ]
         self.game_segment_pool = []
 
         return return_data

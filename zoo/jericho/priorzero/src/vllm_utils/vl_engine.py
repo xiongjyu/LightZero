@@ -9,6 +9,7 @@ from typing import List, Union, Optional, Dict, Any
 from PIL import Image
 import numpy as np
 from loguru import logger
+from transformers import AutoProcessor
 
 
 class VLActor:
@@ -16,6 +17,7 @@ class VLActor:
     vLLM Actor for Vision-Language (VL) models.
 
     Similar to LLMActor but with multimodal support.
+    Applies ChatML formatting required by Instruct-tuned models.
     """
 
     def __init__(
@@ -32,6 +34,7 @@ class VLActor:
         """
         self.kwargs = kwargs
         self.limit_mm_per_prompt = limit_mm_per_prompt or {"image": 1}
+        self.model_path = model
 
         logger.info(f"Initializing VLActor with model: {model}")
         logger.info(f"  Multimodal limits: {self.limit_mm_per_prompt}")
@@ -41,6 +44,49 @@ class VLActor:
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             **self.kwargs
         )
+
+        # Load processor/tokenizer for chat template
+        try:
+            self.processor = AutoProcessor.from_pretrained(model, trust_remote_code=True)
+            logger.info(f"  ✓ Loaded processor for chat template")
+        except Exception as e:
+            logger.warning(f"  Failed to load processor: {e}. Will use raw prompts (may cause garbled output).")
+            self.processor = None
+
+    def _apply_chat_template(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+        """
+        Apply ChatML template to convert raw user prompt into model-expected format.
+
+        For Qwen2.5-VL / Qwen3-VL Instruct models, the expected format is:
+            <|im_start|>system\nYou are a helpful assistant.<|im_end|>
+            <|im_start|>user\n<image>\n<prompt><|im_end|>
+            <|im_start|>assistant\n
+
+        Without this, the model produces garbled/random output.
+        """
+        if self.processor is None:
+            return prompt
+
+        messages = []
+
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        messages.append({"role": "user", "content": [
+            {"type": "image"},
+            {"type": "text", "text": prompt},
+        ]})
+
+        try:
+            formatted = self.processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            return formatted
+        except Exception as e:
+            logger.warning(f"Failed to apply chat template: {e}. Using raw prompt.")
+            return prompt
 
     def sleep(self, level=1):
         """Put the engine to sleep to free GPU memory."""
@@ -57,14 +103,18 @@ class VLActor:
         images: List[Union[Image.Image, np.ndarray]],
         prompts: List[str],
         sampling_params: Any,
+        system_prompt: Optional[str] = None,
     ) -> List[Any]:
         """
         Generate responses for multimodal inputs.
 
+        Applies ChatML chat template before sending to vLLM.
+
         Args:
             images: List of images (PIL Image or numpy array)
-            prompts: List of text prompts
+            prompts: List of text prompts (raw user text, will be wrapped in chat template)
             sampling_params: vLLM SamplingParams
+            system_prompt: Optional system prompt for all requests in this batch
 
         Returns:
             List of vLLM RequestOutput objects
@@ -81,8 +131,11 @@ class VLActor:
                     image = np.transpose(image, (1, 2, 0))
                 image = Image.fromarray(image)
 
+            # Apply chat template for Instruct models
+            formatted_prompt = self._apply_chat_template(prompt, system_prompt=system_prompt)
+
             inputs.append({
-                "prompt": prompt,
+                "prompt": formatted_prompt,
                 "multi_modal_data": {"image": image},
             })
 

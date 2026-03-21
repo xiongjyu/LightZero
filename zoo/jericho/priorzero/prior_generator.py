@@ -6,6 +6,7 @@ from different types of observations (text or image).
 """
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Union, Tuple
+import time
 import numpy as np
 import torch
 from PIL import Image
@@ -346,7 +347,9 @@ class VLPriorGenerator(PriorGenerator):
             prompt_parts.append("")  # empty line separator
 
         prompt_parts.append("=== CURRENT OBSERVATION ===")
-        prompt_parts.append("<|vision_start|><|image_pad|><|vision_end|>")
+        # NOTE: Do NOT include <|vision_start|><|image_pad|><|vision_end|> here.
+        # The image placeholder is inserted by the chat template in vl_engine.
+        prompt_parts.append("[See the game screen image above]")
         if self.game_description:
             prompt_parts.append(self.game_description)
 
@@ -561,6 +564,7 @@ class VLPriorGenerator(PriorGenerator):
             image=image,
             prompt=prompt,
             temperature=temperature,
+            system_prompt=self.get_system_prompt(),
             **kwargs
         )
 
@@ -648,24 +652,16 @@ class VLPriorGenerator(PriorGenerator):
             logger.info(f"  Actions[0]: {action_candidates_list[0]}")
             logger.info(f"[VL Batch Validation] === END FIRST CALL CHECK ===")
 
-        # Log batch info at intervals (every 10 batch calls)
-        if self.batch_call_count % 10 == 1:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(
-                f"[VL Batch] #{self.batch_call_count} | "
-                f"size={len(observations)} | actions={sum(len(a) for a in action_candidates_list) / len(action_candidates_list):.0f}"
-            )
-            if "<|vision_start|>" not in prompts[0]:
-                logger.error(f"[VL Error] Missing <|vision_start|> token in prompt!")
-
         # Batch generate with VL
+        _batch_start = time.monotonic()
         raw_outputs = self.vl_engine.batch_generate(
             images=images,
             prompts=prompts,
             temperature=temperature,
+            system_prompt=self.get_system_prompt(),
             **kwargs
         )
+        _batch_elapsed = time.monotonic() - _batch_start
 
         # Parse outputs (unified: always use CoT-style parser)
         results = []
@@ -700,6 +696,25 @@ class VLPriorGenerator(PriorGenerator):
                 'cot_prefix': cot_prefix,
                 'chosen_action': chosen_action,
             })
+
+        # Log batch info at intervals (every 10 batch calls)
+        if self.batch_call_count % 10 == 1:
+            import logging
+            logger = logging.getLogger(__name__)
+            _action_dist = {}
+            _parse_fail = 0
+            for r in results:
+                _action_dist[r['chosen_action']] = _action_dist.get(r['chosen_action'], 0) + 1
+                if 'Action:' not in r.get('raw_output', ''):
+                    _parse_fail += 1
+            logger.info(
+                f"[VL Batch] #{self.batch_call_count} | "
+                f"size={len(observations)} | "
+                f"actions={sum(len(a) for a in action_candidates_list) / len(action_candidates_list):.0f} | "
+                f"time={_batch_elapsed:.2f}s ({_batch_elapsed / max(len(observations), 1):.2f}s/obs) | "
+                f"parse_fail={_parse_fail}/{len(observations)} | "
+                f"action_dist={_action_dist}"
+            )
 
         return results
 

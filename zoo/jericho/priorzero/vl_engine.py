@@ -215,15 +215,19 @@ class VLLMVLEngine(VLEngine):
         prompt: str,
         temperature: float = 1.0,
         max_new_tokens: int = 512,
+        system_prompt: Optional[str] = None,
         **kwargs
     ) -> str:
         """Generate response using vLLM."""
         from vllm import SamplingParams
 
-        # Sampling parameters
+        # Sampling parameters with sane defaults to prevent garbled output
         sampling_params = SamplingParams(
-            temperature=temperature,
+            temperature=max(temperature, 0.1),
             max_tokens=max_new_tokens,
+            top_p=kwargs.pop('top_p', 0.95),
+            top_k=kwargs.pop('top_k', 50),
+            repetition_penalty=kwargs.pop('repetition_penalty', 1.1),
             **kwargs
         )
 
@@ -231,7 +235,8 @@ class VLLMVLEngine(VLEngine):
         outputs = self.model.generate(
             images=[image],
             prompts=[prompt],
-            sampling_params=sampling_params
+            sampling_params=sampling_params,
+            system_prompt=system_prompt,
         )
 
         # Extract text from output
@@ -245,15 +250,19 @@ class VLLMVLEngine(VLEngine):
         prompts: List[str],
         temperature: float = 1.0,
         max_new_tokens: int = 512,
+        system_prompt: Optional[str] = None,
         **kwargs
     ) -> List[str]:
         """Batch generate responses using vLLM."""
         from vllm import SamplingParams
 
-        # Sampling parameters
+        # Sampling parameters with sane defaults to prevent garbled output
         sampling_params = SamplingParams(
-            temperature=temperature,
+            temperature=max(temperature, 0.1),
             max_tokens=max_new_tokens,
+            top_p=kwargs.pop('top_p', 0.95),
+            top_k=kwargs.pop('top_k', 50),
+            repetition_penalty=kwargs.pop('repetition_penalty', 1.1),
             **kwargs
         )
 
@@ -261,7 +270,8 @@ class VLLMVLEngine(VLEngine):
         outputs = self.model.generate(
             images=images,
             prompts=prompts,
-            sampling_params=sampling_params
+            sampling_params=sampling_params,
+            system_prompt=system_prompt,
         )
 
         # Extract texts
