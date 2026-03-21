@@ -266,7 +266,8 @@ def train_priorzero(
             logger.info(f"[LLM Training] Rank {rank} | Total transitions: {num_of_transitions} | New transitions: {new_num_of_transitions}")
             
             with prof.block("fetch_latest_batch", rank=rank):
-                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
+                llm_batch_size = -1 if new_num_of_transitions < 512 else 512
+                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_batch_size, policy=policy)
                 # 清理 policy的cahce，防止OOM
                 torch.cuda.empty_cache()
                 
