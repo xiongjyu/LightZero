@@ -163,7 +163,8 @@ class PriorZeroVLConfig:
 
     # MCTS root logits configuration
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        "mode": "llm_plus_wm_logits",
+        # "mode": "llm_plus_wm_logits",
+        "mode": "llm_logits",
         "plus_method": "fixed",
         "wm_weight": 0.5,
         "llm_max_weight": 0.7,
@@ -181,8 +182,8 @@ class PriorZeroVLConfig:
 
     attn_implementation: str = "flash_attention_2" 
     use_cot: bool = True
-    prompt_max_len: int = 4096  # Image + prompt tokens; 4096 is enough for image VL
-    generate_max_len: int = 128  # CoT + action output
+    prompt_max_len: int = 8192  # Image + prompt tokens; 
+    generate_max_len: int = 512  # CoT + action output
     bf16: bool = True
 
     history_length: int = 3  # Number of recent steps to include in context
@@ -262,7 +263,8 @@ class PriorZeroVLConfig:
     enable_world_model: bool = True
     enable_rft: bool = True
     max_rollout_staleness: int = 1
-    vl_fixed: bool = False  # If True, VL is frozen (inference only, no VL training)
+    # vl_fixed: bool = False  # If True, VL is frozen (inference only, no VL training)
+    vl_fixed: bool = True  # If True, VL is frozen (inference only, no VL training)
 
     # Value normalization
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -275,17 +277,6 @@ class PriorZeroVLConfig:
         "value_norm_history_size": 1000,
     }))
 
-    # Prompt template (Qwen-VL format, used when use_cot=False)
-    # When use_cot=True, VLPriorGenerator.get_user_prompt() is used instead.
-    prompt_template: str = (
-        "<|vision_start|><|image_pad|><|vision_end|>"
-        "You are an expert game player. "
-        "Based on the current game screen, choose the best action.\n"
-        "Available actions:\n{action_list}\n\n"
-        "Output exactly one line starting with 'Action:'.\n"
-        "Example:\n"
-        "Action: <your_action_here>"
-    )
 
 
 def get_priorzero_vl_config(
@@ -337,13 +328,16 @@ def get_priorzero_vl_config(
         num_layers = 1
         replay_ratio = 0.1
     else:
-        collector_env_num = 8
-        num_segments = 8
+        # collector_env_num = 8
+        # num_segments = 8
+        collector_env_num = 4
+        num_segments = 4
         game_segment_length = 20
         evaluator_env_num = 3
         num_simulations = 25
         collect_num_simulations = 25
-        eval_num_simulations = 50
+        eval_num_simulations = 25
+        # eval_num_simulations = 50
 
         batch_size = 256
         num_layers = 2

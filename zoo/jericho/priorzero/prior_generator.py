@@ -175,7 +175,6 @@ class VLPriorGenerator(PriorGenerator):
         self,
         vl_engine,
         model_name: str,
-        prompt_template: Optional[str] = None,
         use_cot: bool = True,
         tokenizer=None,
         game_description: str = "",
@@ -185,14 +184,12 @@ class VLPriorGenerator(PriorGenerator):
         Args:
             vl_engine: VL engine instance (to be implemented)
             model_name: VL model name
-            prompt_template: Optional custom prompt template
             use_cot: Whether to use Chain-of-Thought reasoning
             tokenizer: Tokenizer for building training samples
             game_description: Game-specific description for prompts
         """
         super().__init__(model_name, obs_type='image')
         self.vl_engine = vl_engine
-        self.prompt_template = prompt_template or self._default_prompt_template()
         self.use_cot = use_cot
         self.tokenizer = tokenizer
         self.game_description = game_description
@@ -204,33 +201,6 @@ class VLPriorGenerator(PriorGenerator):
         self.log_interval = 100  # Log every 100 calls
         self.call_count = 0
         self.batch_call_count = 0
-
-    def _default_prompt_template(self) -> str:
-        """Default prompt template for VL, mirrors LLM format with vision tokens."""
-        if self.use_cot:
-            return (
-                "<|vision_start|><|image_pad|><|vision_end|>"
-                "You are an expert player in an image-based game. "
-                "Your goal is to maximize the score by choosing the optimal next action.\n\n"
-                "Available actions:\n{action_list}\n\n"
-                "OUTPUT FORMAT:\n"
-                "You MUST produce exactly TWO parts in the following order:\n"
-                "1. Reasoning: Analyze the current situation, available actions, constraints, and uncertainties. Do NOT reveal the final choice here.\n"
-                "2. Action: The final chosen action.\n\n"
-                "Strict Format Example:\n"
-                "Reasoning: <detailed_analysis>\n"
-                "Action: <single_action>"
-            )
-        else:
-            return (
-                "<|vision_start|><|image_pad|><|vision_end|>"
-                "You are an expert player in an image-based game. "
-                "Your goal is to maximize the score by choosing the optimal next action.\n"
-                "Available actions:\n{action_list}\n\n"
-                "Output exactly one line starting with 'Action:'.\n"
-                "Example:\n"
-                "Action: <your_action_here>"
-            )
 
     def _convert_obs_to_pil_image(self, obs: np.ndarray) -> Image.Image:
         """
@@ -326,42 +296,6 @@ class VLPriorGenerator(PriorGenerator):
                 f"Invalid observation shape {obs.shape}. "
                 f"Expected 2D (H, W) or 3D (C, H, W) or (H, W, C)."
             )
-
-    def _build_prompt(
-        self,
-        action_candidates: List[str],
-        history: Optional[List] = None
-    ) -> str:
-        """
-        Build prompt for VL with CoT support.
-
-        Args:
-            action_candidates: List of valid action names (e.g., ['NOOP', 'FIRE', 'RIGHT'])
-            history: Optional history (for context)
-
-        Returns:
-            Formatted prompt string
-        """
-        # Format action list with semantic names
-        action_list = "\n".join([f"- {action}" for action in action_candidates])
-
-        # Build base prompt (already contains vision tokens at the start)
-        prompt = self.prompt_template.format(action_list=action_list)
-
-        # Inject game description after vision tokens
-        if self.game_description:
-            game_desc_text = f"\n\nGame: {self.game_description}\n"
-            prompt = prompt.replace("<|vision_end|>", "<|vision_end|>" + game_desc_text)
-
-        # Add history context if available (AFTER the vision tokens)
-        if history and len(history) > 0:
-            history_text = "\n\nRecent history:\n"
-            for i, (obs, action, reward) in enumerate(history[-3:]):  # Last 3 steps
-                history_text += f"Step {i+1}: Action={action}, Reward={reward}\n"
-            # Insert history after vision end token
-            prompt = prompt.replace("<|vision_end|>", "<|vision_end|>" + history_text)
-
-        return prompt
 
     def get_system_prompt(self) -> str:
         """
@@ -609,11 +543,8 @@ class VLPriorGenerator(PriorGenerator):
         else:
             image = observation
 
-        # Build prompt (with CoT if enabled)
-        if self.use_cot:
-            prompt = self.get_user_prompt(action_candidates, history)
-        else:
-            prompt = self._build_prompt(action_candidates, history)
+        # Build prompt (unified: always use get_user_prompt, consistent with LLM side)
+        prompt = self.get_user_prompt(action_candidates, history)
 
         # Log prompt preview at intervals
         if self.call_count % self.log_interval == 1:
@@ -633,39 +564,27 @@ class VLPriorGenerator(PriorGenerator):
             **kwargs
         )
 
-        # Parse output
-        if self.use_cot:
-            # Extract action and CoT reasoning
-            chosen_action, cot_prefix = self._parse_vl_output_with_cot(raw_output, action_candidates)
+        # Parse output (unified: always use CoT-style parser which handles both formats)
+        chosen_action, cot_prefix = self._parse_vl_output_with_cot(raw_output, action_candidates)
 
-            # Convert chosen action to log probability distribution
-            action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
-            action_probs = np.exp(action_log_probs)
+        # Convert chosen action to log probability distribution
+        action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
+        action_probs = np.exp(action_log_probs)
 
-            # Log output at intervals
-            if self.call_count % self.log_interval == 1:
-                logger.info(
-                    f"[VL Prior Output] Chosen: {chosen_action} | "
-                    f"CoT: {cot_prefix[:100] if cot_prefix else 'None'}..."
-                )
+        # Log output at intervals
+        if self.call_count % self.log_interval == 1:
+            logger.info(
+                f"[VL Prior Output] Chosen: {chosen_action} | "
+                f"CoT: {cot_prefix[:100] if cot_prefix else 'None'}..."
+            )
 
-            return {
-                'action_probs': action_probs,
-                'action_logits': action_log_probs,  # Store log probs for training
-                'raw_output': raw_output,
-                'cot_prefix': cot_prefix,
-                'chosen_action': chosen_action,
-            }
-        else:
-            # Legacy: parse as probability distribution
-            action_probs = self._parse_vl_output(raw_output, action_candidates)
-            action_logits = np.log(action_probs + 1e-10) / max(temperature, 1e-8)
-
-            return {
-                'action_probs': action_probs,
-                'action_logits': action_logits,
-                'raw_output': raw_output,
-            }
+        return {
+            'action_probs': action_probs,
+            'action_logits': action_log_probs,
+            'raw_output': raw_output,
+            'cot_prefix': cot_prefix,
+            'chosen_action': chosen_action,
+        }
 
     def batch_generate_prior(
         self,
@@ -703,13 +622,10 @@ class VLPriorGenerator(PriorGenerator):
                     f"to PIL Image: {e}"
                 ) from e
 
-        # Build prompts
+        # Build prompts (unified: always use get_user_prompt)
         prompts = []
         for action_candidates, history in zip(action_candidates_list, histories):
-            if self.use_cot:
-                prompt = self.get_user_prompt(action_candidates, history)
-            else:
-                prompt = self._build_prompt(action_candidates, history)
+            prompt = self.get_user_prompt(action_candidates, history)
             prompts.append(prompt)
 
         # Increment batch call counter
@@ -751,51 +667,39 @@ class VLPriorGenerator(PriorGenerator):
             **kwargs
         )
 
-        # Parse outputs
+        # Parse outputs (unified: always use CoT-style parser)
         results = []
         for idx, (raw_output, action_candidates) in enumerate(zip(raw_outputs, action_candidates_list)):
-            if self.use_cot:
-                # Parse CoT output
-                chosen_action, cot_prefix = self._parse_vl_output_with_cot(raw_output, action_candidates)
-                action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
-                action_probs = np.exp(action_log_probs)
+            chosen_action, cot_prefix = self._parse_vl_output_with_cot(raw_output, action_candidates)
+            action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
+            action_probs = np.exp(action_log_probs)
 
-                # Store for logging
-                if idx < 15:  # Only store first 15 for logging
-                    history = histories[idx] if idx < len(histories) else []
-                    prompt = prompts[idx]
+            # Store for logging
+            if idx < 15:  # Only store first 15 for logging
+                history = histories[idx] if idx < len(histories) else []
+                prompt = prompts[idx]
 
-                    # Build action probability dict
-                    action_prob_dict = {
-                        action: float(action_probs[i])
-                        for i, action in enumerate(action_candidates)
-                    }
+                # Build action probability dict
+                action_prob_dict = {
+                    action: float(action_probs[i])
+                    for i, action in enumerate(action_candidates)
+                }
 
-                    self.episode_output.append({
-                        "Instruction": prompt,
-                        "Response": raw_output,
-                        "vl_prior_per_seq": action_prob_dict,
-                        "chosen_action": chosen_action,
-                        "cot_prefix": cot_prefix,
-                    })
-
-                results.append({
-                    'action_probs': action_probs,
-                    'action_logits': action_log_probs,
-                    'raw_output': raw_output,
-                    'cot_prefix': cot_prefix,
-                    'chosen_action': chosen_action,
+                self.episode_output.append({
+                    "Instruction": prompt,
+                    "Response": raw_output,
+                    "vl_prior_per_seq": action_prob_dict,
+                    "chosen_action": chosen_action,
+                    "cot_prefix": cot_prefix,
                 })
-            else:
-                # Legacy: probability distribution
-                action_probs = self._parse_vl_output(raw_output, action_candidates)
-                action_logits = np.log(action_probs + 1e-10) / max(temperature, 1e-8)
 
-                results.append({
-                    'action_probs': action_probs,
-                    'action_logits': action_logits,
-                    'raw_output': raw_output,
-                })
+            results.append({
+                'action_probs': action_probs,
+                'action_logits': action_log_probs,
+                'raw_output': raw_output,
+                'cot_prefix': cot_prefix,
+                'chosen_action': chosen_action,
+            })
 
         return results
 
@@ -871,11 +775,8 @@ class VLPriorGenerator(PriorGenerator):
                 # Get CoT prefix (if available)
                 cot_prefix = cot_prefix_list[step_idx] if step_idx < len(cot_prefix_list) else None
 
-                # Build prompt
-                if self.use_cot:
-                    prompt = self.get_user_prompt(valid_actions, history)
-                else:
-                    prompt = self._build_prompt(valid_actions, history)
+                # Build prompt (unified)
+                prompt = self.get_user_prompt(valid_actions, history)
 
                 # Create training sample
                 sample = {
@@ -1054,7 +955,6 @@ def create_prior_generator(
         return VLPriorGenerator(
             vl_engine=vl_engine,
             model_name=model_config['model_name'],
-            prompt_template=model_config.get('prompt_template', None),
         )
 
     else:

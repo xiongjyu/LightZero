@@ -273,7 +273,7 @@ def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_
     prior_generator = VLPriorGenerator(
         vl_engine=vl_engine,
         model_name=vl_cfg.model_name_or_path,
-        prompt_template=vl_cfg.prompt_template,
+        use_cot=vl_cfg.use_cot,
         game_description=getattr(vl_cfg, 'game_description', ''),
     )
 
@@ -588,13 +588,29 @@ def main():
 
     # Text-specific
     parser.add_argument('--llm_model', type=str, default='qwen2.5-1.5b')
-    parser.add_argument('--use_cot', action='store_true', default=True)
+
+    # Shared LLM/VL arguments
+    parser.add_argument('--use_cot', action='store_true', default=True,
+                        help='Enable Chain-of-Thought reasoning (default: True)')
+    parser.add_argument('--no_cot', action='store_true', default=False,
+                        help='Disable Chain-of-Thought reasoning')
+    parser.add_argument('--vl_fixed', action='store_true', default=True,
+                        help='Freeze VL model (inference only, no VL training) (default: True)')
+    parser.add_argument('--no_vl_fixed', action='store_true', default=False,
+                        help='Enable VL training (unfreeze)')
+    parser.add_argument('--mcts_mode', type=str, default='llm_plus_wm_logits',
+                        choices=['llm_logits', 'wm_logits', 'llm_plus_wm_logits'],
+                        help='MCTS root logits mode (default: llm_plus_wm_logits)')
 
     # Image-specific
     parser.add_argument('--vl_model', type=str, default='Qwen2.5-VL-7b')
     parser.add_argument('--use_prior', action='store_true', default=True)
 
     args = parser.parse_args()
+
+    # Resolve --no_xxx flags (explicit --no_cot / --no_vl_fixed override defaults)
+    args.use_cot = not args.no_cot
+    args.vl_fixed = not args.no_vl_fixed
 
     print(f"\n{'='*80}")
     print(f"PriorZero Training with {'LLM' if args.input_type == 'text' else 'VL'} Prior")
@@ -603,6 +619,10 @@ def main():
     print(f"Environment: {args.env_id}")
     print(f"Seed: {args.seed}")
     print(f"Quick Test: {args.quick_test}")
+    print(f"Use CoT: {args.use_cot}")
+    if args.input_type == 'image':
+        print(f"VL Fixed: {args.vl_fixed}")
+        print(f"MCTS Mode: {args.mcts_mode}")
     print(f"{'='*80}\n")
 
     if args.input_type == 'text':
@@ -655,6 +675,12 @@ def main():
             multi_gpu=int(os.environ.get('WORLD_SIZE', '1')) > 1,
             quick_test=args.quick_test,
         )
+
+        # Apply CLI overrides to vl_cfg
+        if vl_cfg is not None:
+            vl_cfg.use_cot = args.use_cot
+            vl_cfg.vl_fixed = args.vl_fixed
+            vl_cfg.mcts_root_logits_dict.mode = args.mcts_mode
 
         train_unified(
             main_cfg, create_cfg, vl_cfg,
