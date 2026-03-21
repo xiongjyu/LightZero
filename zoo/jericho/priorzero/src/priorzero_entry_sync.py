@@ -194,6 +194,7 @@ def train_priorzero(
     
     train_schedule = llm_cfg.train_schedule
     train_alternate = train_schedule["alternate"]
+    current_phase = None
     if train_alternate:
         current_phase = train_schedule["start_phase"]
         last_wm_train_iter = 0
@@ -215,7 +216,7 @@ def train_priorzero(
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.wake_up()
                         
-                new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
+                new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0}, phase=current_phase)
                 data_processor.get_llm_output_log(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter)
                 
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
