@@ -403,9 +403,10 @@ class PriorZeroEvaluator(OriginalEvaluator):
                         "mcts_info": mcts_info[env_id],
                         "info": info
                     })
-                    # Update history
+                    # Update history with absolute timestep
                     raw_obs_for_history = self._extract_obs(obs[env_id])
-                    self.history_buffers[env_id].append((raw_obs_for_history, action_str, float(reward)))
+                    abs_timestep = int(timestep_dict[env_id]) if int(timestep_dict[env_id]) >= 0 else int(eps_steps_lst[env_id])
+                    self.history_buffers[env_id].append((raw_obs_for_history, action_str, float(reward), abs_timestep))
 
                     eps_steps_lst[env_id] += 1
                     if self._policy.get_attribute('cfg').type in ['unizero', 'sampled_unizero', 'priorzero']:
@@ -490,6 +491,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
         dones = np.array([False for _ in range(env_nums)])
         ready_env_id = [i for i in range(env_nums)]
         episode_return = []
+        eps_steps_lst = np.zeros(env_nums)
         while True:
             if all(dones):
                 break
@@ -560,12 +562,14 @@ class PriorZeroEvaluator(OriginalEvaluator):
                         "info": info,
                     })
                 raw_obs_for_history = self._extract_obs(obs[env_id])
-                self.history_buffers[env_id].append((raw_obs_for_history, action_str, float(reward)))
+                self.history_buffers[env_id].append((raw_obs_for_history, action_str, float(reward), int(eps_steps_lst[env_id])))
 
+                eps_steps_lst[env_id] += 1
                 dones[env_id] = done
                 if episode_timestep.done:
                     ready_env_id.remove(env_id)
                     episode_return.append(info.get('score', info.get('eval_episode_return', 0)))
+                    eps_steps_lst[env_id] = 0
 
                 envstep_count += 1
         info = {

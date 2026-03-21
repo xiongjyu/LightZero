@@ -481,7 +481,9 @@ class PriorZeroCollector(OriginalCollector):
                         # Fallback
                         action_str = info.get('action_str', str(actions[env_id]))
 
-                    self.history_buffers[env_id].append((raw_obs, action_str, float(reward), int(eps_steps_lst[env_id])))
+                    # Use absolute timestep from environment, not relative episode step counter
+                    abs_timestep = int(self.timestep_dict[env_id]) if int(self.timestep_dict[env_id]) >= 0 else int(eps_steps_lst[env_id])
+                    self.history_buffers[env_id].append((raw_obs, action_str, float(reward), abs_timestep))
 
                     # Append transition to game segment
                     game_segments[env_id].append(
@@ -563,17 +565,26 @@ class PriorZeroCollector(OriginalCollector):
 
                         # Log episode statistics
                         collected_episode += 1
-                        episode_return = info.get('eval_episode_return', reward)
+                        episode_return = info.get('eval_episode_return', info.get('score', reward))
                         self._logger.info(
                             f"Episode {collected_episode} | Env {env_id} | "
                             f"Steps: {eps_steps_lst[env_id]} | "
                             f"Reward: {episode_return:.2f}"
                         )
 
+                        # Populate _episode_info for parent's _output_log() and TB logging
+                        ep_info = {
+                            'reward': episode_return,
+                            'time': interaction_duration * eps_steps_lst[env_id],
+                            'step': int(eps_steps_lst[env_id]),
+                            'visit_entropy': visit_entropies_lst[env_id] / max(eps_steps_lst[env_id], 1),
+                        }
+                        self._episode_info.append(ep_info)
+
                         # TB logging for episode metrics
                         if hasattr(self, '_tb_logger') and self._tb_logger is not None:
-                            self._tb_logger.add_scalar('collect/episode_reward', episode_return, self.envstep)
-                            self._tb_logger.add_scalar('collect/episode_length', eps_steps_lst[env_id], self.envstep)
+                            self._tb_logger.add_scalar('collect/episode_reward', episode_return, self._total_envstep_count + collected_step)
+                            self._tb_logger.add_scalar('collect/episode_length', eps_steps_lst[env_id], self._total_envstep_count + collected_step)
 
                         # Reset for next episode
                         eps_steps_lst[env_id] = 0
@@ -618,6 +629,13 @@ class PriorZeroCollector(OriginalCollector):
             # Check if collection is complete
             if collected_episode >= num_segments:
                 break
+
+        # Update statistics that the parent class normally maintains
+        self._total_envstep_count += collected_step
+        self._total_episode_count += collected_episode
+
+        # Call parent's _output_log to write standard TB metrics (collector_step/xxx)
+        self._output_log(train_iter)
 
         # Return collected data in the format expected by push_game_segments:
         # [list_of_game_segments, list_of_meta_dicts]

@@ -305,24 +305,25 @@ class VLPriorGenerator(PriorGenerator):
         """
         parts = [
             "You are an expert player in an image-based game. Your goal is to maximize the score by choosing the optimal next action.",
-            "Please analyze the game screen and history to decide the single best next action.",
-            "OUTPUT FORMAT:",
+            "Analyze the game screen and history to decide the single best next action.",
+            "IMPORTANT: You MUST choose EXACTLY ONE action from the provided valid actions list. Output the action name EXACTLY as given.",
         ]
 
         if self.use_cot:
             parts.append(
-                "You MUST produce exactly TWO parts in the following order:\n"
-                "1. Reasoning: Analyze the current situation, available actions, constraints, and uncertainties. Do NOT reveal the final choice here.\n"
-                "2. Action: The final chosen action.\n"
-                "Strict Format Example:\n"
-                "Reasoning: <detailed_analysis>\n"
-                "Action: <single_action>"
+                "OUTPUT FORMAT (you MUST follow this EXACTLY):\n"
+                "Reasoning: <brief analysis in 1-3 sentences>\n"
+                "Action: <exact_action_name>\n\n"
+                "RULES:\n"
+                "- Keep reasoning SHORT (1-3 sentences max).\n"
+                "- The Action line MUST contain exactly one action name from the valid actions list.\n"
+                "- Do NOT add any text after the action name."
             )
         else:
             parts.append(
-                "Output exactly one line starting with 'Action:'.\n"
-                "Example:\n"
-                "Action: <your_action_here>"
+                "OUTPUT FORMAT:\n"
+                "Action: <exact_action_name>\n\n"
+                "Output ONLY this single line. No other text."
             )
         return "\n".join(parts)
 
@@ -343,12 +344,10 @@ class VLPriorGenerator(PriorGenerator):
                 # Support both (obs, action, reward, timestep) and legacy (obs, action, reward)
                 if len(entry) >= 4:
                     obs, action, reward, timestep = entry[0], entry[1], entry[2], entry[3]
-                    prompt_parts.append(f"Step {timestep}:")
+                    prompt_parts.append(f"Step {timestep}: Action: {action}, Reward: {reward}")
                 else:
                     obs, action, reward = entry[0], entry[1], entry[2]
-                    prompt_parts.append(f"Step:")
-                prompt_parts.append(f"Action: {action}")
-                prompt_parts.append(f"Reward: {reward}")
+                    prompt_parts.append(f"Action: {action}, Reward: {reward}")
             prompt_parts.append("")  # empty line separator
 
         prompt_parts.append("=== CURRENT OBSERVATION ===")
@@ -359,20 +358,26 @@ class VLPriorGenerator(PriorGenerator):
             prompt_parts.append(self.game_description)
 
         if action_candidates and len(action_candidates) > 0:
-            actions_str = ", ".join([f"'{act}'" for act in action_candidates])
-            prompt_parts.append(f"\n[Valid Actions]\nYou can choose from the following actions: {actions_str}")
+            actions_str = ", ".join(action_candidates)
+            prompt_parts.append(f"\nValid actions: [{actions_str}]")
 
+        # Add a concrete few-shot example using the actual action names
+        example_action = action_candidates[0] if action_candidates else "NOOP"
         prompt_parts.append("\n=== INSTRUCTION ===")
         if self.use_cot:
             prompt_parts.append(
-                "Please analyze the situation and provide your response in the following format:\n"
-                "Reasoning: <detailed_analysis>\n"
-                "Action: <single_action>"
+                f"Choose the best action. Respond in EXACTLY this format:\n"
+                f"Reasoning: <1-3 sentences>\n"
+                f"Action: <one action from the valid actions list>\n\n"
+                f"Example:\n"
+                f"Reasoning: The lander is drifting left and descending fast, so I need to fire the right engine.\n"
+                f"Action: {example_action}"
             )
         else:
             prompt_parts.append(
-                "Decide on the best next move and output it in the following format:\n"
-                "Action: <your_action_here>"
+                f"Choose the best action. Output ONLY:\n"
+                f"Action: <one action from the valid actions list>\n\n"
+                f"Example:\nAction: {example_action}"
             )
         return "\n".join(prompt_parts)
 
@@ -398,30 +403,43 @@ class VLPriorGenerator(PriorGenerator):
         cot_prefix = None
         chosen_action = None
 
+        # Extract reasoning part (if present)
         if self.use_cot:
-            # Parse CoT format: "Reasoning: ... Action: ..."
             reasoning_match = re.search(r'Reasoning:\s*(.+?)(?=Action:|$)', raw_output, re.DOTALL | re.IGNORECASE)
-            action_match = re.search(r'Action:\s*(\S+)', raw_output, re.IGNORECASE)
-
             if reasoning_match:
                 cot_prefix = reasoning_match.group(1).strip()
 
-            if action_match:
-                action_str = action_match.group(1).strip()
-                # Match against valid actions (case-insensitive)
+        # Strategy 1: Extract text after "Action:" and match against candidates
+        # Use .+ instead of \S+ to capture multi-word or underscore-separated actions
+        action_match = re.search(r'Action:\s*(.+)', raw_output, re.IGNORECASE)
+        if action_match:
+            action_str = action_match.group(1).strip().strip("'\"`.,:;")
+            # Exact match (case-insensitive)
+            for candidate in action_candidates:
+                if candidate.upper() == action_str.upper():
+                    chosen_action = candidate
+                    break
+            # If no exact match, try if candidate is contained in the extracted text
+            if chosen_action is None:
                 for candidate in action_candidates:
-                    if candidate.upper() == action_str.upper():
+                    if candidate.upper() in action_str.upper():
                         chosen_action = candidate
                         break
-        else:
-            # Parse simple format: "Action: ..."
-            action_match = re.search(r'Action:\s*(\S+)', raw_output, re.IGNORECASE)
-            if action_match:
-                action_str = action_match.group(1).strip()
-                for candidate in action_candidates:
-                    if candidate.upper() == action_str.upper():
-                        chosen_action = candidate
-                        break
+
+        # Strategy 2: If no "Action:" line found, scan entire output for action names
+        if chosen_action is None:
+            # Search for exact action name mentions in the output (prefer later mentions)
+            last_found = None
+            for candidate in action_candidates:
+                # Use word boundary to avoid partial matches
+                pattern = re.escape(candidate)
+                matches = list(re.finditer(pattern, raw_output, re.IGNORECASE))
+                if matches:
+                    pos = matches[-1].start()
+                    if last_found is None or pos > last_found[1]:
+                        last_found = (candidate, pos)
+            if last_found is not None:
+                chosen_action = last_found[0]
 
         # Fallback: if no valid action found, use first candidate
         if chosen_action is None:
