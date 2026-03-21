@@ -118,6 +118,8 @@ class PriorZeroLLMConfig:
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
     use_cot: bool = False
+    cot_weight: float = 0.1 # 控制 cot前缀token的权重，由于重点是action:，所以前缀的token权重调低
+    
     user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "history_with_reward": True,   # 是否在 prompt 中加入历史交互的 reward 信息
         "observation_with_valid_actions": False,  # 是否在 prompt 中加入当前 observation 中可执行的 action 信息  
@@ -457,7 +459,7 @@ def get_priorzero_debug_config(
     game_segment_length = 50
 
     llm_config.train_batch_size = 8  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    llm_config.micro_train_batch_size = 1
+    llm_config.micro_train_batch_size = 4
     llm_config.train_schedule.wm_update_iters=2
     llm_config.train_schedule.llm_update_iters=1
 

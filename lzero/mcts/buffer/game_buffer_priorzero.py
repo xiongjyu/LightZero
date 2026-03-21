@@ -272,7 +272,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             segment_len = len(game_segment.action_segment)
             if self._cfg.action_type == 'varied_action_space':
                 within_obs_window = pos_in_game_segment + self._cfg.num_unroll_steps + self._cfg.model.frame_stack_num <= len(game_segment.obs_segment)
-                within_td_window = pos_in_game_segment < self._cfg.game_segment_length - self._cfg.num_unroll_steps - self._cfg.td_steps
+                within_td_window = pos_in_game_segment < self._cfg.game_segment_length - self._cfg.num_unroll_steps
                 valid_next_action = pos_in_game_segment < segment_len - 1
                 is_valid_latest_transition = within_obs_window and within_td_window and valid_next_action
             else:

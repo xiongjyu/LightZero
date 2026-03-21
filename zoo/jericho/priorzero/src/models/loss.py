@@ -22,6 +22,8 @@ class PolicyLoss(nn.Module):
         enable_vllm_is_correction: bool = False,
         vllm_is_truncated_threshold: list = None,
         use_icepop: bool = False,
+        use_cot: bool = False,
+        cot_weight: Optional[float] = None
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -32,6 +34,9 @@ class PolicyLoss(nn.Module):
         self.enable_vllm_is_correction = enable_vllm_is_correction
         self.vllm_is_truncated_threshold = vllm_is_truncated_threshold
         self.use_icepop = use_icepop
+        
+        self.use_cot = use_cot
+        self.cot_weight = cot_weight
 
         # GSPO requires sequence-level loss
         if policy_loss_type == "gspo":
@@ -43,6 +48,7 @@ class PolicyLoss(nn.Module):
 
     def forward(
         self,
+        input_ids: torch.LongTensor,
         log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
@@ -95,12 +101,27 @@ class PolicyLoss(nn.Module):
                 )
             loss = vllm_is * loss
             vllm_kl = masked_mean(rollout_log_probs - old_log_probs, action_mask, dim=None)
+        
+        ###### 对 cot 前缀加权重
+        if self.use_cot and self.cot_weight is not None:
+            output_ids = input_ids[:, -action_mask.shape[1]:]
+            is_split = (output_ids == 2512) & action_mask.bool()  
+            token_weights = torch.ones_like(loss) 
+            pos = torch.arange(action_mask.shape[1], device=input_ids.device).unsqueeze(0)
+            last_split_pos = torch.where(is_split, pos, torch.full_like(pos, -1)).max(dim=1, keepdim=True).values
+            token_weights = torch.where(
+                (pos < last_split_pos) & action_mask.bool(),                   # 若想包含 2512 本身就改成 <=
+                torch.full_like(token_weights, self.cot_weight),
+                token_weights,
+            )
+            loss = loss * token_weights
 
         loss = (
             masked_mean(loss, action_mask, dim=None)
             if self.token_level_loss
             else masked_mean(loss, action_mask, dim=-1).mean()
         )
+
         clipped = ratio.gt(1 + self.clip_eps_high) | ratio.lt(1 - self.clip_eps_low)
         clipfrac = masked_mean(clipped, action_mask, dim=None)
 

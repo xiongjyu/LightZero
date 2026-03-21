@@ -228,7 +228,9 @@ class BatchPPOTrainer:
             clip_eps_high=self.args.eps_clip_low_high[1],
             policy_loss_type=self.args.policy_loss_type,
             enable_vllm_is_correction=self.args.enable_vllm_is_correction,
-            vllm_is_truncated_threshold=self.args.vllm_is_truncated_threshold
+            vllm_is_truncated_threshold=self.args.vllm_is_truncated_threshold,
+            use_cot=self.args.use_cot,
+            cot_weight=self.args.cot_weight
         )
         self.train_iter = 0
         
@@ -268,6 +270,7 @@ class BatchPPOTrainer:
                 return_entropy=True,
             )
             actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
+                input_ids=micro_batch['input_ids'],
                 log_probs=action_log_probs,
                 old_log_probs=micro_batch['old_action_log_probs'],
                 advantages=micro_batch['advantages'],
