@@ -329,7 +329,7 @@ class VLPriorGenerator(PriorGenerator):
     def get_user_prompt(
         self,
         action_candidates: List[str],
-        history: Optional[List[Tuple[str, str, float]]] = None
+        history: Optional[List] = None
     ) -> str:
         """
         User prompt for VL — mirrors LLM's get_user_prompt() structure,
@@ -339,9 +339,14 @@ class VLPriorGenerator(PriorGenerator):
 
         if history and len(history) > 0:
             prompt_parts.append("=== GAME HISTORY ===")
-            for i, (obs, action, reward) in enumerate(history, start=1):
-                prompt_parts.append(f"Step {i}:")
-                # For image obs, skip printing the observation itself
+            for entry in history:
+                # Support both (obs, action, reward, timestep) and legacy (obs, action, reward)
+                if len(entry) >= 4:
+                    obs, action, reward, timestep = entry[0], entry[1], entry[2], entry[3]
+                    prompt_parts.append(f"Step {timestep}:")
+                else:
+                    obs, action, reward = entry[0], entry[1], entry[2]
+                    prompt_parts.append(f"Step:")
                 prompt_parts.append(f"Action: {action}")
                 prompt_parts.append(f"Reward: {reward}")
             prompt_parts.append("")  # empty line separator

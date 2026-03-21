@@ -481,7 +481,7 @@ class PriorZeroCollector(OriginalCollector):
                         # Fallback
                         action_str = info.get('action_str', str(actions[env_id]))
 
-                    self.history_buffers[env_id].append((raw_obs, action_str, float(reward)))
+                    self.history_buffers[env_id].append((raw_obs, action_str, float(reward), int(eps_steps_lst[env_id])))
 
                     # Append transition to game segment
                     game_segments[env_id].append(
@@ -490,7 +490,7 @@ class PriorZeroCollector(OriginalCollector):
                         reward,
                         self.action_mask_dict[env_id],
                         self.to_play_dict[env_id],
-                        raw_obs=raw_obs,
+                        raw_obs_text=raw_obs,
                         history_obs=list(self.history_buffers[env_id]),
                         llm_prior_per_tok=llm_prior_per_tok[env_id] if env_id < len(llm_prior_per_tok) else None,
                         cot_prefix=cot_prefixes[env_id] if env_id < len(cot_prefixes) else None,
