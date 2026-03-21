@@ -266,6 +266,7 @@ def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_
         reference_model=ref_model,
         exp_name=cfg.exp_name if rank == 0 else None,
         tb_logger=tb_logger if rank == 0 else None,
+        instance_name="vl_ppo",
         llm_save_freq=vl_cfg.vl_save_freq
     )
 
@@ -428,6 +429,7 @@ def train_unified(
             )
             if prior_cfg.vllm_enable_sleep and prior_engine is not None:
                 prior_engine.sleep()
+            torch.cuda.empty_cache()
 
         # Wake up engine
         if prior_cfg.vllm_enable_sleep and prior_engine is not None:
@@ -513,6 +515,12 @@ def train_unified(
             # TB logging for WM training
             if tb_logger is not None:
                 tb_logger.add_scalar('train/wm_train_iter', learner.train_iter, collector.envstep)
+                if log_vars and isinstance(log_vars, list) and len(log_vars) > 0:
+                    wm_metrics = log_vars[0] if isinstance(log_vars[0], dict) else {}
+                    for k, v in wm_metrics.items():
+                        if isinstance(v, (int, float)):
+                            tb_logger.add_scalar(f'learner_wm_iter/{k}', float(v), learner.train_iter)
+                            tb_logger.add_scalar(f'learner_wm_envstep/{k}', float(v), collector.envstep)
 
             # Phase switching: WM -> LLM/VL
             if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:

@@ -635,7 +635,9 @@ class PriorZeroCollector(OriginalCollector):
         self._total_episode_count += collected_episode
 
         # Call parent's _output_log to write standard TB metrics (collector_step/xxx)
-        self._output_log(train_iter)
+        # Only call when tb_logger is available (rank 0); parent _output_log has no None guard.
+        if self._tb_logger is not None:
+            self._output_log(train_iter)
 
         # Return collected data in the format expected by push_game_segments:
         # [list_of_game_segments, list_of_meta_dicts]

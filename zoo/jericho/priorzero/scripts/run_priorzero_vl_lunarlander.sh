@@ -17,7 +17,15 @@ NUM_GPUS=${1:-4}
 VL_MODEL=${2:-"Qwen3-VL-2b"}
 SEED=${3:-0}
 EXTRA_ARGS="${@:4}"
+CUDA_DEVICES=${CUDA_DEVICES:-"0,1,2,3"}
+MASTER_PORT=${MASTER_PORT:-29501}
 # ===================================================================
+
+# DDP / NCCL debugging environment variables
+export CUDA_VISIBLE_DEVICES="${CUDA_DEVICES}"
+export PYTHONFAULTHANDLER=1
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export NCCL_DEBUG=INFO
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_ID="LunarLander-v2"
@@ -35,6 +43,8 @@ echo "GPUs:        ${NUM_GPUS}"
 echo "VL Model:    ${VL_MODEL}"
 echo "Seed:        ${SEED}"
 echo "Extra Args:  ${EXTRA_ARGS}"
+echo "CUDA:        ${CUDA_DEVICES}"
+echo "Master Port: ${MASTER_PORT}"
 echo "Log File:    ${LOG_FILE}"
 echo "========================================"
 
@@ -42,7 +52,7 @@ cd "${SCRIPT_DIR}"
 
 torchrun \
     --nproc_per_node "${NUM_GPUS}" \
-    --master_port 29501 \
+    --master-port "${MASTER_PORT}" \
     priorzero_entry_unified.py \
     --input_type image \
     --env_id "${ENV_ID}" \

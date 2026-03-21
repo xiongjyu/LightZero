@@ -319,7 +319,27 @@ class BatchPPOTrainer:
             response_length_item = micro_batch["action_mask"].sum().detach().float().item() / micro_batch["action_mask"].shape[0]
             input_length_item = input_response_length_item - response_length_item
             entropy_loss_item = entropy_loss.detach().float().item()
-            
+            total_loss_item = loss.detach().float().item()
+
+            # PPO importance sampling ratio stats
+            with torch.no_grad():
+                ratio = torch.exp(action_log_probs - micro_batch['old_action_log_probs'])
+                ratio_masked = (ratio * micro_batch['action_mask'].float())
+                mask_sum = micro_batch['action_mask'].float().sum()
+                ratio_mean_item = (ratio_masked.sum() / mask_sum).item() if mask_sum > 0 else 1.0
+                ratio_std_item = ((((ratio - ratio_mean_item) ** 2) * micro_batch['action_mask'].float()).sum() / mask_sum).sqrt().item() if mask_sum > 0 else 0.0
+
+                # Advantage stats for this micro-batch
+                adv = micro_batch['advantages']
+                adv_mean_item = adv.mean().item()
+                adv_std_item = adv.std().item() if adv.numel() > 1 else 0.0
+
+                # Log prob means
+                log_prob_new_mean_item = masked_mean(action_log_probs, micro_batch['action_mask']).item()
+                log_prob_old_mean_item = masked_mean(micro_batch['old_action_log_probs'], micro_batch['action_mask']).item()
+
+            kl_coef_item = float(kl_ctl.value)
+
             pbar.set_postfix({
                 "policy_loss": policy_loss_item,
                 "clipfrac": clipfrac_item,
@@ -335,6 +355,14 @@ class BatchPPOTrainer:
             metrics_buffer["input_length"].append(input_length_item)
             metrics_buffer["response_length"].append(response_length_item)
             metrics_buffer['entropy'].append(entropy_loss_item)
+            metrics_buffer['total_loss'].append(total_loss_item)
+            metrics_buffer['ratio_mean'].append(ratio_mean_item)
+            metrics_buffer['ratio_std'].append(ratio_std_item)
+            metrics_buffer['advantage_mean'].append(adv_mean_item)
+            metrics_buffer['advantage_std'].append(adv_std_item)
+            metrics_buffer['log_prob_new_mean'].append(log_prob_new_mean_item)
+            metrics_buffer['log_prob_old_mean'].append(log_prob_old_mean_item)
+            metrics_buffer['kl_coef'].append(kl_coef_item)
             if vllm_kl is not None:
                 metrics_buffer['vllm_kl'].append(vllm_kl.item())
 
@@ -368,6 +396,15 @@ class BatchPPOTrainer:
                     "value_advantage_max": np.max(metrics_buffer['value_advantage']),
                     "value_advantage_mean": np.mean(metrics_buffer['value_advantage']),
                     "value_advantage_min": np.min(metrics_buffer['value_advantage']),
+
+                    "total_loss": np.mean(metrics_buffer['total_loss']),
+                    "ratio_mean": np.mean(metrics_buffer['ratio_mean']),
+                    "ratio_std": np.mean(metrics_buffer['ratio_std']),
+                    "advantage_mean": np.mean(metrics_buffer['advantage_mean']),
+                    "advantage_std": np.mean(metrics_buffer['advantage_std']),
+                    "log_prob_new_mean": np.mean(metrics_buffer['log_prob_new_mean']),
+                    "log_prob_old_mean": np.mean(metrics_buffer['log_prob_old_mean']),
+                    "kl_coef": np.mean(metrics_buffer['kl_coef']),
                 }
                 if "final_advantage" in metrics_buffer:
                     status["final_advantage_max"] = np.max(metrics_buffer['final_advantage'])

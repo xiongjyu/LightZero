@@ -76,7 +76,14 @@ VL_MODEL_CONFIGS = {
         "model_path": "/mnt/shared-storage-user/puyuan/model/Qwen3-VL-2B-Instruct",
         "tensor_parallel_size": 1,
         "gpu_memory_utilization": 0.25,
-        "description": "Qwen2.5-VL-2B-Instruct (smaller, faster)",
+        "description": "Qwen3-VL-2B-Instruct (smaller, faster)",
+    },
+    "Qwen3-VL-8b": {
+        "model_name": "Qwen3-VL",
+        "model_path": "/mnt/shared-storage-user/puyuan/model/Qwen3-VL-8B-Instruct",
+        "tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.25,
+        "description": "Qwen3-VL-8B-Instruct",
     },
 }
 
