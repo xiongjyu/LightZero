@@ -361,7 +361,7 @@ class PriorZeroCollector(OriginalCollector):
                             cur_valid_actions = obs[env_id]['valid_actions']
                             if len(cur_valid_actions) == 0:
                                 action = 0
-                                visit_count_distributions = []
+                                visit_count_distributions = [100]
                             else:
                                 actions_logprob = [actions_logprob_dict[action] for action in cur_valid_actions]
                                 action_probs = [math.exp(v) for v in actions_logprob]
