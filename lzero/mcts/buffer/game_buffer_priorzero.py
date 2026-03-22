@@ -416,8 +416,8 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             network_output = []
             network_output_pred = []
             
-            batch_obs = torch.from_numpy(value_obs_list).to(self._cfg.device)
-            batch_obs_pred = torch.from_numpy(pred_obs_list).to(self._cfg.device)
+            batch_obs = torch.from_numpy(value_obs_list).to(self._cfg.device).float()
+            batch_obs_pred = torch.from_numpy(pred_obs_list).to(self._cfg.device).float()
 
             # =============== NOTE: The key difference with MuZero =================
             # calculate the bootstrapped value and target value

@@ -39,9 +39,15 @@ GAME_DESCRIPTIONS = {
         "Clear all dots to advance to the next level."
     ),
     'LunarLander-v2': (
-        "This is Lunar Lander. You control a spacecraft descending toward a landing pad (between two flags). "
-        "NOOP=do nothing, LEFT_ENGINE=push right, MAIN_ENGINE=slow descent, RIGHT_ENGINE=push left. "
-        "Goal: land gently on the pad. Firing engines costs fuel (-0.3/fire). Crash=-100, safe landing=+100~140."
+        "This is Lunar Lander. You control a spacecraft descending toward a landing pad (between two flags) at coordinate (0,0).\n"
+        "Goal: Land gently and perfectly horizontal on the pad.\n"
+        "\n"
+        "Rewards & Penalties:\n"
+        "- Closer to pad / slower speed = Positive reward.\n"
+        "- Tilted (not horizontal) = Continuous penalty.\n"
+        "- Side engine fire = -0.03 points/frame.\n"
+        "- Main engine fire = -0.3 points/frame (10x more expensive!).\n"
+        "- Crash = -100 points, Safe landing = +100 points."
     ),
 }
 
@@ -270,8 +276,9 @@ class PriorZeroVLConfig:
     enable_world_model: bool = True
     enable_rft: bool = True
     max_rollout_staleness: int = 1
-    # vl_fixed: bool = False  # If True, VL is frozen (inference only, no VL training)
-    vl_fixed: bool = True  # If True, VL is frozen (inference only, no VL training)
+    # vl_fixed: If True, VL policy model is frozen (inference only, no PPO training).
+    # NOTE: vl_fixed=True is mutually exclusive with enable_rft=True (see validate()).
+    vl_fixed: bool = False
 
     # Value normalization
     value_norm_cfg: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -284,6 +291,37 @@ class PriorZeroVLConfig:
         "value_norm_history_size": 1000,
     }))
 
+    def validate(self) -> None:
+        """
+        Validate configuration consistency and raise on illegal combinations.
+
+        Rules:
+            1. enable_rft=True requires vl_fixed=False (PPO training needs a trainable policy model).
+            2. When vl_fixed=True the VL inference engine is frozen AND PPO training is
+               disabled — the pipeline is collect-only + WM training.
+            3. train_schedule.alternate=True requires enable_world_model=True.
+        """
+        if self.enable_rft and self.vl_fixed:
+            raise ValueError(
+                "[PriorZeroVLConfig] Illegal config: enable_rft=True AND vl_fixed=True.\n"
+                "  enable_rft=True  → PPO training is enabled, which requires a trainable policy model.\n"
+                "  vl_fixed=True    → the VL policy model is frozen (no gradient update).\n"
+                "These two flags are mutually exclusive. Either:\n"
+                "  (a) Set vl_fixed=False to enable VL PPO training, or\n"
+                "  (b) Set enable_rft=False to run WM-only training with a frozen VL prior."
+            )
+
+        if self.train_schedule.get("alternate", False) and not self.enable_world_model:
+            raise ValueError(
+                "[PriorZeroVLConfig] Illegal config: train_schedule.alternate=True but enable_world_model=False.\n"
+                "Alternating schedule requires the World Model training phase."
+            )
+
+        if not self.enable_rft and not self.enable_world_model:
+            raise ValueError(
+                "[PriorZeroVLConfig] Illegal config: both enable_rft=False and enable_world_model=False.\n"
+                "At least one training objective must be enabled."
+            )
 
 
 def get_priorzero_vl_config(

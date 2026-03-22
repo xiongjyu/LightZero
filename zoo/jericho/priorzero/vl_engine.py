@@ -294,6 +294,17 @@ class VLLMVLEngine(VLEngine):
         if hasattr(self.model, 'sleep'):
             self.model.sleep(level=level)
 
+    def update_weight(self, name, dtype, shape, weight, empty_cache=False):
+        """Sync a single parameter from DeepSpeed policy model to the vLLM VL engine."""
+        return self.model.update_weight(name, dtype, shape, weight, empty_cache)
+
+    def update_weight_cuda_ipc(self, name, dtype, shape, ipc_handles, empty_cache=False):
+        return self.model.update_weight_cuda_ipc(name, dtype, shape, ipc_handles, empty_cache)
+
+    def reset_prefix_cache(self):
+        """Reset prefix cache after weight update."""
+        self.model.reset_prefix_cache()
+
 
 class QwenVLEngine(VLEngine):
     """

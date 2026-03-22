@@ -98,6 +98,17 @@ class VLActor:
         if hasattr(self.llm, 'wake_up'):
             self.llm.wake_up()
 
+    def update_weight(self, name, dtype, shape, weight, empty_cache=False):
+        """Sync a single parameter from the DeepSpeed policy model to the vLLM engine."""
+        return self.llm.collective_rpc("update_weight", args=(name, dtype, shape, weight, empty_cache))
+
+    def update_weight_cuda_ipc(self, name, dtype, shape, ipc_handles, empty_cache=False):
+        return self.llm.collective_rpc("update_weight_cuda_ipc", args=(name, dtype, shape, ipc_handles, empty_cache))
+
+    def reset_prefix_cache(self):
+        """Reset prefix cache after weight update."""
+        self.llm.llm_engine.reset_prefix_cache()
+
     def generate(
         self,
         images: List[Union[Image.Image, np.ndarray]],

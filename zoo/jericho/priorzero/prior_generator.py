@@ -361,19 +361,44 @@ class VLPriorGenerator(PriorGenerator):
             actions_str = ", ".join(action_candidates)
             prompt_parts.append(f"\nValid actions: [{actions_str}]")
 
-        # Add a concrete few-shot example using the actual action names
-        example_action = action_candidates[0] if action_candidates else "NOOP"
+            # Add per-action descriptions for LunarLander
+            # (For other games, the game_description already covers action semantics)
+            if set(action_candidates) == {"NOOP", "LEFT_ENGINE", "MAIN_ENGINE", "RIGHT_ENGINE"}:
+                prompt_parts.append(
+                    "- NOOP: Do nothing (0 cost).\n"
+                    "- LEFT_ENGINE: Fires the left thruster. Pushes the lander RIGHT and rotates it clockwise. (-0.03 cost)\n"
+                    "- MAIN_ENGINE: Fires the bottom thruster. Slows descent. (-0.3 cost)\n"
+                    "- RIGHT_ENGINE: Fires the right thruster. Pushes the lander LEFT and rotates it counter-clockwise. (-0.03 cost)\n"
+                    "\n"
+                    "=== STRATEGY GUIDE ===\n"
+                    "1. Keep Horizontal: The game penalizes tilt. Correct tilt immediately. If tilted left, fire LEFT_ENGINE to rotate clockwise. If tilted right, fire RIGHT_ENGINE.\n"
+                    "2. Conserve Main Fuel: MAIN_ENGINE is very expensive (-0.3). Use it ONLY if falling too fast.\n"
+                    "3. Steer to Center: Use side engines to adjust horizontal position toward the flags.\n"
+                    "4. Coasting: If the lander is horizontal, aligned with the pad, and descending slowly, use NOOP to save points."
+                )
+
         prompt_parts.append("\n=== INSTRUCTION ===")
         if self.use_cot:
             prompt_parts.append(
-                f"Choose the best action. Respond in EXACTLY this format:\n"
-                f"Reasoning: <1-3 sentences>\n"
-                f"Action: <one action from the valid actions list>\n\n"
-                f"Example:\n"
-                f"Reasoning: The lander is drifting left and descending fast, so I need to fire the right engine.\n"
-                f"Action: {example_action}"
+                "Choose the best action. Respond in EXACTLY this format:\n"
+                "Reasoning: <Sentence 1: Describe the lander's current tilt, vertical/horizontal speed, and position. "
+                "Sentence 2: Explain why the action is optimal based on the reward structure and physics.>\n"
+                "Action: <one action from the valid actions list>\n"
+                "\n"
+                "Example 1:\n"
+                "Reasoning: The lander is tilted left and drifting left of the pad; firing LEFT_ENGINE will rotate it clockwise back to horizontal and push it right toward the center at a low cost.\n"
+                "Action: LEFT_ENGINE\n"
+                "\n"
+                "Example 2:\n"
+                "Reasoning: The lander is horizontal and centered, but falling too rapidly; despite the high cost, MAIN_ENGINE is strictly necessary to slow the descent and prevent a -100 crash penalty.\n"
+                "Action: MAIN_ENGINE\n"
+                "\n"
+                "Example 3:\n"
+                "Reasoning: The lander is perfectly horizontal, aligned above the pad, and descending at a safe, slow speed; no thrust is needed, so doing nothing avoids point deductions.\n"
+                "Action: NOOP"
             )
         else:
+            example_action = action_candidates[1] if len(action_candidates) >= 2 else (action_candidates[0] if action_candidates else "NOOP")
             prompt_parts.append(
                 f"Choose the best action. Output ONLY:\n"
                 f"Action: <one action from the valid actions list>\n\n"

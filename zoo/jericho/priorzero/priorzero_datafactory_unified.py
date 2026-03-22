@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 import re
+import random
 import torch
 import torch.distributed as dist
 from vllm import SamplingParams
@@ -448,54 +449,215 @@ class UnifiedDataProcessor:
         """
         Make training samples from PriorZero batch.
 
+        For text mode: tokenizes prompts + actions → tensors expected by BatchPPOTrainer.
+        For image mode: builds VL chat context, tokenizes → same tensor format.
+
         Returns:
-            Tuple of (flag, train_samples) where flag indicates if enough samples were prepared.
+            Tuple of (flag, train_samples) where train_samples is a 6-tuple:
+            (input_ids, attention_mask, action_mask, advantage, rollout_logprob, log_status)
         """
         if self.obs_type == 'image':
-            # VL training samples: delegate to VLPriorGenerator.build_vl_train_samples()
-            if prior_generator is None:
-                import logging
-                logging.getLogger(__name__).warning("[make_llm_train_samples] No prior_generator for image mode, returning empty.")
-                return (False, [])
-
-            try:
-                game_segments, target_values, pred_values, action_log_probs = priorzero_batch
-
-                # Compute advantages with value normalization
-                target_values_np = np.array(target_values, dtype=np.float32)
-                pred_values_np = np.array(pred_values, dtype=np.float32)
-
-                if self.value_normalizer is not None:
-                    advantages = self.value_normalizer.normalize_advantages(
-                        target_values_np - pred_values_np
-                    )
-                else:
-                    advantages = target_values_np - pred_values_np
-
-                old_log_probs = np.array(action_log_probs, dtype=np.float32)
-
-                train_samples = prior_generator.build_vl_train_samples(
-                    game_segments=game_segments,
-                    advantages=advantages,
-                    old_action_log_probs=old_log_probs,
-                )
-
-                if max_samples is not None and len(train_samples) > max_samples:
-                    train_samples = train_samples[:max_samples]
-
-                flag = len(train_samples) > 0
-                return (flag, train_samples)
-
-            except Exception as e:
-                import traceback
-                import logging
-                if self.rank == 0:
-                    logging.getLogger(__name__).error(f"[make_llm_train_samples] Image mode error: {e}\n{traceback.format_exc()}")
-                return (False, [])
+            return self._make_vl_train_samples(priorzero_batch, ddp=ddp, max_samples=max_samples, prior_generator=prior_generator)
         else:
             # Original LLM training samples (text input)
             # Keep existing implementation
             pass
+
+    def _make_vl_train_samples(self, priorzero_batch, ddp: bool = True, max_samples: int = None, prior_generator=None):
+        """
+        Build VL training samples in the same tensor format as the LLM path.
+
+        The 7-element priorzero_batch from fetch_latest_batch:
+            [raw_obs_list, history_obs_list, llm_prior_per_tok_list,
+             batch_target_values, batch_pred_values, cot_prefix_list, llm_action_list]
+
+        Returns:
+            (flag, (input_ids, attention_mask, action_mask, advantage, rollout_logprob, log_status))
+        """
+        import logging
+        import random
+        import traceback
+        _logger = logging.getLogger(__name__)
+
+        try:
+            raw_obs_list, history_obs_list, llm_prior_per_tok_list, \
+                target_values, pred_values, cot_prefix_list, llm_action_list = priorzero_batch
+
+            if len(raw_obs_list) == 0:
+                return (False, [])
+
+            B = len(raw_obs_list)
+            T = len(raw_obs_list[0]) if B > 0 else 0
+
+            # ---- Step 1: build flat sample list ----
+            samples = []
+            for b in range(B):
+                for t in range(T - 1):
+                    action_name = llm_action_list[b][t + 1]
+                    if action_name is None:
+                        continue
+
+                    history = history_obs_list[b][t] if t < len(history_obs_list[b]) else []
+                    cot_prefix = cot_prefix_list[b][t + 1] if (cot_prefix_list is not None and t + 1 < len(cot_prefix_list[b])) else None
+
+                    # VL prior stored as action-level log-prob array
+                    action_logprobs = llm_prior_per_tok_list[b][t + 1] if (
+                        llm_prior_per_tok_list is not None and t + 1 < len(llm_prior_per_tok_list[b])
+                    ) else None
+
+                    tv = float(target_values[b][t]) if target_values is not None and b < len(target_values) and t < len(target_values[b]) else 0.0
+                    pv = float(pred_values[b][t]) if pred_values is not None and b < len(pred_values) and t < len(pred_values[b]) else 0.0
+
+                    samples.append({
+                        'history': history,
+                        'action_name': action_name,
+                        'cot_prefix': cot_prefix,
+                        'action_logprobs': action_logprobs,  # np.ndarray or None
+                        'target_value': tv,
+                        'pred_value': pv,
+                    })
+
+            if len(samples) == 0:
+                return (False, [])
+
+            random.Random(0).shuffle(samples)
+
+            if max_samples is not None and len(samples) > max_samples:
+                samples = samples[:max_samples]
+
+            if ddp:
+                real_samples = samples
+            else:
+                per_rank = len(samples) // self.world_size
+                start = self.rank * per_rank
+                end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(samples)
+                real_samples = samples[start:end]
+
+            if len(real_samples) == 0:
+                return (False, [])
+
+            # ---- Step 2: build target text for each sample ----
+            if self.use_cot:
+                targets_only = []
+                for s in real_samples:
+                    cot = s['cot_prefix'] or ""
+                    if cot:
+                        targets_only.append(cot.strip() + "\nAction: " + s['action_name'] + self.tokenizer.eos_token)
+                    else:
+                        targets_only.append("Action: " + s['action_name'] + self.tokenizer.eos_token)
+            else:
+                targets_only = ["Action: " + s['action_name'] + self.tokenizer.eos_token for s in real_samples]
+
+            # ---- Step 3: build prompt + target → full_ids / label_ids ----
+            # Use a dummy image prompt (the actual image tokens will not be used in
+            # text-only Actor forward, but we need the textual prompt structure)
+            full_ids_list = []
+            tgt_ids_list = []
+
+            for idx, s in enumerate(real_samples):
+                # Build the user prompt from history (text-only; images handled at inference)
+                history = s['history']
+                if prior_generator is not None and hasattr(prior_generator, 'get_user_prompt'):
+                    # Use the prior_generator's prompt builder for consistency
+                    valid_actions_hint = []  # not needed for tokenization
+                    user_prompt = prior_generator.get_user_prompt(valid_actions_hint, history)
+                else:
+                    user_prompt = self.get_user_prompt_image(history=history)
+
+                # Build chat context via tokenizer chat template
+                prompt_text = self.tokenizer.apply_chat_template(
+                    [
+                        {"role": "system", "content": self.get_system_prompt_image()},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+
+                target_text = targets_only[idx]
+                full_text = prompt_text + target_text
+
+                prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens=False)
+                full_ids = self.tokenizer.encode(full_text, add_special_tokens=False)
+                tgt_ids = full_ids[len(prompt_ids):]
+
+                # Truncate prompt if it exceeds prompt_max_len
+                if len(prompt_ids) > self.prompt_max_len:
+                    prompt_ids = prompt_ids[-self.prompt_max_len:]
+                    full_ids = prompt_ids + tgt_ids
+
+                full_ids_list.append(full_ids)
+                tgt_ids_list.append(tgt_ids)
+
+            # ---- Step 4: pad and build tensors ----
+            inputs = self.tokenizer.pad({"input_ids": full_ids_list}, padding=True, return_tensors="pt")
+            labels = torch.full_like(inputs.input_ids, -100)
+            for i, tgt_ids in enumerate(tgt_ids_list):
+                tgt_len = len(tgt_ids)
+                labels[i, -tgt_len:] = inputs.input_ids[i, -tgt_len:]
+
+            action_mask_full = (labels != -100).long()
+            max_tgt_len = max(len(t) for t in tgt_ids_list)
+            action_mask = action_mask_full[:, -max_tgt_len:]
+
+            # ---- Step 5: compute advantage ----
+            target_value_tensor = torch.tensor([s['target_value'] for s in real_samples], dtype=torch.float32)
+            pred_value_tensor = torch.tensor([s['pred_value'] for s in real_samples], dtype=torch.float32)
+            advantage = target_value_tensor - pred_value_tensor
+
+            log_status_tmp = {}
+
+            if self.args.advantage_type == "advantage":
+                log_status_tmp["value_advantage"] = advantage.tolist()
+            elif self.args.advantage_type == "advantage_batch_norm":
+                advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+                log_status_tmp["value_advantage"] = advantage.tolist()
+            elif self.args.advantage_type == "advantage_running_norm":
+                if self.value_normalizer is not None:
+                    advantage_np = advantage.numpy()
+                    advantage_np = self.value_normalizer.normalize_advantages(advantage_np)
+                    advantage = torch.from_numpy(advantage_np)
+                else:
+                    advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+                log_status_tmp["value_advantage"] = advantage.tolist()
+            else:
+                log_status_tmp["value_advantage"] = advantage.tolist()
+
+            log_status = [
+                {k: log_status_tmp[k][i] for k in log_status_tmp.keys()}
+                for i in range(len(real_samples))
+            ]
+
+            # ---- Step 6: build rollout_logprob ----
+            # VL has action-level log-probs (not per-token). We spread the action log-prob
+            # uniformly across all target tokens so the PPO ratio is correct in expectation.
+            rollout_logprob = torch.zeros(len(real_samples), max_tgt_len, dtype=torch.float32)
+            for idx, s in enumerate(real_samples):
+                tgt_len = len(tgt_ids_list[idx])
+                if s['action_logprobs'] is not None and isinstance(s['action_logprobs'], np.ndarray):
+                    # action_logprobs is an array of log-probs over actions;
+                    # extract the chosen action's log-prob
+                    # The chosen action was the one stored in action_name
+                    # action_logprobs[chosen_idx] gives log P(chosen_action)
+                    # Spread evenly: per-token log-prob = log P(action) / num_tokens
+                    chosen_logprob = float(np.max(s['action_logprobs']))  # chosen action has highest log-prob
+                    per_token_lp = chosen_logprob / max(tgt_len, 1)
+                    rollout_logprob[idx, -tgt_len:] = per_token_lp
+                # else: leave as zero (no rollout log-probs available)
+
+            if self.rank == 0:
+                _logger.info(
+                    f"[VL Train Samples] Built {len(real_samples)} samples | "
+                    f"advantage mean={advantage.mean().item():.4f} std={advantage.std().item():.4f}"
+                )
+
+            return True, (inputs.input_ids, inputs.attention_mask, action_mask, advantage, rollout_logprob, log_status)
+
+        except Exception as e:
+            import traceback as tb
+            if self.rank == 0:
+                _logger.error(f"[VL Train Samples] Error: {e}\n{tb.format_exc()}")
+            return (False, [])
 
     def get_llm_output_log(self, wm_train_iter: int, llm_train_iter: int):
         """Log LLM/VL output statistics."""

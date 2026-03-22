@@ -392,13 +392,17 @@ def train_unified(
 
     logger.info(f"[Rank {rank}] Starting training loop with {engine_name} prior...")
 
+    # Validate VL config consistency (e.g. enable_rft + vl_fixed conflict)
+    if not is_text_input and hasattr(prior_cfg, 'validate'):
+        prior_cfg.validate()
+
     # =========================================================================
     # Alternating Training Schedule Setup (aligned with sync_ddp)
     # =========================================================================
     train_schedule = prior_cfg.train_schedule
     train_alternate = train_schedule["alternate"]
     enable_world_model = prior_cfg.enable_world_model
-    enable_rft = prior_cfg.enable_rft and not getattr(prior_cfg, 'vl_fixed', False)
+    enable_rft = prior_cfg.enable_rft
 
     if train_alternate:
         current_phase = train_schedule["start_phase"]
@@ -413,6 +417,15 @@ def train_unified(
     while True:
         if collector.envstep >= max_env_step or learner.train_iter >= max_train_iter:
             break
+
+        # Periodic loop status log (every 500 envsteps, rank 0 only)
+        if rank == 0 and collector.envstep % 500 < 10:
+            phase_str = current_phase if train_alternate else "joint"
+            logger.info(
+                f"[Loop Status] envstep={collector.envstep}, wm_iter={learner.train_iter}, "
+                f"llm_iter={trainer.global_step if hasattr(trainer, 'global_step') else 'N/A'}, "
+                f"phase={phase_str}, enable_rft={enable_rft}, enable_wm={enable_world_model}"
+            )
 
         cmd = 0
         priorzero_batch = None
@@ -579,6 +592,15 @@ def train_unified(
                         data_processor.value_normalizer.clear()
                     logger.info(f"[Rank {rank}] Switching to World Model training phase at {engine_name} iter: {trainer.global_step}")
 
+        # Safety fallback: if RFT is disabled but the alternating scheduler
+        # switched to "llm" phase, immediately fall back to WM so the loop
+        # does not spin forever doing only data collection.
+        if not enable_rft and train_alternate and current_phase == "llm":
+            current_phase = "wm"
+            logger.info(
+                f"[Rank {rank}] enable_rft=False, auto-switching from '{engine_name}' phase back to WM phase"
+            )
+
     logger.info(f"[Rank {rank}] Training completed!")
 
 
@@ -689,6 +711,9 @@ def main():
             vl_cfg.use_cot = args.use_cot
             vl_cfg.vl_fixed = args.vl_fixed
             vl_cfg.mcts_root_logits_dict.mode = args.mcts_mode
+            # Ensure consistency: vl_fixed=True → disable PPO training
+            if vl_cfg.vl_fixed:
+                vl_cfg.enable_rft = False
 
         train_unified(
             main_cfg, create_cfg, vl_cfg,
