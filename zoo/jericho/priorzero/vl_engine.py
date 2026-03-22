@@ -211,14 +211,14 @@ class VLLMVLEngine(VLEngine):
 
     def generate(
         self,
-        image: Union[Image.Image, np.ndarray],
+        image: Union[Image.Image, np.ndarray, List[Image.Image]],
         prompt: str,
         temperature: float = 1.0,
         max_new_tokens: int = 512,
         system_prompt: Optional[str] = None,
         **kwargs
     ) -> str:
-        """Generate response using vLLM."""
+        """Generate response using vLLM. Supports single image or image list."""
         from vllm import SamplingParams
 
         # Sampling parameters with sane defaults to prevent garbled output
@@ -246,14 +246,14 @@ class VLLMVLEngine(VLEngine):
 
     def batch_generate(
         self,
-        images: List[Union[Image.Image, np.ndarray]],
+        images: List[Union[Image.Image, np.ndarray, List[Image.Image]]],
         prompts: List[str],
         temperature: float = 1.0,
         max_new_tokens: int = 512,
         system_prompt: Optional[str] = None,
         **kwargs
     ) -> List[str]:
-        """Batch generate responses using vLLM."""
+        """Batch generate responses using vLLM. Supports single images or image lists per prompt."""
         from vllm import SamplingParams
 
         # Sampling parameters with sane defaults to prevent garbled output

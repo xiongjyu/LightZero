@@ -179,6 +179,7 @@ class VLPriorGenerator(PriorGenerator):
         use_cot: bool = True,
         tokenizer=None,
         game_description: str = "",
+        vlm_image_mode: str = "current_only",
         **kwargs
     ):
         """
@@ -188,12 +189,14 @@ class VLPriorGenerator(PriorGenerator):
             use_cot: Whether to use Chain-of-Thought reasoning
             tokenizer: Tokenizer for building training samples
             game_description: Game-specific description for prompts
+            vlm_image_mode: Image mode - "current_only", "first_and_current", or "all_history"
         """
         super().__init__(model_name, obs_type='image')
         self.vl_engine = vl_engine
         self.use_cot = use_cot
         self.tokenizer = tokenizer
         self.game_description = game_description
+        self.vlm_image_mode = vlm_image_mode
 
         # For logging VL outputs
         self.episode_output = []
@@ -298,6 +301,49 @@ class VLPriorGenerator(PriorGenerator):
                 f"Expected 2D (H, W) or 3D (C, H, W) or (H, W, C)."
             )
 
+    def _assemble_images(
+        self,
+        current_obs: Union[np.ndarray, Image.Image],
+        history: Optional[List] = None,
+    ) -> List[Image.Image]:
+        """
+        Assemble image list based on vlm_image_mode.
+
+        Args:
+            current_obs: Current frame observation
+            history: History entries, each is (raw_obs, action, reward, timestep)
+
+        Returns:
+            List of PIL Images to send to the VL model
+        """
+        if self.vlm_image_mode == "current_only":
+            current_image = self._convert_obs_to_pil_image(current_obs) if isinstance(current_obs, np.ndarray) else current_obs
+            return [current_image]
+
+        # Extract history images
+        history_images = []
+        if history:
+            for entry in history:
+                obs = entry[0]  # (raw_obs, action, reward, timestep)
+                if isinstance(obs, np.ndarray):
+                    history_images.append(self._convert_obs_to_pil_image(obs))
+                elif isinstance(obs, Image.Image):
+                    history_images.append(obs)
+                # Skip non-image observations (e.g. text strings)
+
+        current_image = self._convert_obs_to_pil_image(current_obs) if isinstance(current_obs, np.ndarray) else current_obs
+
+        if self.vlm_image_mode == "first_and_current":
+            if history_images:
+                return [history_images[0], current_image]
+            return [current_image]
+
+        elif self.vlm_image_mode == "all_history":
+            return history_images + [current_image]
+
+        # Fallback (should not reach here due to validation)
+        return [current_image]
+
     def get_system_prompt(self) -> str:
         """
         System prompt for VL — mirrors LLM's get_system_prompt(),
@@ -330,30 +376,78 @@ class VLPriorGenerator(PriorGenerator):
     def get_user_prompt(
         self,
         action_candidates: List[str],
-        history: Optional[List] = None
+        history: Optional[List] = None,
+        num_images: int = 1,
     ) -> str:
         """
         User prompt for VL — mirrors LLM's get_user_prompt() structure,
         replacing text observation with image vision tokens.
+
+        Args:
+            action_candidates: List of valid action names
+            history: Optional history entries
+            num_images: Number of images being sent (for multi-image labelling)
         """
         prompt_parts = []
 
-        if history and len(history) > 0:
-            prompt_parts.append("=== GAME HISTORY ===")
-            for entry in history:
-                # Support both (obs, action, reward, timestep) and legacy (obs, action, reward)
-                if len(entry) >= 4:
-                    obs, action, reward, timestep = entry[0], entry[1], entry[2], entry[3]
-                    prompt_parts.append(f"Step {timestep}: Action: {action}, Reward: {reward}")
-                else:
-                    obs, action, reward = entry[0], entry[1], entry[2]
-                    prompt_parts.append(f"Action: {action}, Reward: {reward}")
-            prompt_parts.append("")  # empty line separator
+        # Multi-image mode: label each image in the prompt
+        if self.vlm_image_mode != "current_only" and num_images > 1:
+            img_idx = 1  # 1-based image index for the prompt
 
-        prompt_parts.append("=== CURRENT OBSERVATION ===")
-        # NOTE: Do NOT include <|vision_start|><|image_pad|><|vision_end|> here.
-        # The image placeholder is inserted by the chat template in vl_engine.
-        prompt_parts.append("[See the game screen image above]")
+            if history and len(history) > 0:
+                prompt_parts.append("=== GAME HISTORY ===")
+                for entry in history:
+                    if len(entry) >= 4:
+                        obs, action, reward, timestep = entry[0], entry[1], entry[2], entry[3]
+                    else:
+                        obs, action, reward = entry[0], entry[1], entry[2]
+                        timestep = None
+
+                    # Check if this history entry has a corresponding image
+                    has_image = isinstance(obs, (np.ndarray, Image.Image))
+
+                    if self.vlm_image_mode == "all_history" and has_image and img_idx < num_images:
+                        step_label = f"Step {timestep}" if timestep is not None else "Step"
+                        prompt_parts.append(f"=== HISTORICAL OBSERVATION ({step_label}) ===")
+                        prompt_parts.append(f"[See image {img_idx} above]")
+                        if timestep is not None:
+                            prompt_parts.append(f"Action: {action}, Reward: {reward}")
+                        else:
+                            prompt_parts.append(f"Action: {action}, Reward: {reward}")
+                        img_idx += 1
+                    elif self.vlm_image_mode == "first_and_current" and has_image and img_idx == 1:
+                        step_label = f"Step {timestep}" if timestep is not None else "First Step"
+                        prompt_parts.append(f"=== INITIAL OBSERVATION ({step_label}) ===")
+                        prompt_parts.append(f"[See image {img_idx} above]")
+                        prompt_parts.append(f"Action: {action}, Reward: {reward}")
+                        img_idx += 1
+                    else:
+                        # Text-only history entry
+                        if timestep is not None:
+                            prompt_parts.append(f"Step {timestep}: Action: {action}, Reward: {reward}")
+                        else:
+                            prompt_parts.append(f"Action: {action}, Reward: {reward}")
+
+                prompt_parts.append("")  # empty line separator
+
+            prompt_parts.append("=== CURRENT OBSERVATION ===")
+            prompt_parts.append(f"[See image {num_images} above]")
+
+        else:
+            # Original single-image prompt (current_only mode or only 1 image)
+            if history and len(history) > 0:
+                prompt_parts.append("=== GAME HISTORY ===")
+                for entry in history:
+                    if len(entry) >= 4:
+                        obs, action, reward, timestep = entry[0], entry[1], entry[2], entry[3]
+                        prompt_parts.append(f"Step {timestep}: Action: {action}, Reward: {reward}")
+                    else:
+                        obs, action, reward = entry[0], entry[1], entry[2]
+                        prompt_parts.append(f"Action: {action}, Reward: {reward}")
+                prompt_parts.append("")  # empty line separator
+
+            prompt_parts.append("=== CURRENT OBSERVATION ===")
+            prompt_parts.append("[See the game screen image above]")
         if self.game_description:
             prompt_parts.append(self.game_description)
 
@@ -588,14 +682,11 @@ class VLPriorGenerator(PriorGenerator):
         """
         self.call_count += 1
 
-        # Convert observation to PIL Image if needed
-        if isinstance(observation, np.ndarray):
-            image = self._convert_obs_to_pil_image(observation)
-        else:
-            image = observation
+        # Assemble images based on vlm_image_mode
+        image_list = self._assemble_images(observation, history)
 
         # Build prompt (unified: always use get_user_prompt, consistent with LLM side)
-        prompt = self.get_user_prompt(action_candidates, history)
+        prompt = self.get_user_prompt(action_candidates, history, num_images=len(image_list))
 
         # Log prompt preview at intervals
         if self.call_count % self.log_interval == 1:
@@ -604,12 +695,13 @@ class VLPriorGenerator(PriorGenerator):
             logger.info(
                 f"[VL Prior Generation] Call #{self.call_count} | "
                 f"Actions: {len(action_candidates)} | "
+                f"Images: {len(image_list)} (mode={self.vlm_image_mode}) | "
                 f"Prompt preview: {prompt[:150]}..."
             )
 
         # Generate with VL
         raw_output = self.vl_engine.generate(
-            image=image,
+            image=image_list,
             prompt=prompt,
             temperature=temperature,
             system_prompt=self.get_system_prompt(),
@@ -654,30 +746,16 @@ class VLPriorGenerator(PriorGenerator):
         if histories is None:
             histories = [None] * len(observations)
 
-        # Convert all observations to PIL Images using robust conversion
-        images = []
-        for i, obs in enumerate(observations):
-            try:
-                if isinstance(obs, Image.Image):
-                    # Already a PIL Image
-                    images.append(obs)
-                elif isinstance(obs, np.ndarray):
-                    # Convert numpy array to PIL Image
-                    pil_image = self._convert_obs_to_pil_image(obs)
-                    images.append(pil_image)
-                else:
-                    raise TypeError(f"Unsupported observation type: {type(obs)}")
-            except Exception as e:
-                raise ValueError(
-                    f"Failed to convert observation {i} with shape "
-                    f"{obs.shape if isinstance(obs, np.ndarray) else 'N/A'} "
-                    f"to PIL Image: {e}"
-                ) from e
+        # Assemble image lists based on vlm_image_mode
+        image_lists = []
+        for obs, history in zip(observations, histories):
+            image_list = self._assemble_images(obs, history)
+            image_lists.append(image_list)
 
         # Build prompts (unified: always use get_user_prompt)
         prompts = []
-        for action_candidates, history in zip(action_candidates_list, histories):
-            prompt = self.get_user_prompt(action_candidates, history)
+        for image_list, action_candidates, history in zip(image_lists, action_candidates_list, histories):
+            prompt = self.get_user_prompt(action_candidates, history, num_images=len(image_list))
             prompts.append(prompt)
 
         # Increment batch call counter
@@ -689,13 +767,14 @@ class VLPriorGenerator(PriorGenerator):
             logger = logging.getLogger(__name__)
             logger.info(f"[VL Batch Validation] === FIRST CALL DATA FLOW CHECK ===")
             logger.info(f"  Batch size: {len(observations)}")
+            logger.info(f"  VLM image mode: {self.vlm_image_mode}")
             for i, obs in enumerate(observations[:3]):
                 if isinstance(obs, np.ndarray):
                     logger.info(f"  Obs[{i}]: ndarray shape={obs.shape}, dtype={obs.dtype}, min={obs.min()}, max={obs.max()}")
                 elif isinstance(obs, Image.Image):
                     logger.info(f"  Obs[{i}]: PIL Image size={obs.size}, mode={obs.mode}")
-            for i, img in enumerate(images[:3]):
-                logger.info(f"  PIL Image[{i}]: size={img.size}, mode={img.mode}")
+            for i, img_list in enumerate(image_lists[:3]):
+                logger.info(f"  ImageList[{i}]: {len(img_list)} images, sizes={[img.size for img in img_list]}")
             logger.info(f"  Prompt[0] preview: {prompts[0][:300]}")
             logger.info(f"  Actions[0]: {action_candidates_list[0]}")
             logger.info(f"[VL Batch Validation] === END FIRST CALL CHECK ===")
@@ -703,7 +782,7 @@ class VLPriorGenerator(PriorGenerator):
         # Batch generate with VL
         _batch_start = time.monotonic()
         raw_outputs = self.vl_engine.batch_generate(
-            images=images,
+            images=image_lists,
             prompts=prompts,
             temperature=temperature,
             system_prompt=self.get_system_prompt(),

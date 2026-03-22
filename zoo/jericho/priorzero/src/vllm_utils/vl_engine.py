@@ -53,7 +53,7 @@ class VLActor:
             logger.warning(f"  Failed to load processor: {e}. Will use raw prompts (may cause garbled output).")
             self.processor = None
 
-    def _apply_chat_template(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+    def _apply_chat_template(self, prompt: str, system_prompt: Optional[str] = None, num_images: int = 1) -> str:
         """
         Apply ChatML template to convert raw user prompt into model-expected format.
 
@@ -62,7 +62,7 @@ class VLActor:
             <|im_start|>user\n<image>\n<prompt><|im_end|>
             <|im_start|>assistant\n
 
-        Without this, the model produces garbled/random output.
+        Supports multiple images by inserting multiple {"type": "image"} entries.
         """
         if self.processor is None:
             return prompt
@@ -72,10 +72,11 @@ class VLActor:
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
 
-        messages.append({"role": "user", "content": [
-            {"type": "image"},
-            {"type": "text", "text": prompt},
-        ]})
+        content = []
+        for _ in range(num_images):
+            content.append({"type": "image"})
+        content.append({"type": "text", "text": prompt})
+        messages.append({"role": "user", "content": content})
 
         try:
             formatted = self.processor.apply_chat_template(
@@ -111,7 +112,7 @@ class VLActor:
 
     def generate(
         self,
-        images: List[Union[Image.Image, np.ndarray]],
+        images: List[Union[Image.Image, np.ndarray, List[Image.Image]]],
         prompts: List[str],
         sampling_params: Any,
         system_prompt: Optional[str] = None,
@@ -122,7 +123,9 @@ class VLActor:
         Applies ChatML chat template before sending to vLLM.
 
         Args:
-            images: List of images (PIL Image or numpy array)
+            images: List of images or image lists. Each element can be:
+                    - A single PIL Image or numpy array (single-image mode)
+                    - A list of PIL Images (multi-image mode)
             prompts: List of text prompts (raw user text, will be wrapped in chat template)
             sampling_params: vLLM SamplingParams
             system_prompt: Optional system prompt for all requests in this batch
@@ -133,21 +136,38 @@ class VLActor:
         # Prepare multimodal inputs
         inputs = []
         for image, prompt in zip(images, prompts):
-            # Convert numpy array to PIL Image if needed
-            if isinstance(image, np.ndarray):
-                if image.dtype != np.uint8:
-                    image = (image * 255).astype(np.uint8)
-                if len(image.shape) == 3 and image.shape[0] == 3:
-                    # Convert CHW to HWC
-                    image = np.transpose(image, (1, 2, 0))
-                image = Image.fromarray(image)
+            # Normalize to list of PIL Images
+            if isinstance(image, list):
+                img_list = []
+                for img in image:
+                    if isinstance(img, np.ndarray):
+                        if img.dtype != np.uint8:
+                            img = (img * 255).astype(np.uint8)
+                        if len(img.shape) == 3 and img.shape[0] == 3:
+                            img = np.transpose(img, (1, 2, 0))
+                        img = Image.fromarray(img)
+                    img_list.append(img)
+            else:
+                # Single image (backward compatible)
+                if isinstance(image, np.ndarray):
+                    if image.dtype != np.uint8:
+                        image = (image * 255).astype(np.uint8)
+                    if len(image.shape) == 3 and image.shape[0] == 3:
+                        image = np.transpose(image, (1, 2, 0))
+                    image = Image.fromarray(image)
+                img_list = [image]
+
+            num_imgs = len(img_list)
 
             # Apply chat template for Instruct models
-            formatted_prompt = self._apply_chat_template(prompt, system_prompt=system_prompt)
+            formatted_prompt = self._apply_chat_template(prompt, system_prompt=system_prompt, num_images=num_imgs)
+
+            # vLLM multi_modal_data: single image or list
+            img_data = img_list if num_imgs > 1 else img_list[0]
 
             inputs.append({
                 "prompt": formatted_prompt,
-                "multi_modal_data": {"image": image},
+                "multi_modal_data": {"image": img_data},
             })
 
         # Generate

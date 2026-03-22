@@ -227,12 +227,21 @@ def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_
     ref_model = ReferenceModel(strategy=strategy, pretrain=vl_cfg.model_name_or_path) if vl_cfg.rft_kl_coef > 0 else None
 
     # VL engine
+    # Determine limit_mm_per_prompt based on vlm_image_mode
+    vlm_image_mode = getattr(vl_cfg, 'vlm_image_mode', 'current_only')
+    if vlm_image_mode == "current_only":
+        limit_mm_per_prompt = {"image": 1}
+    else:
+        # first_and_current or all_history: need up to history_length + 1 images
+        limit_mm_per_prompt = {"image": vl_cfg.history_length + 1}
+
     vl_engine = create_vl_engine(
         model_name=vl_cfg.vl_model_type,
         model_path=vl_cfg.model_name_or_path,
         tensor_parallel_size=vl_cfg.tensor_parallel_size,
         gpu_memory_utilization=vl_cfg.gpu_memory_utilization,
         max_model_len=vl_cfg.prompt_max_len + vl_cfg.generate_max_len,
+        limit_mm_per_prompt=limit_mm_per_prompt,
     )
     logger.info(f'[Rank {rank}] VL engine created: {vl_cfg.vl_model_type}')
 
@@ -276,6 +285,7 @@ def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_
         model_name=vl_cfg.model_name_or_path,
         use_cot=vl_cfg.use_cot,
         game_description=getattr(vl_cfg, 'game_description', ''),
+        vlm_image_mode=vlm_image_mode,
     )
 
     # Collector
@@ -635,6 +645,9 @@ def main():
     # Image-specific
     parser.add_argument('--vl_model', type=str, default='Qwen2.5-VL-7b')
     parser.add_argument('--use_prior', action='store_true', default=True)
+    parser.add_argument('--vlm_image_mode', type=str, default='current_only',
+                        choices=['current_only', 'first_and_current', 'all_history'],
+                        help='VLM image mode: how many images to send to VL model (default: current_only)')
 
     args = parser.parse_args()
 
@@ -653,6 +666,7 @@ def main():
     if args.input_type == 'image':
         print(f"VL Fixed: {args.vl_fixed}")
         print(f"MCTS Mode: {args.mcts_mode}")
+        print(f"VLM Image Mode: {args.vlm_image_mode}")
     print(f"{'='*80}\n")
 
     if args.input_type == 'text':
@@ -711,6 +725,7 @@ def main():
             vl_cfg.use_cot = args.use_cot
             vl_cfg.vl_fixed = args.vl_fixed
             vl_cfg.mcts_root_logits_dict.mode = args.mcts_mode
+            vl_cfg.vlm_image_mode = args.vlm_image_mode
             # Ensure consistency: vl_fixed=True → disable PPO training
             if vl_cfg.vl_fixed:
                 vl_cfg.enable_rft = False

@@ -201,6 +201,12 @@ class PriorZeroVLConfig:
 
     history_length: int = 3  # Number of recent steps to include in context
 
+    # VLM image mode: controls how many images are sent to the VL model
+    # "current_only": only the current frame (default, backward compatible)
+    # "first_and_current": first history frame + current frame (2 images max)
+    # "all_history": all history frames + current frame (history_length+1 images max)
+    vlm_image_mode: str = "current_only"
+
     # Training settings
     colocate_all_models: bool = True
     policy_model_num_gpus: int = 1
@@ -301,6 +307,13 @@ class PriorZeroVLConfig:
                disabled — the pipeline is collect-only + WM training.
             3. train_schedule.alternate=True requires enable_world_model=True.
         """
+        valid_image_modes = ("current_only", "first_and_current", "all_history")
+        if self.vlm_image_mode not in valid_image_modes:
+            raise ValueError(
+                f"[PriorZeroVLConfig] Invalid vlm_image_mode='{self.vlm_image_mode}'.\n"
+                f"Must be one of: {valid_image_modes}"
+            )
+
         if self.enable_rft and self.vl_fixed:
             raise ValueError(
                 "[PriorZeroVLConfig] Illegal config: enable_rft=True AND vl_fixed=True.\n"
