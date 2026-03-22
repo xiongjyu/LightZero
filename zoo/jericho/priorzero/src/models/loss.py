@@ -23,7 +23,11 @@ class PolicyLoss(nn.Module):
         vllm_is_truncated_threshold: list = None,
         use_icepop: bool = False,
         use_cot: bool = False,
-        cot_weight: Optional[float] = None
+        use_mispo: bool = False,
+        cot_weight: Optional[float] = None,
+        mispo_token_truncated_threshold = None,
+        mispo_traj_truncated_threshold = None,
+        
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -37,6 +41,9 @@ class PolicyLoss(nn.Module):
         
         self.use_cot = use_cot
         self.cot_weight = cot_weight
+        self.use_mispo = use_mispo
+        self.mispo_token_truncated_threshold = mispo_token_truncated_threshold
+        self.mispo_traj_truncated_threshold = mispo_traj_truncated_threshold
 
         # GSPO requires sequence-level loss
         if policy_loss_type == "gspo":
@@ -87,20 +94,40 @@ class PolicyLoss(nn.Module):
 
         # Your Efficient RL Framework Secretly Brings You Off-Policy RL Training: https://fengyao.notion.site/off-policy-rl
         vllm_kl = None
+        token_mask = None
+        traj_mask = None
+        effective_mask = action_mask
         if self.enable_vllm_is_correction and self.policy_loss_type == "ppo":
             low_threshold, high_threshold = self.vllm_is_truncated_threshold
-            if self.use_icepop:
+            if self.use_mispo:
+                token_low, token_high = self.mispo_token_truncated_threshold
+                traj_low, traj_high = self.mispo_traj_truncated_threshold
+                token_ratio = torch.exp(old_log_probs - rollout_log_probs).detach()
+                token_mask = ((token_ratio >= token_low) & (token_ratio <= token_high)).float()
+                traj_log_ratio = masked_mean(
+                    old_log_probs - rollout_log_probs,
+                    action_mask,
+                    dim=-1,
+                )
+                traj_ratio = torch.exp(traj_log_ratio).detach()
+                traj_mask = ((traj_ratio >= traj_low) & (traj_ratio <= traj_high)).float().unsqueeze(-1)
+                mispo_mask = token_mask * traj_mask * action_mask
+                loss = loss * mispo_mask
+                effective_mask = mispo_mask
+
+            elif self.use_icepop:
                 # ICEPOP: set coefficients outside the interval to 0
                 vllm_is = torch.exp(old_log_probs - rollout_log_probs).detach()
                 mask = (vllm_is >= low_threshold) & (vllm_is <= high_threshold)
                 vllm_is = vllm_is * mask
+                loss = vllm_is * loss
             else:
                 # Standard clamp with low and high thresholds
                 vllm_is = (
                     torch.exp(old_log_probs - rollout_log_probs).clamp(min=low_threshold, max=high_threshold).detach()
                 )
-            loss = vllm_is * loss
-            vllm_kl = masked_mean(rollout_log_probs - old_log_probs, action_mask, dim=None)
+                loss = vllm_is * loss
+            vllm_kl = masked_mean(rollout_log_probs - old_log_probs, effective_mask, dim=None)
         
         ###### 对 cot 前缀加权重
         if self.use_cot and self.cot_weight is not None:
@@ -117,14 +144,14 @@ class PolicyLoss(nn.Module):
             loss = loss * token_weights
 
         loss = (
-            masked_mean(loss, action_mask, dim=None)
+            masked_mean(loss, effective_mask, dim=None)
             if self.token_level_loss
-            else masked_mean(loss, action_mask, dim=-1).mean()
+            else masked_mean(loss, effective_mask, dim=-1).mean()
         )
 
         clipped = ratio.gt(1 + self.clip_eps_high) | ratio.lt(1 - self.clip_eps_low)
-        clipfrac = masked_mean(clipped, action_mask, dim=None)
+        clipfrac = masked_mean(clipped, effective_mask, dim=None)
 
-        clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
-        approx_kl = masked_mean(-log_ratio.detach(), action_mask, dim=None)
-        return loss, clipfrac, clip_ratio, approx_kl, vllm_kl
+        clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), effective_mask, dim=None)
+        approx_kl = masked_mean(-log_ratio.detach(), effective_mask, dim=None)
+        return loss, clipfrac, clip_ratio, approx_kl, vllm_kl, token_mask, traj_mask

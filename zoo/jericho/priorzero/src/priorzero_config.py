@@ -133,8 +133,12 @@ class PriorZeroLLMConfig:
     enable_vllm: bool = True
     enable_prefix_caching: bool = True
     use_cuda_ipc: bool = False
-    enable_vllm_is_correction: bool = False
+    enable_vllm_is_correction: bool = True
     vllm_is_truncated_threshold:  Tuple[float, float] = (0.5, 5.0)
+    use_mispo: bool = True
+    mispo_token_truncated_threshold: Tuple[float, float] = (0.5, 2.0)
+    mispo_traj_truncated_threshold: Tuple[float, float] = (0.8, 1.2)
+    
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
     vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
 

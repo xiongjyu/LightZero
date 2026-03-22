@@ -230,7 +230,10 @@ class BatchPPOTrainer:
             enable_vllm_is_correction=self.args.enable_vllm_is_correction,
             vllm_is_truncated_threshold=self.args.vllm_is_truncated_threshold,
             use_cot=self.args.use_cot,
-            cot_weight=self.args.cot_weight
+            cot_weight=self.args.cot_weight,
+            use_mispo=self.args.use_mispo,
+            mispo_token_truncated_threshold=self.args.mispo_token_truncated_threshold,
+            mispo_traj_truncated_threshold=self.args.mispo_traj_truncated_threshold
         )
         self.train_iter = 0
         
@@ -269,7 +272,7 @@ class BatchPPOTrainer:
                 return_output=True,
                 return_entropy=True,
             )
-            actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl = self.policy_loss(
+            actor_loss, clipfrac, clip_ratio, approx_kl, vllm_kl, mispo_token_mask, mispo_traj_mask = self.policy_loss(
                 input_ids=micro_batch['input_ids'],
                 log_probs=action_log_probs,
                 old_log_probs=micro_batch['old_action_log_probs'],
@@ -294,8 +297,9 @@ class BatchPPOTrainer:
             if self.args.entropy_loss_coef != 0:
                 loss -= entropy_loss * self.args.entropy_loss_coef  
             
-            self.strategy.backward(loss, self.actor, self.actor_optim)
-            self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
+            if torch.isfinite(loss).all():
+                self.strategy.backward(loss, self.actor, self.actor_optim)
+                self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
             
             policy_loss_item = actor_loss.detach().float().item()
             clipfrac_item = clipfrac.detach().float().item()
@@ -324,6 +328,11 @@ class BatchPPOTrainer:
             metrics_buffer['entropy'].append(entropy_loss_item)
             if vllm_kl is not None:
                 metrics_buffer['vllm_kl'].append(vllm_kl.item())
+            if mispo_token_mask is not None:
+                mispo_token_mask = mispo_token_mask * micro_batch["action_mask"]
+                metrics_buffer['mispo_token_ratio'].append((mispo_token_mask.sum() / micro_batch["action_mask"].sum()).item())
+            if mispo_traj_mask is not None:
+                metrics_buffer['mispo_traj_ratio'].append((mispo_traj_mask.sum() / mispo_traj_mask.shape[0]).item())
 
             log_status = micro_batch["log_status"]
             other_status = {k: [item[k] for item in log_status] for k in log_status[0].keys()}
@@ -364,6 +373,11 @@ class BatchPPOTrainer:
                     status["fmt_rewards"] = np.mean(metrics_buffer['fmt_rewards'])
                 if "vllm_kl" in metrics_buffer:
                     status["vllm_kl"] = np.mean(metrics_buffer['vllm_kl'])
+                
+                if "mispo_token_ratio" in metrics_buffer:
+                    status["mispo_token_ratio"] = np.mean(metrics_buffer['mispo_token_ratio'])
+                if "mispo_traj_ratio" in metrics_buffer:
+                    status["mispo_traj_ratio"] = np.mean(metrics_buffer['mispo_traj_ratio'])
                 metrics_buffer.clear()
 
                 status = self.strategy.all_reduce(status)
