@@ -289,7 +289,8 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             batch_index_list.append(idx)
                 
         import random
-        n = min(512, len(game_segment_list))
+        n = min(256, len(game_segment_list))
+        print(f"new transition={len(latest_new_indices)} | valid_pos_in_gamesemt={len(game_segment_list)} | final_pos_in_gamesemt={n}")
         indices = random.sample(range(len(game_segment_list)), n)
         game_segment_list = [game_segment_list[i] for i in indices]
         pos_in_game_segment_list = [pos_in_game_segment_list[i] for i in indices]
