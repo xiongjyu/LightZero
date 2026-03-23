@@ -240,7 +240,8 @@ class DataProcessor:
                 rollout_logprob = llm_prior_per_tok_list[b][t+1]['rollout_action_logprob'][true_action]
                 full_ids = llm_prior_per_tok_list[b][t+1]['full_ids'][true_action]
                 label_ids = llm_prior_per_tok_list[b][t+1]['label_ids'][true_action]
-                
+                if len(label_ids) == 0:
+                    continue
                 target_value = None
                 if target_values is not None:
                     target_value = float(target_values[b][t].item())
@@ -301,7 +302,7 @@ class DataProcessor:
                 samples = unique_samples + samples[:remain]
             samples = samples[:max_samples]
         else:
-            return False, samples
+            return False, [samples]
         
         if ddp:
             print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")

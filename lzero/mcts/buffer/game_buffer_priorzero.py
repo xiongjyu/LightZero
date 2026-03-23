@@ -287,7 +287,13 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             game_segment_list.append(game_segment)
             pos_in_game_segment_list.append(pos_in_game_segment)
             batch_index_list.append(idx)
-            
+                
+        import random
+        n = min(512, len(game_segment_list))
+        indices = random.sample(range(len(game_segment_list)), n)
+        game_segment_list = [game_segment_list[i] for i in indices]
+        pos_in_game_segment_list = [pos_in_game_segment_list[i] for i in indices]
+        batch_index_list = [batch_index_list[i] for i in indices]
         # make_time = [time.time() for _ in range(len(batch_index_list))]
 
         # Set the make_time for each sample (set to 0 for now, but can be the actual time if needed).

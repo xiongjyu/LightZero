@@ -266,8 +266,7 @@ def train_priorzero(
             logger.info(f"[LLM Training] Rank {rank} | Total transitions: {num_of_transitions} | New transitions: {new_num_of_transitions}")
             
             with prof.block("fetch_latest_batch", rank=rank):
-                llm_batch_size = -1 if new_num_of_transitions < 512 else 512
-                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=llm_batch_size, policy=policy)
+                priorzero_batch = replay_buffer.fetch_latest_batch(batch_size=-1, policy=policy)
                 # 清理 policy的cahce，防止OOM
                 torch.cuda.empty_cache()
                 
@@ -284,7 +283,7 @@ def train_priorzero(
                 if min(gathered_llm_ready) == 0:
                     logger.info(
                         f"[Rank {rank}] Skip LLM training because not all ranks have enough samples. "
-                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples)}"
+                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples[0])}"
                     )
                     continue
                 

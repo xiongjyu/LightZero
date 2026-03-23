@@ -252,7 +252,6 @@ class BatchPPOTrainer:
         )
         acc_grad_steps = self.strategy.accumulated_gradient 
         metrics_buffer = defaultdict(list) # 用于累积 micro_step 指标的缓冲区
-        
         for micro_step, start_idx in enumerate(pbar):
             end_idx = min(start_idx + self.micro_train_batch_size, all_samples_size)
             micro_batch = {
@@ -297,9 +296,8 @@ class BatchPPOTrainer:
             if self.args.entropy_loss_coef != 0:
                 loss -= entropy_loss * self.args.entropy_loss_coef  
             
-            if torch.isfinite(loss).all():
-                self.strategy.backward(loss, self.actor, self.actor_optim)
-                self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
+            self.strategy.backward(loss, self.actor, self.actor_optim)
+            self.strategy.optimizer_step(self.actor_optim, self.actor, self.actor_scheduler, name="actor")
             
             policy_loss_item = actor_loss.detach().float().item()
             clipfrac_item = clipfrac.detach().float().item()
@@ -382,7 +380,7 @@ class BatchPPOTrainer:
 
                 status = self.strategy.all_reduce(status)
                 status_list.append(status)
-
+        
         return status_list
     
     def _deepspeed_broadcast(self):

@@ -114,7 +114,9 @@ class PolicyLoss(nn.Module):
                 mispo_mask = token_mask * traj_mask * action_mask
                 loss = loss * mispo_mask
                 effective_mask = mispo_mask
-
+                if effective_mask.sum().item() == 0:
+                    effective_mask = action_mask
+                    
             elif self.use_icepop:
                 # ICEPOP: set coefficients outside the interval to 0
                 vllm_is = torch.exp(old_log_probs - rollout_log_probs).detach()
