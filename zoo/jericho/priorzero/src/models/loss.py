@@ -22,6 +22,12 @@ class PolicyLoss(nn.Module):
         enable_vllm_is_correction: bool = False,
         vllm_is_truncated_threshold: list = None,
         use_icepop: bool = False,
+        use_cot: bool = False,
+        use_mispo: bool = False,
+        cot_weight: Optional[float] = None,
+        mispo_token_truncated_threshold = None,
+        mispo_traj_truncated_threshold = None,
+        
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -32,6 +38,12 @@ class PolicyLoss(nn.Module):
         self.enable_vllm_is_correction = enable_vllm_is_correction
         self.vllm_is_truncated_threshold = vllm_is_truncated_threshold
         self.use_icepop = use_icepop
+        
+        self.use_cot = use_cot
+        self.cot_weight = cot_weight
+        self.use_mispo = use_mispo
+        self.mispo_token_truncated_threshold = mispo_token_truncated_threshold
+        self.mispo_traj_truncated_threshold = mispo_traj_truncated_threshold
 
         # GSPO requires sequence-level loss
         if policy_loss_type == "gspo":
@@ -43,6 +55,7 @@ class PolicyLoss(nn.Module):
 
     def forward(
         self,
+        input_ids: torch.LongTensor,
         log_probs: torch.Tensor,
         old_log_probs: torch.Tensor,
         advantages: torch.Tensor,
@@ -81,29 +94,66 @@ class PolicyLoss(nn.Module):
 
         # Your Efficient RL Framework Secretly Brings You Off-Policy RL Training: https://fengyao.notion.site/off-policy-rl
         vllm_kl = None
+        token_mask = None
+        traj_mask = None
+        effective_mask = action_mask
         if self.enable_vllm_is_correction and self.policy_loss_type == "ppo":
             low_threshold, high_threshold = self.vllm_is_truncated_threshold
-            if self.use_icepop:
+            if self.use_mispo:
+                token_low, token_high = self.mispo_token_truncated_threshold
+                traj_low, traj_high = self.mispo_traj_truncated_threshold
+                token_ratio = torch.exp(old_log_probs - rollout_log_probs).detach()
+                token_mask = ((token_ratio >= token_low) & (token_ratio <= token_high)).float()
+                traj_log_ratio = masked_mean(
+                    old_log_probs - rollout_log_probs,
+                    action_mask,
+                    dim=-1,
+                )
+                traj_ratio = torch.exp(traj_log_ratio).detach()
+                traj_mask = ((traj_ratio >= traj_low) & (traj_ratio <= traj_high)).float().unsqueeze(-1)
+                mispo_mask = token_mask * traj_mask * action_mask
+                loss = loss * mispo_mask
+                effective_mask = mispo_mask
+                if effective_mask.sum().item() == 0:
+                    effective_mask = action_mask
+                    
+            elif self.use_icepop:
                 # ICEPOP: set coefficients outside the interval to 0
                 vllm_is = torch.exp(old_log_probs - rollout_log_probs).detach()
                 mask = (vllm_is >= low_threshold) & (vllm_is <= high_threshold)
                 vllm_is = vllm_is * mask
+                loss = vllm_is * loss
             else:
                 # Standard clamp with low and high thresholds
                 vllm_is = (
                     torch.exp(old_log_probs - rollout_log_probs).clamp(min=low_threshold, max=high_threshold).detach()
                 )
-            loss = vllm_is * loss
-            vllm_kl = masked_mean(rollout_log_probs - old_log_probs, action_mask, dim=None)
+                loss = vllm_is * loss
+            vllm_kl = masked_mean(rollout_log_probs - old_log_probs, effective_mask, dim=None)
+        
+        ###### 对 cot 前缀加权重
+        if self.use_cot and self.cot_weight is not None:
+            output_ids = input_ids[:, -action_mask.shape[1]:]
+            is_split = (output_ids == 2512) & action_mask.bool()  
+            token_weights = torch.ones_like(loss) 
+            pos = torch.arange(action_mask.shape[1], device=input_ids.device).unsqueeze(0)
+            last_split_pos = torch.where(is_split, pos, torch.full_like(pos, -1)).max(dim=1, keepdim=True).values
+            token_weights = torch.where(
+                (pos < last_split_pos) & action_mask.bool(),                   # 若想包含 2512 本身就改成 <=
+                torch.full_like(token_weights, self.cot_weight),
+                token_weights,
+            )
+            loss = loss * token_weights
 
         loss = (
-            masked_mean(loss, action_mask, dim=None)
+            masked_mean(loss, effective_mask, dim=None)
             if self.token_level_loss
-            else masked_mean(loss, action_mask, dim=-1).mean()
+            else masked_mean(loss, effective_mask, dim=-1).mean()
         )
-        clipped = ratio.gt(1 + self.clip_eps_high) | ratio.lt(1 - self.clip_eps_low)
-        clipfrac = masked_mean(clipped, action_mask, dim=None)
 
-        clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
-        approx_kl = masked_mean(-log_ratio.detach(), action_mask, dim=None)
-        return loss, clipfrac, clip_ratio, approx_kl, vllm_kl
+        clipped = ratio.gt(1 + self.clip_eps_high) | ratio.lt(1 - self.clip_eps_low)
+        clipfrac = masked_mean(clipped, effective_mask, dim=None)
+
+        clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), effective_mask, dim=None)
+        approx_kl = masked_mean(-log_ratio.detach(), effective_mask, dim=None)
+        return loss, clipfrac, clip_ratio, approx_kl, vllm_kl, token_mask, traj_mask

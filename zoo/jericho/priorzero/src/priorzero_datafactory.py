@@ -240,7 +240,8 @@ class DataProcessor:
                 rollout_logprob = llm_prior_per_tok_list[b][t+1]['rollout_action_logprob'][true_action]
                 full_ids = llm_prior_per_tok_list[b][t+1]['full_ids'][true_action]
                 label_ids = llm_prior_per_tok_list[b][t+1]['label_ids'][true_action]
-                
+                if len(label_ids) == 0:
+                    continue
                 target_value = None
                 if target_values is not None:
                     target_value = float(target_values[b][t].item())
@@ -291,27 +292,54 @@ class DataProcessor:
             raw_obs_list, history_obs_list, llm_prior_per_tok_list, pred_value, target_value, cot_prefix_list, llm_action_list
         )
         random.Random(0).shuffle(samples)
-        if len(samples) >= max_samples:
-            # 先进行去重，在提取去重后的sample
-            unique_samples = unique_dicts_hash(samples)
-            if len(unique_samples) >= max_samples:
-                samples = unique_samples[:max_samples]
-            else:
-                remain = max_samples - len(unique_samples)
-                samples = unique_samples + samples[:remain]
-            samples = samples[:max_samples]
-        else:
-            return False, samples
+        
+        
+        def _select_samples_with_unique_priority(sample_list, keep_n):
+            """优先取去重后的样本；如果去重后不够，则按原始顺序补齐。"""
+            if len(sample_list) < keep_n:
+                return None
+            unique_samples = unique_dicts_hash(sample_list)
+            if len(unique_samples) >= keep_n:
+                return unique_samples[:keep_n]
+            remain = keep_n - len(unique_samples)
+            selected = unique_samples + sample_list[:remain]
+            return selected[:keep_n]
         
         if ddp:
-            print(f"[Rank {self.rank}] process {len(samples)} samples collected by Rank {self.rank}")
-            real_samples = samples
+            gathered_samples = [None for _ in range(self.world_size)]
+            dist.all_gather_object(gathered_samples, samples)
+            
+            global_samples = []
+            for rank_samples in gathered_samples:
+                if rank_samples is not None:
+                    global_samples.extend(rank_samples)
+            global_max_samples = self.world_size * max_samples
+            selected_global_samples = _select_samples_with_unique_priority(global_samples, global_max_samples)
+
+            if selected_global_samples is None:
+                print(
+                    f"[Rank {self.rank}] insufficient global samples after all_gather: "
+                    f"total_global={len(global_samples)} < required={global_max_samples}"
+                )
+                return False, [global_samples]
+
+            start = self.rank * max_samples
+            end = (self.rank + 1) * max_samples
+            real_samples = selected_global_samples[start:end]
+            print(
+                f"[Rank {self.rank}] local={len(samples)}, gathered_total={len(global_samples)}, "
+                f"selected_global={len(selected_global_samples)}, take={start}:{end}"
+            )
         else:
-            per_rank = len(samples) // self.world_size
+            selected_samples = _select_samples_with_unique_priority(samples, max_samples)
+            if selected_samples is None:
+                return False, [samples]
+            
+            per_rank = len(selected_samples) // self.world_size
             start = self.rank * per_rank
-            end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(samples)
-            print(f"[Rank {self.rank}] process {start}: {end} samples. Total {len(samples)} samples collected by Rank 0.")
-            real_samples = samples[start:end]
+            end = (self.rank + 1) * per_rank if self.rank != self.world_size - 1 else len(selected_samples)
+            print(f"[Rank {self.rank}] process {start}: {end} samples. Total {len(selected_samples)} samples collected by Rank 0.")
+            real_samples = selected_samples[start:end]
         
         if self.use_cot:
             targets_only = [s["prefix_cot"] + " " + s["target"] + self.tokenizer.eos_token for s in real_samples]

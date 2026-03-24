@@ -121,6 +121,8 @@ class PriorZeroLLMConfig:
     attn_implementation: str = "flash_attention_2" 
     history_length: int = 10
     use_cot: bool = False
+    cot_weight: float = 0.1 # 控制 cot前缀token的权重，由于重点是action:，所以前缀的token权重调低
+    
     user_prompt_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "history_with_reward": True,   # 是否在 prompt 中加入历史交互的 reward 信息
         "observation_with_valid_actions": False,  # 是否在 prompt 中加入当前 observation 中可执行的 action 信息  
@@ -134,8 +136,12 @@ class PriorZeroLLMConfig:
     enable_vllm: bool = True
     enable_prefix_caching: bool = True
     use_cuda_ipc: bool = False
-    enable_vllm_is_correction: bool = False
+    enable_vllm_is_correction: bool = True
     vllm_is_truncated_threshold:  Tuple[float, float] = (0.5, 5.0)
+    use_mispo: bool = True
+    mispo_token_truncated_threshold: Tuple[float, float] = (0.5, 2.0)
+    mispo_traj_truncated_threshold: Tuple[float, float] = (0.8, 1.2)
+    
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
     vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
 
@@ -390,14 +396,14 @@ def get_priorzero_config(
         env_name = env_id.replace(".z5", "")
         if llm_config.enable_rft:
             exp_name = (
-                f"data_priorzero/llm_rft/priorzero_{env_name}_{model_key}_"
-                f"train_{llm_config.train_mode_dict.mode}_WM_{llm_config.enable_world_model}_"
-                f"useCot_{llm_config.use_cot}_seed{seed}"
+                f"data_priorzero/llm_rft/priorzero_{env_name}_{model_key}_train_{llm_config.train_mode_dict.mode}/"
+                f"useCot_{llm_config.use_cot}_alternate_{llm_config.train_schedule.alternate}/"
+                f"mcts_{llm_config.mcts_root_logits_dict.mode}_staleness_{llm_config.max_rollout_staleness}_tbs_{llm_config.train_batch_size}_use_mispo_{llm_config.use_mispo}"
             )
         else:
             exp_name = (
                 f"data_priorzero/llm_frozen/priorzero_{env_name}_{model_key}_"
-                f"train_{llm_config.train_mode_dict.mode}_WM_{llm_config.enable_world_model}_"
+                f"train_{llm_config.train_mode_dict.mode}"
                 f"useCot_{llm_config.use_cot}_seed{seed}"
             )
     
@@ -473,7 +479,7 @@ def get_priorzero_debug_config(
     game_segment_length = 50
 
     llm_config.train_batch_size = 8  # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
-    llm_config.micro_train_batch_size = 1
+    llm_config.micro_train_batch_size = 4
     llm_config.train_schedule.wm_update_iters=2
     llm_config.train_schedule.llm_update_iters=1
 

@@ -196,6 +196,7 @@ def train_priorzero(
     torch_dist_barrier_and_cuda_sync()
     train_schedule = llm_cfg.train_schedule
     train_alternate = train_schedule["alternate"]
+    current_phase = None
     if train_alternate:
         current_phase = train_schedule["start_phase"]
         last_wm_train_iter = 0
@@ -206,7 +207,7 @@ def train_priorzero(
             break
         
         # 1.评估阶段
-        if learner.train_iter == 0 or evaluator.should_eval(learner.train_iter):
+        if learner.train_iter != 0 and evaluator.should_eval(learner.train_iter):
             logger.info(f"[Evaluator][Rank {rank}: Iter {learner.train_iter}] Evaluating...")
             if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                 vllm_engine.wake_up()
@@ -218,7 +219,7 @@ def train_priorzero(
         if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
             vllm_engine.wake_up()      
             
-        new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0})
+        new_data = collector.collect(train_iter=learner.train_iter, policy_kwargs={'temperature': 0.25, 'epsilon': 0.0}, phase=current_phase)
         data_processor.get_llm_output_log(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter)
         
         if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
@@ -282,7 +283,7 @@ def train_priorzero(
                 if min(gathered_llm_ready) == 0:
                     logger.info(
                         f"[Rank {rank}] Skip LLM training because not all ranks have enough samples. "
-                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples)}"
+                        f"ready_flags={gathered_llm_ready}, local_ready={local_llm_ready}, required_samples_per_rank={llm_need_sample_cnt}, train_samples={len(train_samples[0])}"
                     )
                     continue
                 

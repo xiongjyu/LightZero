@@ -14,6 +14,7 @@ from ding.torch_utils import to_ndarray
 from ding.utils import build_logger, EasyTimer, SERIAL_COLLECTOR_REGISTRY, allreduce_data
 from vllm import SamplingParams
 import os
+import math
 
 # Import from local LightZero
 from lzero.worker.muzero_segment_collector import MuZeroSegmentCollector as OriginalCollector
@@ -185,7 +186,8 @@ class PriorZeroCollector(OriginalCollector):
         num_segments: Optional[int] = None,
         train_iter: int = 0,
         policy_kwargs: Optional[dict] = None,
-        collect_with_pure_policy: bool = False
+        collect_with_pure_policy: bool = False,
+        phase: Optional[str] = None
     ) -> List[Any]:
         """
         [PRIORZERO-MODIFIED]
@@ -341,7 +343,8 @@ class PriorZeroCollector(OriginalCollector):
                 policy_kwargs_forward = {
                     'llm_prior_logprob': llm_prior_per_seq,
                     'valid_actions_list': valid_actions_list,
-                    "current_env_step": self._total_envstep_count
+                    "current_env_step": self._total_envstep_count,
+                    "phase": phase,
                 }
 
                 if self.task_id is not None:
@@ -351,20 +354,19 @@ class PriorZeroCollector(OriginalCollector):
                                                         temperature=temperature, to_play=to_play, epsilon=epsilon,
                                                         ready_env_id=sorted(list(ready_env_id)), timestep=timestep,
                                                         **policy_kwargs_forward)
-
+                            
                 # Extract outputs
                 actions_with_env_id = {k: v['action'] for k, v in policy_output.items()}
                 value_dict_with_env_id = {k: v['searched_value'] for k, v in policy_output.items()}
                 pred_value_dict_with_env_id = {k: v['predicted_value'] for k, v in policy_output.items()}
 
-                if not collect_with_pure_policy:
-                    distributions_dict_with_env_id = {
-                        k: v['visit_count_distributions'] for k, v in policy_output.items()
-                    }
-                    visit_entropy_dict_with_env_id = {
-                        k: v['visit_count_distribution_entropy'] for k, v in policy_output.items()
-                    }
-                llm_weight_dict_with_env_id = {k: v['llm_weight'] for k, v in policy_output.items()}
+                distributions_dict_with_env_id = {
+                    k: v['visit_count_distributions'] for k, v in policy_output.items()
+                }
+                visit_entropy_dict_with_env_id = {
+                    k: v['visit_count_distribution_entropy'] for k, v in policy_output.items()
+                }
+                llm_weight_dict_with_env_id = {k: v.get('llm_weight', 0.0) for k, v in policy_output.items()}
 
                 actions: Dict[int, Any] = {
                     env_id: actions_with_env_id.pop(env_id)
@@ -684,7 +686,6 @@ class PriorZeroCollector(OriginalCollector):
         """
         对 Logprobs 字典进行温度缩放，控制分布的平缓程度。
         """
-        import math
         T = self.llm_prior_temperature
         if T <= 1e-8:
             max_key = max(logprobs_dict, key=logprobs_dict.get)

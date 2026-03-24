@@ -280,7 +280,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             segment_len = len(game_segment.action_segment)
             if self._cfg.action_type == 'varied_action_space':
                 within_obs_window = pos_in_game_segment + self._cfg.num_unroll_steps + self._cfg.model.frame_stack_num <= len(game_segment.obs_segment)
-                within_td_window = pos_in_game_segment < self._cfg.game_segment_length - self._cfg.num_unroll_steps - self._cfg.td_steps
+                within_td_window = pos_in_game_segment < self._cfg.game_segment_length - self._cfg.num_unroll_steps
                 valid_next_action = pos_in_game_segment < segment_len - 1
                 is_valid_latest_transition = within_obs_window and within_td_window and valid_next_action
             else:
@@ -295,7 +295,14 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             game_segment_list.append(game_segment)
             pos_in_game_segment_list.append(pos_in_game_segment)
             batch_index_list.append(idx)
-            
+                
+        import random
+        n = min(256, len(game_segment_list))
+        print(f"new transition={len(latest_new_indices)} | valid_pos_in_gamesemt={len(game_segment_list)} | final_pos_in_gamesemt={n}")
+        indices = random.sample(range(len(game_segment_list)), n)
+        game_segment_list = [game_segment_list[i] for i in indices]
+        pos_in_game_segment_list = [pos_in_game_segment_list[i] for i in indices]
+        batch_index_list = [batch_index_list[i] for i in indices]
         # make_time = [time.time() for _ in range(len(batch_index_list))]
 
         # Set the make_time for each sample (set to 0 for now, but can be the actual time if needed).
