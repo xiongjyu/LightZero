@@ -634,6 +634,8 @@ def main():
                         help='Enable Chain-of-Thought reasoning (default: True)')
     parser.add_argument('--no_cot', action='store_true', default=False,
                         help='Disable Chain-of-Thought reasoning')
+    parser.add_argument('--cot_weight', type=float, default=0.1,
+                        help='Weight for CoT prefix tokens in loss (default: 0.1)')
     parser.add_argument('--vl_fixed', action='store_true', default=True,
                         help='Freeze VL model (inference only, no VL training) (default: True)')
     parser.add_argument('--no_vl_fixed', action='store_true', default=False,
@@ -723,6 +725,7 @@ def main():
         # Apply CLI overrides to vl_cfg
         if vl_cfg is not None:
             vl_cfg.use_cot = args.use_cot
+            vl_cfg.cot_weight = args.cot_weight
             vl_cfg.vl_fixed = args.vl_fixed
             vl_cfg.mcts_root_logits_dict.mode = args.mcts_mode
             vl_cfg.vlm_image_mode = args.vlm_image_mode

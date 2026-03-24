@@ -9,16 +9,18 @@
 #   bash run_priorzero_vl_lunarlander.sh 2 Qwen3-VL-2b 42
 #   bash run_priorzero_vl_lunarlander.sh 1 Qwen3-VL-2b 0 --quick_test
 #   bash run_priorzero_vl_lunarlander.sh 1 Qwen3-VL-2b 0 --quick_test --no_cot --no_vl_fixed --mcts_mode wm_logits
+#   bash run_priorzero_vl_lunarlander.sh 1 Qwen3-VL-2b 0 --cot_weight 0.05
 
 set -euo pipefail
 
 # ===================== Configurable Parameters =====================
 NUM_GPUS=${1:-4}
-VL_MODEL=${2:-"Qwen3-VL-2b"}
+VL_MODEL=${2:-"Qwen2.5-VL-3b"}
 SEED=${3:-0}
 EXTRA_ARGS="${@:4}"
-CUDA_DEVICES=${CUDA_DEVICES:-"0,1,2,3"}
-MASTER_PORT=${MASTER_PORT:-29501}
+# CUDA_DEVICES=${CUDA_DEVICES:-"0,1,2,3"}
+CUDA_DEVICES=${CUDA_DEVICES:-"2,3"}
+MASTER_PORT=${MASTER_PORT:-29500}
 # ===================================================================
 
 # DDP / NCCL debugging environment variables

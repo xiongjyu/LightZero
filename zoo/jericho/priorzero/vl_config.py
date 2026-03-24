@@ -195,7 +195,8 @@ class PriorZeroVLConfig:
 
     attn_implementation: str = "flash_attention_2" 
     use_cot: bool = True
-    prompt_max_len: int = 8192  # Image + prompt tokens; 
+    cot_weight: float = 0.1  # 控制 cot前缀token的权重，由于重点是action:，所以前缀的token权重调低
+    prompt_max_len: int = 8192  # Image + prompt tokens;
     generate_max_len: int = 512  # CoT + action output
     bf16: bool = True
 

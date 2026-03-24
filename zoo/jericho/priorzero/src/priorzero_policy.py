@@ -308,11 +308,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         phase = kwargs.get('phase', None)
         mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
         
-<<<<<<< HEAD
-        if llm_prior_logprob is None or all(x is None for x in llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits":
-=======
         if llm_prior_logprob is None or not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits" or phase == 'llm':
->>>>>>> origin-xjy/dev-multitask-balance-clean-rft
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_collect(
                 data, action_mask, temperature, to_play, epsilon,
