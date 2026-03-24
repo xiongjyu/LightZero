@@ -19,8 +19,10 @@ VL_MODEL=${2:-"Qwen2.5-VL-3b"}
 SEED=${3:-0}
 EXTRA_ARGS="${@:4}"
 # CUDA_DEVICES=${CUDA_DEVICES:-"0,1,2,3"}
-CUDA_DEVICES=${CUDA_DEVICES:-"2,3"}
-MASTER_PORT=${MASTER_PORT:-29500}
+CUDA_DEVICES=${CUDA_DEVICES:-"0,1"}
+# MASTER_PORT=${MASTER_PORT:-29500}
+MASTER_PORT=${MASTER_PORT:-29501}
+
 # ===================================================================
 
 # DDP / NCCL debugging environment variables

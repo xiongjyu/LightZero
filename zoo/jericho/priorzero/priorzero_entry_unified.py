@@ -648,7 +648,7 @@ def main():
     parser.add_argument('--vlm_image_mode', type=str, default='current_only',
                         choices=['current_only', 'first_and_current', 'all_history'],
                         help='VLM image mode: how many images to send to VL model (default: current_only)')
-    parser.add_argument('--prompt_style', type=str, default='concise',
+    parser.add_argument('--prompt_style', type=str, default='legacy',
                         choices=['concise', 'legacy'],
                         help='Prompt style: concise (shorter, better for small VLMs) or legacy (verbose)')
 

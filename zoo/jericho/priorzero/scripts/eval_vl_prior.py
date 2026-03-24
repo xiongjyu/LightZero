@@ -240,7 +240,8 @@ def main():
     parser.add_argument("--history_length", type=int, default=3)
     parser.add_argument("--image_size", type=int, default=64)
     # VLM settings
-    parser.add_argument("--vl_model", type=str, default="Qwen2.5-VL-7b")
+    parser.add_argument("--vl_model", type=str, default="Qwen3-VL-8b")
+    # parser.add_argument("--vl_model", type=str, default="Qwen2.5-VL-7b")
     parser.add_argument("--use_cot", action="store_true", default=True)
     parser.add_argument("--no_cot", action="store_true")
     parser.add_argument("--vlm_image_mode", type=str, default="current_only",
