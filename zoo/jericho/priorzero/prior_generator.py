@@ -180,6 +180,7 @@ class VLPriorGenerator(PriorGenerator):
         tokenizer=None,
         game_description: str = "",
         vlm_image_mode: str = "current_only",
+        prompt_style: str = "concise",
         **kwargs
     ):
         """
@@ -190,6 +191,7 @@ class VLPriorGenerator(PriorGenerator):
             tokenizer: Tokenizer for building training samples
             game_description: Game-specific description for prompts
             vlm_image_mode: Image mode - "current_only", "first_and_current", or "all_history"
+            prompt_style: "concise" (shorter, better for small VLMs) or "legacy" (verbose, original)
         """
         super().__init__(model_name, obs_type='image')
         self.vl_engine = vl_engine
@@ -197,6 +199,7 @@ class VLPriorGenerator(PriorGenerator):
         self.tokenizer = tokenizer
         self.game_description = game_description
         self.vlm_image_mode = vlm_image_mode
+        self.prompt_style = prompt_style
 
         # For logging VL outputs
         self.episode_output = []
@@ -345,6 +348,21 @@ class VLPriorGenerator(PriorGenerator):
         return [current_image]
 
     def get_system_prompt(self) -> str:
+        """System prompt — dispatches to concise or legacy style."""
+        if self.prompt_style == "concise":
+            return self._get_system_prompt_concise()
+        return self._get_system_prompt_legacy()
+
+    def _get_system_prompt_concise(self) -> str:
+        """Short system prompt optimized for small VLMs (2B-7B)."""
+        if self.use_cot:
+            return (
+                "You play an image-based game. Pick the best action.\n"
+                "Reply EXACTLY:\nReasoning: <1 sentence>\nAction: <action>"
+            )
+        return "You play an image-based game. Pick the best action.\nReply EXACTLY:\nAction: <action>"
+
+    def _get_system_prompt_legacy(self) -> str:
         """
         System prompt for VL — mirrors LLM's get_system_prompt(),
         only replacing "text-based adventure game" with image-based context.
@@ -374,6 +392,82 @@ class VLPriorGenerator(PriorGenerator):
         return "\n".join(parts)
 
     def get_user_prompt(
+        self,
+        action_candidates: List[str],
+        history: Optional[List] = None,
+        num_images: int = 1,
+    ) -> str:
+        """User prompt — dispatches to concise or legacy style."""
+        if self.prompt_style == "concise":
+            return self._get_user_prompt_concise(action_candidates, history, num_images)
+        return self._get_user_prompt_legacy(action_candidates, history, num_images)
+
+    def _get_user_prompt_concise(
+        self,
+        action_candidates: List[str],
+        history: Optional[List] = None,
+        num_images: int = 1,
+    ) -> str:
+        """
+        Concise user prompt: minimal tokens, maximum signal.
+        Designed for small VLMs (2B-7B) where instruction-following degrades with long prompts.
+        """
+        parts = []
+
+        # Game description — one line only
+        if self.game_description:
+            # Take only the first sentence of game_description
+            first_sentence = self.game_description.split('\n')[0].strip()
+            parts.append(first_sentence)
+
+        # Multi-image labelling
+        if self.vlm_image_mode != "current_only" and num_images > 1:
+            img_idx = 1
+            if history and len(history) > 0:
+                for entry in history:
+                    action = entry[1]
+                    reward = entry[2]
+                    has_image = isinstance(entry[0], (np.ndarray, Image.Image))
+                    if self.vlm_image_mode == "all_history" and has_image and img_idx < num_images:
+                        parts.append(f"[Image {img_idx}] Action: {action}, Reward: {reward}")
+                        img_idx += 1
+                    elif self.vlm_image_mode == "first_and_current" and has_image and img_idx == 1:
+                        parts.append(f"[Image {img_idx} - initial] Action: {action}, Reward: {reward}")
+                        img_idx += 1
+                    else:
+                        parts.append(f"Action: {action}, R: {reward}")
+            parts.append(f"[Image {num_images}] Current screen.")
+        else:
+            # Single image — text-only history
+            if history and len(history) > 0:
+                hist_strs = []
+                for entry in history:
+                    action, reward = entry[1], entry[2]
+                    hist_strs.append(f"{action}(R:{reward})")
+                parts.append("History: " + " → ".join(hist_strs))
+            parts.append("Current screen shown above.")
+
+        # Valid actions — compact
+        actions_str = ", ".join(action_candidates)
+        parts.append(f"Actions: [{actions_str}]")
+
+        # LunarLander-specific compact hints
+        if set(action_candidates) == {"NOOP", "LEFT_ENGINE", "MAIN_ENGINE", "RIGHT_ENGINE"}:
+            parts.append(
+                "NOOP=do nothing | LEFT_ENGINE=push right,rotate CW(-0.03) | "
+                "MAIN_ENGINE=slow descent(-0.3) | RIGHT_ENGINE=push left,rotate CCW(-0.03)\n"
+                "Goal: land on pad horizontally. Crash=-100, land=+100."
+            )
+
+        # Instruction
+        if self.use_cot:
+            parts.append("Reasoning: <1 sentence>\nAction: <one action>")
+        else:
+            parts.append("Action: <one action>")
+
+        return "\n".join(parts)
+
+    def _get_user_prompt_legacy(
         self,
         action_candidates: List[str],
         history: Optional[List] = None,

@@ -467,9 +467,9 @@ class UnifiedDataProcessor:
         """
         Build VL training samples in the same tensor format as the LLM path.
 
-        The 7-element priorzero_batch from fetch_latest_batch:
+        The 8-element priorzero_batch from fetch_latest_batch:
             [raw_obs_list, history_obs_list, llm_prior_per_tok_list,
-             batch_target_values, batch_pred_values, cot_prefix_list, llm_action_list]
+             batch_target_values, batch_pred_values, cot_prefix_list, llm_action_list, action_list]
 
         Returns:
             (flag, (input_ids, attention_mask, action_mask, advantage, rollout_logprob, log_status))
@@ -481,7 +481,7 @@ class UnifiedDataProcessor:
 
         try:
             raw_obs_list, history_obs_list, llm_prior_per_tok_list, \
-                target_values, pred_values, cot_prefix_list, llm_action_list = priorzero_batch
+                target_values, pred_values, cot_prefix_list, llm_action_list, action_list = priorzero_batch
 
             if len(raw_obs_list) == 0:
                 return (False, [])
@@ -497,12 +497,18 @@ class UnifiedDataProcessor:
                     if action_name is None:
                         continue
 
+                    # history at time t = history after executing action t (before action t+1)
                     history = history_obs_list[b][t] if t < len(history_obs_list[b]) else []
                     cot_prefix = cot_prefix_list[b][t + 1] if (cot_prefix_list is not None and t + 1 < len(cot_prefix_list[b])) else None
 
                     # VL prior stored as action-level log-prob array
                     action_logprobs = llm_prior_per_tok_list[b][t + 1] if (
                         llm_prior_per_tok_list is not None and t + 1 < len(llm_prior_per_tok_list[b])
+                    ) else None
+
+                    # MCTS-selected action index (integer) for correct rollout log-prob lookup
+                    mcts_action_idx = int(action_list[b][t + 1]) if (
+                        action_list is not None and b < len(action_list) and t + 1 < len(action_list[b])
                     ) else None
 
                     tv = float(target_values[b][t]) if target_values is not None and b < len(target_values) and t < len(target_values[b]) else 0.0
@@ -513,6 +519,7 @@ class UnifiedDataProcessor:
                         'action_name': action_name,
                         'cot_prefix': cot_prefix,
                         'action_logprobs': action_logprobs,  # np.ndarray or None
+                        'mcts_action_idx': mcts_action_idx,  # int or None
                         'target_value': tv,
                         'pred_value': pv,
                     })
@@ -635,12 +642,13 @@ class UnifiedDataProcessor:
             for idx, s in enumerate(real_samples):
                 tgt_len = len(tgt_ids_list[idx])
                 if s['action_logprobs'] is not None and isinstance(s['action_logprobs'], np.ndarray):
-                    # action_logprobs is an array of log-probs over actions;
-                    # extract the chosen action's log-prob
-                    # The chosen action was the one stored in action_name
-                    # action_logprobs[chosen_idx] gives log P(chosen_action)
-                    # Spread evenly: per-token log-prob = log P(action) / num_tokens
-                    chosen_logprob = float(np.max(s['action_logprobs']))  # chosen action has highest log-prob
+                    # Use MCTS-selected action index to get the correct rollout log-prob.
+                    # Previously used np.max which incorrectly assumed VLM's top choice == MCTS choice.
+                    if s['mcts_action_idx'] is not None and 0 <= s['mcts_action_idx'] < len(s['action_logprobs']):
+                        chosen_logprob = float(s['action_logprobs'][s['mcts_action_idx']])
+                    else:
+                        # Fallback: use max (legacy behavior, should rarely happen)
+                        chosen_logprob = float(np.max(s['action_logprobs']))
                     per_token_lp = chosen_logprob / max(tgt_len, 1)
                     rollout_logprob[idx, -tgt_len:] = per_token_lp
                 # else: leave as zero (no rollout log-probs available)

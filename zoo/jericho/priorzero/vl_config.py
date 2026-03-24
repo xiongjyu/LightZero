@@ -158,6 +158,9 @@ class PriorZeroVLConfig:
     vllm_enable_sleep: bool = True # 是否可以休眠
     enable_vllm_is_correction: bool = False
     vllm_is_truncated_threshold: Tuple[float, float] = (0.5, 5.0)
+    use_mispo: bool = False
+    mispo_token_truncated_threshold: Tuple[float, float] = (0.5, 2.0)
+    mispo_traj_truncated_threshold: Tuple[float, float] = (0.8, 1.2)
     top_p: float = 0.95
     seed: int = 0
     reduction: str = "mean"
@@ -207,6 +210,9 @@ class PriorZeroVLConfig:
     # "first_and_current": first history frame + current frame (2 images max)
     # "all_history": all history frames + current frame (history_length+1 images max)
     vlm_image_mode: str = "current_only"
+
+    # Prompt style: "concise" (shorter, better for small VLMs) or "legacy" (verbose, original)
+    prompt_style: str = "concise"
 
     # Training settings
     colocate_all_models: bool = True

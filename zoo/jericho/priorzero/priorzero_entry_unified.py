@@ -286,6 +286,7 @@ def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_
         use_cot=vl_cfg.use_cot,
         game_description=getattr(vl_cfg, 'game_description', ''),
         vlm_image_mode=vlm_image_mode,
+        prompt_style=getattr(vl_cfg, 'prompt_style', 'concise'),
     )
 
     # Collector
@@ -536,14 +537,11 @@ def train_unified(
             policy.recompute_pos_emb_diff_and_clear_cache()
 
             # TB logging for WM training
+            # NOTE: DI-engine's BaseLearner already logs all _monitor_vars_learn() metrics
+            # under "learner_iter/" prefix (averaged over log_show_after_iter).
+            # We only log the phase-tracking scalar here; per-metric logging is handled by the learner.
             if tb_logger is not None:
                 tb_logger.add_scalar('train/wm_train_iter', learner.train_iter, collector.envstep)
-                if log_vars and isinstance(log_vars, list) and len(log_vars) > 0:
-                    wm_metrics = log_vars[0] if isinstance(log_vars[0], dict) else {}
-                    for k, v in wm_metrics.items():
-                        if isinstance(v, (int, float)):
-                            tb_logger.add_scalar(f'learner_wm_iter/{k}', float(v), learner.train_iter)
-                            tb_logger.add_scalar(f'learner_wm_envstep/{k}', float(v), collector.envstep)
 
             # Phase switching: WM -> LLM/VL
             if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
@@ -650,6 +648,9 @@ def main():
     parser.add_argument('--vlm_image_mode', type=str, default='current_only',
                         choices=['current_only', 'first_and_current', 'all_history'],
                         help='VLM image mode: how many images to send to VL model (default: current_only)')
+    parser.add_argument('--prompt_style', type=str, default='concise',
+                        choices=['concise', 'legacy'],
+                        help='Prompt style: concise (shorter, better for small VLMs) or legacy (verbose)')
 
     args = parser.parse_args()
 
@@ -708,9 +709,13 @@ def main():
 
         from datetime import datetime
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+        cot_tag = f"cot{args.cot_weight}" if args.use_cot else "noCot"
+        fixed_tag = "vlFixed" if args.vl_fixed else "vlTrain"
         exp_name = (
             f'data_priorzero_complete/'
-            f'{env_short}_{args.vl_model}_seed{args.seed}_{timestamp}'
+            f'{env_short}_{args.vl_model}_{fixed_tag}/'
+            f'{cot_tag}_mcts_{args.mcts_mode}_img_{args.vlm_image_mode}/'
+            f'seed{args.seed}_{timestamp}'
         )
 
         main_cfg, create_cfg, vl_cfg = get_priorzero_vl_config(
@@ -729,6 +734,7 @@ def main():
             vl_cfg.vl_fixed = args.vl_fixed
             vl_cfg.mcts_root_logits_dict.mode = args.mcts_mode
             vl_cfg.vlm_image_mode = args.vlm_image_mode
+            vl_cfg.prompt_style = args.prompt_style
             # Ensure consistency: vl_fixed=True → disable PPO training
             if vl_cfg.vl_fixed:
                 vl_cfg.enable_rft = False

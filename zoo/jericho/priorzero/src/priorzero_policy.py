@@ -212,65 +212,55 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         
     def _monitor_vars_learn(self) -> List[str]:
         """
-        [PRIORZERO-MODIFIED]
-        Register variables to be monitored in learn mode for TensorBoard logging.
+        Register variables to be monitored in learn mode.
+        These are logged by DI-engine's BaseLearner under "learner_iter/" prefix.
 
-        This extends UniZero's monitoring with PriorZero-specific LLM metrics.
-
-        Returns:
-            List of variable names that should be logged to TensorBoard/WandB
+        Organized into groups:
+        - Core WM losses (essential for training diagnosis)
+        - WM analysis metrics (for deeper debugging)
+        - Training dynamics (LR, grad norm, entropy)
         """
-
         return [
-            # ============ Combined Metrics ============
-            'wm_total_loss',             # World model total loss
-            'wm_grad_norm',              # World model gradient norm
-            # ============ World Model Component Losses ============
-            'wm_value_loss',
-            'wm_policy_loss',
-            'wm_reward_loss',
+            # ---- Core WM Losses ----
+            'wm_total_loss',
             'wm_obs_loss',
-
-            'adaptive_alpha',
-            "adaptive_target_entropy_ratio",
-            'alpha_loss',
-
-            'Current_GPU',
-            'Max_GPU',
-            'collect_epsilon',
-            'collect_mcts_temperature',
-            'cur_lr_world_model',
-            'cur_lr_tokenizer',
-            
-            'wm_orig_policy_loss',
-            'wm_policy_entropy',
+            'wm_reward_loss',
+            'wm_policy_loss',
+            'wm_value_loss',
             'wm_latent_recon_loss',
-            'wm_target_policy_entropy',
-            'consistency_loss',
-            'value_priority',
-            'wm_target_reward',
-            'wm_target_value',
-            'total_grad_norm_before_clip_wm',
-            # tokenizer
-            'commitment_loss',
-            'reconstruction_loss',
             'wm_perceptual_loss',
 
-            "logits_value_mean",
-            "logits_value_max",
-            "logits_value_min",
-            "logits_policy_mean",
-            "logits_policy_max",
-            "logits_policy_min",
+            # ---- WM Policy Analysis ----
+            'wm_orig_policy_loss',
+            'wm_policy_entropy',
+            'wm_target_policy_entropy',
 
-            "temperature_value",
-            "temperature_reward",
-            "temperature_policy",
-            "current_policy_label_eps",
+            # ---- WM Targets ----
+            'wm_target_reward',
+            'wm_target_value',
+            'value_priority',
+
+            # ---- Adaptive Entropy ----
             'adaptive_alpha',
-            "adaptive_target_entropy_ratio",
+            'adaptive_target_entropy_ratio',
             'alpha_loss',
-            "current_encoder_clip_value",
+
+            # ---- Training Dynamics ----
+            'wm_grad_norm',
+            'cur_lr_world_model',
+
+            # ---- Logits Statistics ----
+            'logits_value_mean',
+            'logits_policy_mean',
+
+            # ---- Temperature ----
+            'temperature_value',
+            'temperature_reward',
+            'temperature_policy',
+
+            # ---- System ----
+            'Current_GPU',
+            'Max_GPU',
         ]
         # ========================================================================
     
@@ -308,7 +298,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
         phase = kwargs.get('phase', None)
         mcts_root_logits_dict = self.llm_cfg.mcts_root_logits_dict
         
-        if llm_prior_logprob is None or not any(llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits" or phase == 'llm':
+        if llm_prior_logprob is None or all(v is None for v in llm_prior_logprob) or mcts_root_logits_dict.mode == "wm_logits" or phase == 'llm':
             logging.debug("No LLM priors provided, using standard UniZero MCTS")
             return super()._forward_collect(
                 data, action_mask, temperature, to_play, epsilon,

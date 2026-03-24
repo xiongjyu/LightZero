@@ -20,8 +20,9 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
         Fetch latest batch for LLM training.
 
         Returns:
-            [raw_obs_list, history_obs_list, llm_prior_per_tok_list, batch_target_values, batch_pred_values, cot_prefix_list, llm_action]
-            CoT prefix list is added for CoT reuse optimization.
+            [raw_obs_list, history_obs_list, llm_prior_per_tok_list,
+             batch_target_values, batch_pred_values, cot_prefix_list, llm_action_list, action_list]
+            action_list: integer action indices for correct rollout log-prob lookup in VL training.
         """
         policy._target_model.to(self._cfg.device)
         policy._target_model.eval()
@@ -30,7 +31,7 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
             batch_size, self._cfg.reanalyze_ratio, fetch_latest=True
         )
         if not current_batch:
-            return [[], [], [], [], [], [], []]
+            return [[], [], [], [], [], [], [], []]
 
         obs_list, action_list, bootstrap_action_list, mask_list, batch_index_list, weights_list, make_time_list, timestep_list, raw_obs_list, history_obs_list, llm_prior_per_tok_list, cot_prefix_list, llm_action_list = current_batch
 
@@ -45,7 +46,8 @@ class PriorZeroGameBufferOptimized(UniZeroGameBuffer):
 
         # CoT reuse optimization: return cot_prefix_list
         # IMPORTANT: Validate return value before returning to ensure broadcast compatibility
-        result = [raw_obs_list, history_obs_list, llm_prior_per_tok_list, batch_target_values, batch_pred_values, cot_prefix_list, llm_action_list]
+        # action_list included so VL training can index into action_logprobs by MCTS-selected action index
+        result = [raw_obs_list, history_obs_list, llm_prior_per_tok_list, batch_target_values, batch_pred_values, cot_prefix_list, llm_action_list, action_list]
 
         return result
     

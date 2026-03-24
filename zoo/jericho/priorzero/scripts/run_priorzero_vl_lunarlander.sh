@@ -33,8 +33,32 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_ID="LunarLander-v2"
 TIMESTAMP="$(date +%y%m%d_%H%M%S)"
 
-# Build structured log directory: logs/<env>/<model>/
-LOG_DIR="${SCRIPT_DIR}/logs/LunarLander/${VL_MODEL}"
+# ---- Parse key flags from EXTRA_ARGS for log naming ----
+COT_TAG="cot"
+VL_FIXED_TAG="vlFixed"
+MCTS_MODE="llm_plus_wm_logits"
+COT_WEIGHT="0.1"
+IMG_MODE="current_only"
+
+for arg in ${EXTRA_ARGS}; do
+    case "${prev_arg:-}" in
+        --mcts_mode)    MCTS_MODE="$arg" ;;
+        --cot_weight)   COT_WEIGHT="$arg" ;;
+        --vlm_image_mode) IMG_MODE="$arg" ;;
+    esac
+    case "$arg" in
+        --no_cot)       COT_TAG="noCot" ;;
+        --no_vl_fixed)  VL_FIXED_TAG="vlTrain" ;;
+    esac
+    prev_arg="$arg"
+done
+
+if [ "${COT_TAG}" = "cot" ]; then
+    COT_TAG="cot${COT_WEIGHT}"
+fi
+
+# Build structured log directory: logs/<env>/<model>/<key_params>/
+LOG_DIR="${SCRIPT_DIR}/logs/LunarLander/${VL_MODEL}/${VL_FIXED_TAG}/${COT_TAG}_mcts_${MCTS_MODE}_img_${IMG_MODE}"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/seed${SEED}_gpu${NUM_GPUS}_${TIMESTAMP}.log"
 

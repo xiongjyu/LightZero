@@ -187,6 +187,7 @@ def create_vllm_vl_engine(
     gpu_memory_utilization: float = 0.3,
     vllm_enable_sleep: bool = False,
     limit_mm_per_prompt: Optional[Dict[str, int]] = None,
+    standalone: bool = False,
 ):
     """
     Create a vLLM engine for Vision-Language (VL) models.
@@ -198,12 +199,12 @@ def create_vllm_vl_engine(
         gpu_memory_utilization: GPU memory utilization ratio
         vllm_enable_sleep: Whether to enable sleep mode
         limit_mm_per_prompt: Multimodal limits per prompt
+        standalone: If True, skip DDP-specific args (external_launcher, worker_extension_cls).
+                    Use this for single-process evaluation scripts.
 
     Returns:
         VLActor instance
     """
-    distributed_executor_backend = "external_launcher"
-
     if limit_mm_per_prompt is None:
         limit_mm_per_prompt = {"image": 1}
 
@@ -215,17 +216,22 @@ def create_vllm_vl_engine(
     logger.info(f"  Enable Sleep: {vllm_enable_sleep}")
     logger.info(f"  Multimodal Limits: {limit_mm_per_prompt}")
 
+    # DDP-specific args are only needed when running under torchrun
+    extra_kwargs = {}
+    if not standalone:
+        extra_kwargs["worker_extension_cls"] = "vllm_utils.worker.WorkerWrap"
+        extra_kwargs["distributed_executor_backend"] = "external_launcher"
+
     vllm_engine = VLActor(
         model=pretrain,
-        worker_extension_cls="vllm_utils.worker.WorkerWrap",
         tensor_parallel_size=tensor_parallel_size,
-        distributed_executor_backend=distributed_executor_backend,
         max_model_len=max_model_len,
         dtype="bfloat16",
         gpu_memory_utilization=gpu_memory_utilization,
         enable_sleep_mode=vllm_enable_sleep,
         limit_mm_per_prompt=limit_mm_per_prompt,
         trust_remote_code=True,
+        **extra_kwargs,
     )
 
     if vllm_enable_sleep:

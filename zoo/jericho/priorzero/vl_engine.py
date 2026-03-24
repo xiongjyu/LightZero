@@ -160,6 +160,7 @@ class VLLMVLEngine(VLEngine):
         max_model_len: int = 8192,
         enable_sleep: bool = True,
         limit_mm_per_prompt: Optional[Dict[str, int]] = None,
+        standalone: bool = False,
         **kwargs
     ):
         """
@@ -176,6 +177,7 @@ class VLLMVLEngine(VLEngine):
         self.max_model_len = max_model_len
         self.enable_sleep = enable_sleep
         self.limit_mm_per_prompt = limit_mm_per_prompt or {"image": 1}
+        self.standalone = standalone
 
         # Call parent init which will call _load_model
         super().__init__(
@@ -201,6 +203,7 @@ class VLLMVLEngine(VLEngine):
                 gpu_memory_utilization=self.gpu_memory_utilization,
                 vllm_enable_sleep=self.enable_sleep,
                 limit_mm_per_prompt=self.limit_mm_per_prompt,
+                standalone=self.standalone,
             )
 
             logger.info("✓ vLLM VL engine loaded successfully")
