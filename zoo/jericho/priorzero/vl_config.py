@@ -439,8 +439,9 @@ def get_priorzero_vl_config(
         model=dict(
             observation_shape=(3, 64, 64),
             action_space_size=action_space_size,
-            reward_support_range=(-50., 51., 1.),
-            value_support_range=(-50., 51., 1.),
+            # ====== [FIX] support range must cover LunarLander reward/value range (-200 ~ +300) ======
+            reward_support_range=(-300., 301., 1.),
+            value_support_range=(-300., 301., 1.),
             norm_type="LN",
             num_res_blocks=1,
             num_channels=64,
@@ -449,7 +450,8 @@ def get_priorzero_vl_config(
                 final_norm_option_in_obs_head='LayerNorm',
                 final_norm_option_in_encoder='LayerNorm',
                 predict_latent_loss_type='mse',
-                policy_entropy_weight=5e-2,
+                support_size=601,
+                policy_entropy_weight=5e-3,
                 continuous_action_space=False,
                 max_blocks=num_unroll_steps,
                 max_tokens=2 * num_unroll_steps,
@@ -457,30 +459,39 @@ def get_priorzero_vl_config(
                 device='cuda',
                 action_space_size=action_space_size,
                 num_layers=num_layers,
-                num_heads=24,
+                num_heads=8,
                 embed_dim=768,
                 obs_type='image',  # KEY: Image input with VL prior
                 env_num=max(collector_env_num, evaluator_env_num),
                 num_simulations=num_simulations,
                 game_segment_length=game_segment_length,
                 encoder_type='resnet',
+                # use_priority=True,
+                use_priority=False,
+                use_normal_head=True,
+                use_softmoe_head=False,
+                use_moe_head=False,
+                optim_type='AdamW_mix_lr_wdecay',
+                # optim_type='AdamW',
 
-                decode_loss_mode=None, 
+                decode_loss_mode=None,
                 latent_recon_loss_weight=0,
                 task_embed_option=None,
                 moe_in_transformer=False,
                 multiplication_moe_in_transformer=False,
             )
         ),
-        optim_type='AdamW',
-        weight_decay=1e-4,
-        learning_rate=3e-4,
+        # ====== [FIX] optimizer: AdamW -> AdamW_mix_lr_wdecay (layered lr/wd for encoder/transformer/head) ======
+        optim_type='AdamW_mix_lr_wdecay',
+        # optim_type='AdamW',
+
+        weight_decay=1e-2,
+        learning_rate=1e-4,
         num_unroll_steps=num_unroll_steps,
         update_per_collect=None,
         replay_ratio=replay_ratio,
         batch_size=batch_size,
         num_simulations=num_simulations,
-        # num_segments=num_segments,
         td_steps=5,
         train_start_after_envsteps=0,
         game_segment_length=game_segment_length,
@@ -501,28 +512,42 @@ def get_priorzero_vl_config(
         reanalyze_batch_size=160,
         reanalyze_partition=0.75,
         device='cuda',
-        
+
         collect_num_simulations=collect_num_simulations,
         eval_num_simulations=eval_num_simulations,
         off_policy_degree=0,
         enable_async_eval=False,
-        
-        # optim_type='AdamW',
-        grad_clip_value=10.0,
+
+        # ====== [FIX] grad clip: 10 -> 5, prevent gradient explosion ======
+        grad_clip_value=5,
         value_loss_weight=0.25,
         policy_loss_weight=1.0,
         reward_loss_weight=1.0,
 
-        use_adaptive_entropy_weight=False,
+        # ====== [FIX] Adaptive entropy weight ======
+        use_adaptive_entropy_weight=True,
         adaptive_entropy_alpha_lr=1e-4,
-        use_encoder_clip_annealing=False,
+        target_entropy_start_ratio=0.98,
+        target_entropy_end_ratio=0.7,
+        target_entropy_decay_steps=100000,
+        # ====== [FIX] Encoder-clip annealing (prevents latent state norm from diverging) ======
+        use_encoder_clip_annealing=True,
         encoder_clip_anneal_type='cosine',
         encoder_clip_start_value=30.0,
         encoder_clip_end_value=10.0,
         encoder_clip_anneal_steps=100000,
-        use_priority=False,  # Prioritized experience replay
-        priority_prob_alpha=0.6,
-        priority_prob_beta=0.4,
+        # ====== [FIX] Priority Experience Replay ======
+        # use_priority=True,
+        use_priority=False,
+        priority_prob_alpha=1,
+        priority_prob_beta=1,
+        # ====== [FIX] Label smoothing ======
+        policy_ls_eps_start=0.05,
+        policy_ls_eps_end=0.01,
+        policy_ls_eps_decay_steps=50000,
+        label_smoothing_eps=0.1,
+        # ====== Monitor ======
+        monitor_norm_freq=10000,
     )
 
     main_config = EasyDict(dict(

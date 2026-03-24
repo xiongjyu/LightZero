@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from ding.utils import POLICY_REGISTRY
+from ding.utils import POLICY_REGISTRY, allreduce
 from ding.model import model_wrap
 import os
 
@@ -100,7 +100,10 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
             self._cfg.grad_clip_value
         )
         if self._cfg.multi_gpu:
-            self.sync_gradients(self._learn_model)
+            # Only sync world_model gradients (other params have None grad)
+            for p in self._learn_model.world_model.parameters():
+                if p.grad is not None:
+                    allreduce(p.grad.data)
         self._optimizer_world_model.step()
         self._target_model.update(self._learn_model.state_dict())
 

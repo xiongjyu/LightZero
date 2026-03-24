@@ -49,19 +49,19 @@ class LunarLanderImageEnv(LunarLanderEnv):
         self._image_size = cfg.get('image_size', 64)
 
     def _render_image_obs(self) -> np.ndarray:
-        """Render the environment and return a (3, H, W) uint8 image."""
+        """Render the environment and return a (3, H, W) float32 image scaled to [0, 1]."""
         frame = self._env.render()  # (H, W, 3) RGB uint8
         # Resize to target size
         frame = cv2.resize(frame, (self._image_size, self._image_size), interpolation=cv2.INTER_AREA)
-        # HWC -> CHW
-        frame = np.transpose(frame, (2, 0, 1)).astype(np.uint8)
+        # HWC -> CHW, scale to [0, 1] float32 (consistent with Atari env scale=True)
+        frame = np.transpose(frame, (2, 0, 1)).astype(np.float32) / 255.0
         return frame
 
     def reset(self) -> Dict[str, np.ndarray]:
         if not self._init_flag:
             self._env = gym.make(self._cfg.env_id, render_mode="rgb_array")
             self._observation_space = gym.spaces.Box(
-                low=0, high=255, shape=(3, self._image_size, self._image_size), dtype=np.uint8
+                low=0, high=1, shape=(3, self._image_size, self._image_size), dtype=np.float32
             )
             self._action_space = self._env.action_space
             self._reward_space = gym.spaces.Box(
