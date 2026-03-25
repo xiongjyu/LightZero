@@ -41,15 +41,19 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 handler.setFormatter(logging.Formatter("%(message)s"))
         
         self.eval_mode = llm_config.eval_dict
-        self.eval_freq = self.eval_mode.eval_freq
+        self.wm_eval_freq = self.eval_mode.wm.eval_freq
+        self.llm_eval_freq = self.eval_mode.llm_eval_freq
         self.llm_prior_temperature = llm_config.llm_prior_temperature
         self.history_buffers = defaultdict(
             lambda: deque(maxlen=self.llm_cfg.history_length)
         )
+        self._last_wm_eval_iter = 0
+        self._last_llm_eval_iter = 0
+        
         self._logger.info(f"[RANK {self._rank}] ✓ PriorZeroEvaluator initialized with vLLM engine")
         self._logger.info(f"[RANK {self._rank}]  - History length: {self.llm_cfg.history_length}")
     
-    def should_eval(self, train_iter: int) -> bool:
+    def should_eval(self, wm_train_iter: int, llm_train_iter, phase='wm') -> bool:
         """
         Overview:
             Determine whether it's time to run an evaluation based on the training iteration.
@@ -58,29 +62,36 @@ class PriorZeroEvaluator(OriginalEvaluator):
         Returns:
             - (:obj:`bool`): True if evaluation should be run, otherwise False.
         """
-        if train_iter == self._last_eval_iter:
-            return False
-        if (train_iter - self._last_eval_iter) < self.eval_freq and train_iter != 0:
-            return False
-        self._last_eval_iter = train_iter
-        return True
+        if phase is None or phase == 'wm':
+            if wm_train_iter == self._last_wm_eval_iter:
+                return False
+            if (wm_train_iter - self._last_wm_eval_iter) < self.wm_eval_freq and wm_train_iter != 0:
+                return False
+            self._last_wm_eval_iter = wm_train_iter
+            return True
+        elif phase == 'llm':
+            if llm_train_iter == self._last_llm_eval_iter:
+                return False
+            if (llm_train_iter - self._last_llm_eval_iter) < self.llm_eval_freq and llm_train_iter != 0:
+                return False
+            self._last_llm_eval_iter = llm_train_iter
+            return True
+            
+        else:
+            raise ValueError("")
     
-    def eval(self, train_iter: int = -1, envstep: int = -1) -> Tuple[bool, Dict[str, Any]]:
+    def eval(self, wm_train_iter: int = -1, llm_train_iter: int = -1, phase: str = "wm") -> Tuple[bool, Dict[str, Any]]:
         modes = []
-        if self.eval_mode.world_model:
+        if self.eval_mode.world_model and (phase=='wm' or phase is None):
             world_model_info = super().eval()
             modes.append(("WM", world_model_info))
         if self.eval_mode.world_model_llm_prior:
             world_model_llm_prior_info, wm_llm_eval_episode_info = self.eval_with_llm_prior()
             modes.append(("WM_LLMPrior", world_model_llm_prior_info)) 
             
-        if self.eval_mode.llm_prior:
+        if self.eval_mode.llm_prior and phase == 'llm':
             llm_prior_info, llm_eval_episode_info = self.eval_only_llm_prior()
             modes.append(("LLMPrior", llm_prior_info))
-
-        for tag, info in modes:
-            metrics_str = " | ".join([f"{k}: {info.get(k, 0):.2f}" for k in ['avg_envstep_per_episode', 'reward_mean', 'reward_max', 'reward_min']])
-            self._logger.info(f"[RANK {self._rank}] {tag} >> {metrics_str}")
         
         if self._rank != 0:
             return
@@ -104,33 +115,34 @@ class PriorZeroEvaluator(OriginalEvaluator):
         self._logger_eval_episode.info("="*100)
         
         self._logger_eval_episode.info("="*100)
-        self._logger_eval_episode.info("="*10 + f"[LLM] | episode_avg_steps={len(llm_eval_episode_info[0])} | episode_return={llm_eval_episode_info[0][-1]['info']['score'].item()} " + "="*10)
-        for step, info in enumerate(llm_eval_episode_info[0]):
-            obs, action, reward, llm_policy = info['obs'].replace("\n",""), info['action'], info['reward'], info['llm_policy']
-            self._logger_eval_episode.info(f"[Step {step:03d}] obs: {obs}")
-            self._logger_eval_episode.info(f'action="{action}" | reward={reward}')
-            items = list(llm_policy.items())
-            action_str = " | ".join(
-                f"{a}({v:.3f})" if isinstance(v, float) else f"{a}({v})"
-                for a, v in items
-            )
-            self._logger_eval_episode.info("llm_policy:")
-            self._logger_eval_episode.info(f"    {action_str}")
-            self._logger_eval_episode.info("-" * 100)
-        self._logger_eval_episode.info("="*100)
+        if phase == 'llm':
+            self._logger_eval_episode.info("="*10 + f"[LLM] | episode_avg_steps={len(llm_eval_episode_info[0])} | episode_return={llm_eval_episode_info[0][-1]['info']['score'].item()} " + "="*10)
+            for step, info in enumerate(llm_eval_episode_info[0]):
+                obs, action, reward, llm_policy = info['obs'].replace("\n",""), info['action'], info['reward'], info['llm_policy']
+                self._logger_eval_episode.info(f"[Step {step:03d}] obs: {obs}")
+                self._logger_eval_episode.info(f'action="{action}" | reward={reward}')
+                items = list(llm_policy.items())
+                action_str = " | ".join(
+                    f"{a}({v:.3f})" if isinstance(v, float) else f"{a}({v})"
+                    for a, v in items
+                )
+                self._logger_eval_episode.info("llm_policy:")
+                self._logger_eval_episode.info(f"    {action_str}")
+                self._logger_eval_episode.info("-" * 100)
+            self._logger_eval_episode.info("="*100)
         
         
         keys = ['avg_envstep_per_episode', 'reward_mean', 'reward_std', 'reward_max', 'reward_min']
         for k in keys:
-            if self.eval_mode.world_model:
-                self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_WM', world_model_info[k], train_iter)
-                self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_WM', world_model_info[k], envstep)
+            if self.eval_mode.world_model and (phase=='wm' or phase is None):
+                self._tb_logger.add_scalar(f'{self._instance_name}_wm_iter/{k}_WM', world_model_info[k], wm_train_iter)
             if self.eval_mode.world_model_llm_prior:
-                self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_WM_LLMPrior', world_model_llm_prior_info[k], train_iter)
-                self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_WM_LLMPrior', world_model_llm_prior_info[k], envstep)
-            if self.eval_mode.llm_prior:
-                self._tb_logger.add_scalar(f'{self._instance_name}_iter/{k}_LLMPrior', llm_prior_info[k], train_iter)    
-                self._tb_logger.add_scalar(f'{self._instance_name}_step/{k}_LLMPrior', llm_prior_info[k], envstep)
+                if phase == 'wm' or phase is None:
+                    self._tb_logger.add_scalar(f'{self._instance_name}_wm_iter/{k}_WM_LLMPrior', world_model_llm_prior_info[k], wm_train_iter)
+                elif phase == 'llm':
+                    self._tb_logger.add_scalar(f'{self._instance_name}_llm_iter/{k}_WM_LLMPrior', world_model_llm_prior_info[k], llm_train_iter)
+            if self.eval_mode.llm_prior and phase == 'llm':
+                self._tb_logger.add_scalar(f'{self._instance_name}_llm_iter/{k}_LLMPrior', llm_prior_info[k], llm_train_iter)    
 
         
     def eval_with_llm_prior(self) -> Dict[str, Any]:

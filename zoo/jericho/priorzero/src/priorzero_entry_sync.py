@@ -204,11 +204,11 @@ def train_priorzero(
         cmd = "noop"
         priorzero_batch = None
         if rank == 0:
-            if learner.train_iter != 0 and evaluator.should_eval(learner.train_iter):
+            if learner.train_iter != 0 and evaluator.should_eval(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter, phase=current_phase):
                 logger.info(f"\n[Rank {rank}: Iter {learner.train_iter}] Evaluating...")
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.wake_up()
-                evaluator.eval(train_iter=learner.train_iter, envstep=collector.envstep)
+                evaluator.eval(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter, phase=current_phase)
                 if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                     vllm_engine.sleep()
                     
