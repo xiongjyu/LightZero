@@ -253,7 +253,7 @@ def train_priorzero(
                     if cfg.policy.use_priority:
                         replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
             policy.recompute_pos_emb_diff_and_clear_cache()
-            if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
+            if llm_cfg.enable_rft and train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
                 current_phase = "llm"
                 last_wm_train_iter = learner.train_iter
                 replay_buffer.mark_latest_transitions_consumed()
@@ -291,7 +291,7 @@ def train_priorzero(
                 replay_buffer.mark_latest_transitions_consumed()
                 
                 torch_dist_barrier_and_cuda_sync()
-                if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
+                if llm_cfg.enable_world_model and train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
                     current_phase = "wm"
                     last_llm_train_iter = trainer.global_step
                     data_processor.clear_statis()
