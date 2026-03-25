@@ -184,7 +184,9 @@ class PriorZeroLLMConfig:
         ),
     }))
     # advantage = target_value - pred_value 
-    advantage_type: str = "advantage_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    # advantage_global_batch_norm：意味着 llm训练阶段，所有训练数据的 advantage
+    # advantage_batch_norm：意味着 llm 训练过程，train_batch_size之前取advantage
+    advantage_type: str = "advantage_global_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm" "advantage_global_batch_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     entropy_loss_coef: float = 0.0

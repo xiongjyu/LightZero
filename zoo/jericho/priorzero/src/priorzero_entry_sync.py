@@ -291,8 +291,7 @@ def train_priorzero(
                 if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
                     current_phase = "wm"
                     last_llm_train_iter = trainer.global_step
-                    if data_processor.value_normalizer is not None:
-                        data_processor.value_normalizer.clear()
+                    data_processor.clear_statis()
             
 
 def main():

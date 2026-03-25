@@ -8,6 +8,7 @@ import torch.distributed as dist
 from vllm import SamplingParams
 from ding.utils import build_logger
 import random
+import numpy as np
 import math
 
 _FMT_RE = re.compile(
@@ -98,6 +99,8 @@ class DataProcessor:
         self.value_running_std = 1.0
         self.value_count = 0
         self.running_momentum = 0.99  # EMA momentum for running statistics
+        
+        self.global_batch_advantages = []
 
         if self.rank == 0:
             self._logger, _ = build_logger(
@@ -393,6 +396,15 @@ class DataProcessor:
                 advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
                 log_status_tmp["final_advantage"] = advantage.tolist()
 
+        elif self.args.advantage_type == "advantage_global_batch_norm":
+            # self.global_batch_advantages
+            self.global_batch_advantages += advantage.tolist()
+            advantage = (advantage - np.mean(self.global_batch_advantages)) / (np.std(self.global_batch_advantages) + 1e-8)
+            log_status_tmp["value_advantage"] = advantage.tolist()
+            
+            if fmt_rewards is not None:
+                advantage = (1 - fmt_weight) * advantage + fmt_weight * fmt_rewards
+                log_status_tmp["final_advantage"] = advantage.tolist()
         elif self.args.advantage_type == "advantage_running_norm":
             if self.value_normalizer is not None:
                 raw_mean = advantage.mean().item()
@@ -460,7 +472,6 @@ class DataProcessor:
                         f"raw: min={batch_min:.3f}, max={batch_max:.3f} | "
                         f"norm: min={norm_min:.3f}, max={norm_max:.3f}"
                     )
-
                     
             log_status_tmp["value_advantage"] = advantage.tolist()
             if fmt_rewards is not None:
@@ -773,4 +784,8 @@ class DataProcessor:
         self.episode_output = []
 
         
+    def clear_statis(self):
+        if self.value_normalizer is not None:
+            self.value_normalizer.clear()
+        self.global_batch_advantages.clear()
         
