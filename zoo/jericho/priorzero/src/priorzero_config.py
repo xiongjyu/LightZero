@@ -141,8 +141,6 @@ class PriorZeroLLMConfig:
     mispo_traj_truncated_threshold: Tuple[float, float] = (0.8, 1.2)
     
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
-    vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
-
     vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行 (Fixed: 1.5B model should use 1 GPU)
 
     gpu_memory_utilization: float = 0.3
@@ -153,9 +151,6 @@ class PriorZeroLLMConfig:
     reduction: str = "mean"
     
     # 训练相关参数
-    colocate_all_models: bool = True # 是否把所有模型都放在一起训练
-    policy_model_num_gpus: int = 1 # 需要训练的 llm 使用几张卡
-    reference_model_num_gpus: int = 1
     deepspeed_enable_sleep: bool = True
     
     zero_stage: int = 2
@@ -163,7 +158,6 @@ class PriorZeroLLMConfig:
     gradient_checkpointing_use_reentrant: bool = False
     max_norm: float = 1.0     # Gradient clipping
     ds_tensor_parallel_size: int = 1
-    ring_attn_size: int = 1
     
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
