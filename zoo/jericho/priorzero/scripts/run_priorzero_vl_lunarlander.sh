@@ -41,12 +41,14 @@ VL_FIXED_TAG="vlFixed"
 MCTS_MODE="llm_plus_wm_logits"
 COT_WEIGHT="0.1"
 IMG_MODE="current_only"
+LOGPROB_MODE="approximate"
 
 for arg in ${EXTRA_ARGS}; do
     case "${prev_arg:-}" in
         --mcts_mode)    MCTS_MODE="$arg" ;;
         --cot_weight)   COT_WEIGHT="$arg" ;;
         --vlm_image_mode) IMG_MODE="$arg" ;;
+        --logprob_mode) LOGPROB_MODE="$arg" ;;
     esac
     case "$arg" in
         --no_cot)       COT_TAG="noCot" ;;

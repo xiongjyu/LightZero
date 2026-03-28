@@ -287,6 +287,7 @@ def prepare_vl_components(rank, cfg, vl_cfg, strategy, collector_env, evaluator_
         game_description=getattr(vl_cfg, 'game_description', ''),
         vlm_image_mode=vlm_image_mode,
         prompt_style=getattr(vl_cfg, 'prompt_style', 'concise'),
+        logprob_extraction_mode=getattr(vl_cfg, 'logprob_extraction_mode', 'approximate'),
     )
 
     # Collector

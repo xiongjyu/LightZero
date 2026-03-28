@@ -113,62 +113,53 @@ class VLActor:
     def generate(
         self,
         images: List[Union[Image.Image, np.ndarray, List[Image.Image]]],
-        prompts: List[str],
-        sampling_params: Any,
+        prompts: Optional[List[str]] = None,
+        prompt_token_ids: Optional[List[List[int]]] = None,
+        sampling_params: Any = None,
         system_prompt: Optional[str] = None,
     ) -> List[Any]:
         """
         Generate responses for multimodal inputs.
 
-        Applies ChatML chat template before sending to vLLM.
-
         Args:
-            images: List of images or image lists. Each element can be:
-                    - A single PIL Image or numpy array (single-image mode)
-                    - A list of PIL Images (multi-image mode)
-            prompts: List of text prompts (raw user text, will be wrapped in chat template)
+            images: List of images or image lists
+            prompts: List of text prompts (mutually exclusive with prompt_token_ids)
+            prompt_token_ids: List of token ID lists (mutually exclusive with prompts)
             sampling_params: vLLM SamplingParams
-            system_prompt: Optional system prompt for all requests in this batch
+            system_prompt: Optional system prompt
 
         Returns:
             List of vLLM RequestOutput objects
         """
+        if prompts is None and prompt_token_ids is None:
+            raise ValueError("Either prompts or prompt_token_ids must be provided")
+        if prompts is not None and prompt_token_ids is not None:
+            raise ValueError("Cannot provide both prompts and prompt_token_ids")
+
         # Prepare multimodal inputs
         inputs = []
-        for image, prompt in zip(images, prompts):
-            # Normalize to list of PIL Images
-            if isinstance(image, list):
-                img_list = []
-                for img in image:
-                    if isinstance(img, np.ndarray):
-                        if img.dtype != np.uint8:
-                            img = (img * 255).astype(np.uint8)
-                        if len(img.shape) == 3 and img.shape[0] == 3:
-                            img = np.transpose(img, (1, 2, 0))
-                        img = Image.fromarray(img)
-                    img_list.append(img)
-            else:
-                # Single image (backward compatible)
-                if isinstance(image, np.ndarray):
-                    if image.dtype != np.uint8:
-                        image = (image * 255).astype(np.uint8)
-                    if len(image.shape) == 3 and image.shape[0] == 3:
-                        image = np.transpose(image, (1, 2, 0))
-                    image = Image.fromarray(image)
-                img_list = [image]
 
-            num_imgs = len(img_list)
+        if prompts is not None:
+            # Text prompt mode (original)
+            for image, prompt in zip(images, prompts):
+                img_list = self._normalize_images(image)
+                formatted_prompt = self._apply_chat_template(prompt, system_prompt=system_prompt, num_images=len(img_list))
+                img_data = img_list if len(img_list) > 1 else img_list[0]
 
-            # Apply chat template for Instruct models
-            formatted_prompt = self._apply_chat_template(prompt, system_prompt=system_prompt, num_images=num_imgs)
+                inputs.append({
+                    "prompt": formatted_prompt,
+                    "multi_modal_data": {"image": img_data},
+                })
+        else:
+            # Token IDs mode (for logprob extraction)
+            for image, token_ids in zip(images, prompt_token_ids):
+                img_list = self._normalize_images(image)
+                img_data = img_list if len(img_list) > 1 else img_list[0]
 
-            # vLLM multi_modal_data: single image or list
-            img_data = img_list if num_imgs > 1 else img_list[0]
-
-            inputs.append({
-                "prompt": formatted_prompt,
-                "multi_modal_data": {"image": img_data},
-            })
+                inputs.append({
+                    "prompt_token_ids": token_ids,
+                    "multi_modal_data": {"image": img_data},
+                })
 
         # Generate
         responses = self.llm.generate(
@@ -178,6 +169,29 @@ class VLActor:
         )
 
         return responses
+
+    def _normalize_images(self, image: Union[Image.Image, np.ndarray, List]) -> List[Image.Image]:
+        """Normalize image input to list of PIL Images."""
+        if isinstance(image, list):
+            img_list = []
+            for img in image:
+                if isinstance(img, np.ndarray):
+                    if img.dtype != np.uint8:
+                        img = (img * 255).astype(np.uint8)
+                    if len(img.shape) == 3 and img.shape[0] == 3:
+                        img = np.transpose(img, (1, 2, 0))
+                    img = Image.fromarray(img)
+                img_list.append(img)
+            return img_list
+        else:
+            # Single image
+            if isinstance(image, np.ndarray):
+                if image.dtype != np.uint8:
+                    image = (image * 255).astype(np.uint8)
+                if len(image.shape) == 3 and image.shape[0] == 3:
+                    image = np.transpose(image, (1, 2, 0))
+                image = Image.fromarray(image)
+            return [image]
 
 
 def create_vllm_vl_engine(

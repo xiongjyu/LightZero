@@ -130,13 +130,15 @@ lunarlander_image_unizero_config = dict(
         priority_prob_alpha=1,
         priority_prob_beta=1,
         # ====== [FIX] Adaptive entropy weight ======
-        use_adaptive_entropy_weight=True,
+        # use_adaptive_entropy_weight=True,
+        use_adaptive_entropy_weight=False,
         adaptive_entropy_alpha_lr=1e-4,
         target_entropy_start_ratio=0.98,
         target_entropy_end_ratio=0.7,
         target_entropy_decay_steps=100000,
         # ====== [FIX] Encoder-clip annealing ======
-        use_encoder_clip_annealing=True,
+        # use_encoder_clip_annealing=True,
+        use_encoder_clip_annealing=False,
         encoder_clip_anneal_type='cosine',
         encoder_clip_start_value=30.0,
         encoder_clip_end_value=10.0,

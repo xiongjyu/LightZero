@@ -232,7 +232,8 @@ class VLLMVLEngine(VLEngine):
             top_p=kwargs.pop('top_p', 0.95),
             top_k=kwargs.pop('top_k', 50),
             repetition_penalty=kwargs.pop('repetition_penalty', 1.1),
-            logprobs=10 if return_logprobs else None,
+            logprobs=None,
+            prompt_logprobs=1 if return_logprobs else None,
             **kwargs
         )
 
@@ -251,10 +252,61 @@ class VLLMVLEngine(VLEngine):
             if return_logprobs:
                 return {
                     'text': text,
-                    'logprobs': output.logprobs if hasattr(output, 'logprobs') else None
+                    'prompt_logprobs': outputs[0].prompt_logprobs if hasattr(outputs[0], 'prompt_logprobs') else None
                 }
             return text
-        return "" if not return_logprobs else {'text': "", 'logprobs': None}
+        return "" if not return_logprobs else {'text': "", 'prompt_logprobs': None}
+
+    def batch_generate_with_token_ids(
+        self,
+        images: List[Union[Image.Image, np.ndarray, List[Image.Image]]],
+        prompt_token_ids: List[List[int]],
+        temperature: float = 1.0,
+        max_new_tokens: int = 512,
+        return_logprobs: bool = False,
+        **kwargs
+    ) -> Union[List[str], List[Dict[str, Any]]]:
+        """
+        Batch generate with token IDs input (aligned with LLM).
+        This allows extracting logprobs for the full sequence including appended actions.
+        """
+        from vllm import SamplingParams
+
+        sampling_params = SamplingParams(
+            temperature=max(temperature, 0.1),
+            max_tokens=max_new_tokens,
+            top_p=kwargs.pop('top_p', 0.95),
+            top_k=kwargs.pop('top_k', 50),
+            repetition_penalty=kwargs.pop('repetition_penalty', 1.1),
+            logprobs=None,
+            prompt_logprobs=1 if return_logprobs else None,
+            **kwargs
+        )
+
+        # Generate with token IDs
+        outputs = self.model.generate(
+            images=images,
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+        )
+
+        # Extract results
+        results = []
+        for output in outputs:
+            if output.outputs:
+                out = output.outputs[0]
+                text = out.text
+                if return_logprobs:
+                    results.append({
+                        'text': text,
+                        'prompt_logprobs': output.prompt_logprobs if hasattr(output, 'prompt_logprobs') else None
+                    })
+                else:
+                    results.append(text)
+            else:
+                results.append("" if not return_logprobs else {'text': "", 'prompt_logprobs': None})
+
+        return results
 
     def batch_generate(
         self,
@@ -263,8 +315,9 @@ class VLLMVLEngine(VLEngine):
         temperature: float = 1.0,
         max_new_tokens: int = 512,
         system_prompt: Optional[str] = None,
+        return_logprobs: bool = False,
         **kwargs
-    ) -> List[str]:
+    ) -> Union[List[str], List[Dict[str, Any]]]:
         """Batch generate responses using vLLM. Supports single images or image lists per prompt."""
         from vllm import SamplingParams
 
@@ -275,6 +328,8 @@ class VLLMVLEngine(VLEngine):
             top_p=kwargs.pop('top_p', 0.95),
             top_k=kwargs.pop('top_k', 50),
             repetition_penalty=kwargs.pop('repetition_penalty', 1.1),
+            logprobs=None,
+            prompt_logprobs=1 if return_logprobs else None,
             **kwargs
         )
 
@@ -286,13 +341,21 @@ class VLLMVLEngine(VLEngine):
             system_prompt=system_prompt,
         )
 
-        # Extract texts
+        # Extract texts and logprobs
         results = []
         for output in outputs:
             if output.outputs:
-                results.append(output.outputs[0].text)
+                out = output.outputs[0]
+                text = out.text
+                if return_logprobs:
+                    results.append({
+                        'text': text,
+                        'prompt_logprobs': output.prompt_logprobs if hasattr(output, 'prompt_logprobs') else None
+                    })
+                else:
+                    results.append(text)
             else:
-                results.append("")
+                results.append("" if not return_logprobs else {'text': "", 'prompt_logprobs': None})
 
         return results
 

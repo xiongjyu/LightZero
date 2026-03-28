@@ -181,6 +181,7 @@ class VLPriorGenerator(PriorGenerator):
         game_description: str = "",
         vlm_image_mode: str = "current_only",
         prompt_style: str = "concise",
+        logprob_extraction_mode: str = "approximate",
         **kwargs
     ):
         """
@@ -192,6 +193,7 @@ class VLPriorGenerator(PriorGenerator):
             game_description: Game-specific description for prompts
             vlm_image_mode: Image mode - "current_only", "first_and_current", or "all_history"
             prompt_style: "concise" (shorter, better for small VLMs) or "legacy" (verbose, original)
+            logprob_extraction_mode: "approximate" (fallback) or "exact" (LLM-aligned)
         """
         super().__init__(model_name, obs_type='image')
         self.vl_engine = vl_engine
@@ -200,6 +202,7 @@ class VLPriorGenerator(PriorGenerator):
         self.game_description = game_description
         self.vlm_image_mode = vlm_image_mode
         self.prompt_style = prompt_style
+        self.logprob_extraction_mode = logprob_extraction_mode
 
         # For logging VL outputs
         self.episode_output = []
@@ -526,6 +529,10 @@ class VLPriorGenerator(PriorGenerator):
 
             prompt_parts.append("=== CURRENT OBSERVATION ===")
             prompt_parts.append(f"[See image {num_images} above]")
+            prompt_parts.append("\nLook at the image carefully and analyze:")
+            prompt_parts.append("- The lander's tilt angle (horizontal, tilted left, or tilted right?)")
+            prompt_parts.append("- The lander's horizontal position relative to the landing pad")
+            prompt_parts.append("- Visual indicators of descent speed")
 
         else:
             # Original single-image prompt (current_only mode or only 1 image)
@@ -542,6 +549,10 @@ class VLPriorGenerator(PriorGenerator):
 
             prompt_parts.append("=== CURRENT OBSERVATION ===")
             prompt_parts.append("[See the game screen image above]")
+            prompt_parts.append("\nLook at the image carefully and analyze:")
+            prompt_parts.append("- The lander's tilt angle (horizontal, tilted left, or tilted right?)")
+            prompt_parts.append("- The lander's horizontal position relative to the landing pad")
+            prompt_parts.append("- Visual indicators of descent speed")
         if self.game_description:
             prompt_parts.append(self.game_description)
 
@@ -665,59 +676,176 @@ class VLPriorGenerator(PriorGenerator):
 
         return chosen_action, cot_prefix
 
-    def _extract_action_logprobs_from_vllm(
+    def _extract_action_logprobs_batch(
         self,
-        vllm_logprobs: Optional[List],
-        raw_output: str,
+        image_list: List[Image.Image],
+        prompt: str,
         action_candidates: List[str],
-        chosen_action: str,
+        cot_prefix: Optional[str],
         temperature: float = 1.0
-    ) -> np.ndarray:
+    ) -> Tuple[Optional[np.ndarray], Dict[str, List], Dict[str, List], Dict[str, List]]:
         """
-        Extract action log probabilities from vLLM token logprobs.
+        Extract action log probabilities with configurable mode.
+        """
+        if self.logprob_extraction_mode == "exact":
+            return self._extract_logprobs_exact_mode(
+                image_list, prompt, action_candidates, cot_prefix, temperature
+            )
+        else:  # approximate mode (default)
+            return self._extract_logprobs_approximate_mode(
+                image_list, prompt, action_candidates, cot_prefix, temperature
+            )
 
-        Strategy: Find "Action:" in output, then extract logprobs for action tokens.
+    def _extract_logprobs_approximate_mode(
+        self,
+        image_list: List[Image.Image],
+        prompt: str,
+        action_candidates: List[str],
+        cot_prefix: Optional[str],
+        temperature: float = 1.0
+    ) -> Tuple[Optional[np.ndarray], Dict[str, List], Dict[str, List], Dict[str, List]]:
+        """
+        Approximate mode: Use fallback with pseudo token data.
+        Fast but less accurate.
         """
         import logging
         logger = logging.getLogger(__name__)
 
-        if vllm_logprobs is None or len(vllm_logprobs) == 0:
-            logger.warning("⚠️ No logprobs from VLM, using fallback")
-            return self._action_to_logprob(chosen_action, action_candidates, temperature)
-
         try:
-            # Find position of "Action:" in the output
-            action_pos = raw_output.lower().find("action:")
-            if action_pos == -1:
-                logger.warning("⚠️ 'Action:' not found in output, using fallback")
-                return self._action_to_logprob(chosen_action, action_candidates, temperature)
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
 
-            # Collect logprobs for each candidate action
-            action_logprobs_dict = {}
+            rollout_action_logprob_dict = {}
+            full_ids_dict = {}
+            label_ids_dict = {}
 
-            for candidate in action_candidates:
-                candidate_upper = candidate.upper()
-                # Search for this action in the logprobs
-                for token_logprob_dict in vllm_logprobs:
-                    if token_logprob_dict is None:
-                        continue
-                    # vLLM logprobs format: {token_id: (token_str, logprob)}
-                    for token_id, (token_str, logprob) in token_logprob_dict.items():
-                        if candidate_upper in token_str.upper():
-                            action_logprobs_dict[candidate] = logprob
-                            break
+            for action in action_candidates:
+                if self.use_cot and cot_prefix:
+                    label_text = cot_prefix + " " + action
+                else:
+                    label_text = "Action: " + action
 
-            # If we found logprobs for all actions, use them
-            if len(action_logprobs_dict) == len(action_candidates):
-                logprobs_array = np.array([action_logprobs_dict[a] for a in action_candidates], dtype=np.float32)
-                return logprobs_array
+                label_ids = tokenizer(label_text, add_special_tokens=False)["input_ids"]
+                full_prompt = prompt + "\n" + label_text
+                full_ids = tokenizer(full_prompt, add_special_tokens=False)["input_ids"]
 
-            logger.warning(f"⚠️ Only found {len(action_logprobs_dict)}/{len(action_candidates)} action logprobs, using fallback")
+                pseudo_logprobs = [0.0] * len(label_ids)
+
+                rollout_action_logprob_dict[action] = pseudo_logprobs
+                full_ids_dict[action] = full_ids
+                label_ids_dict[action] = label_ids
+
+            return None, rollout_action_logprob_dict, full_ids_dict, label_ids_dict
 
         except Exception as e:
-            logger.warning(f"⚠️ Failed to extract logprobs: {e}, using fallback")
+            logger.error(f"⚠️ Approximate mode failed: {e}", exc_info=True)
 
-        return self._action_to_logprob(chosen_action, action_candidates, temperature)
+        return None, {}, {}, {}
+
+    def _extract_logprobs_exact_mode(
+        self,
+        image_list: List[Image.Image],
+        prompt: str,
+        action_candidates: List[str],
+        cot_prefix: Optional[str],
+        temperature: float = 1.0
+    ) -> Tuple[Optional[np.ndarray], Dict[str, List], Dict[str, List], Dict[str, List]]:
+        """
+        Exact mode: Use token IDs like LLM (bypassing chat template).
+        """
+        import logging
+        import math
+        logger = logging.getLogger(__name__)
+
+        try:
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+
+            prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+
+            if self.use_cot and cot_prefix:
+                label_texts = [cot_prefix + " " + action for action in action_candidates]
+                label_texts_no_cots = [" " + action for action in action_candidates]
+            else:
+                label_texts = ["Action: " + action for action in action_candidates]
+                label_texts_no_cots = label_texts
+
+            label_ids_list = [tokenizer(label, add_special_tokens=False)["input_ids"] for label in label_texts]
+            label_ids_no_cots_list = [tokenizer(label, add_special_tokens=False)["input_ids"] for label in label_texts_no_cots]
+            full_ids_list = [prompt_ids + label_ids for label_ids in label_ids_list]
+
+            results = self.vl_engine.batch_generate_with_token_ids(
+                images=[image_list] * len(action_candidates),
+                prompt_token_ids=full_ids_list,
+                temperature=temperature,
+                max_new_tokens=1,
+                return_logprobs=True,
+            )
+
+            action_scores = []
+            rollout_action_logprob_dict = {}
+            full_ids_dict = {}
+            label_ids_dict = {}
+
+            for action, label_ids, label_ids_no_cot, full_ids, result in zip(
+                action_candidates, label_ids_list, label_ids_no_cots_list, full_ids_list, results
+            ):
+                prompt_logprobs = result.get('prompt_logprobs') if isinstance(result, dict) else None
+
+                if not prompt_logprobs or len(prompt_logprobs) == 0:
+                    action_scores.append(float("-inf"))
+                    rollout_action_logprob_dict[action] = []
+                    full_ids_dict[action] = []
+                    label_ids_dict[action] = []
+                    continue
+
+                token_lps = []
+                for j in range(1, len(full_ids)):
+                    tok_id = full_ids[j]
+                    lp_dict = prompt_logprobs[j]
+
+                    if lp_dict is None or tok_id not in lp_dict:
+                        break
+
+                    logprob_obj = lp_dict[tok_id]
+                    logprob = logprob_obj.logprob if hasattr(logprob_obj, 'logprob') else float(logprob_obj)
+
+                    if math.isnan(logprob):
+                        break
+
+                    token_lps.append(logprob)
+
+                if len(token_lps) > 0:
+                    l_len = len(label_ids)
+                    l_no_cots_len = len(label_ids_no_cot)
+                    label_lps = token_lps[-l_len:]
+
+                    if self.use_cot:
+                        target_lps = label_lps
+                    else:
+                        target_lps = label_lps[-l_no_cots_len:]
+
+                    score = sum(target_lps) / len(target_lps)
+                    action_scores.append(score)
+                    rollout_action_logprob_dict[action] = label_lps
+                    full_ids_dict[action] = full_ids
+                    label_ids_dict[action] = label_ids
+                else:
+                    action_scores.append(float("-inf"))
+                    rollout_action_logprob_dict[action] = []
+                    full_ids_dict[action] = []
+                    label_ids_dict[action] = []
+
+            valid_count = sum(1 for s in action_scores if s > float("-inf"))
+            if valid_count == len(action_candidates):
+                return np.array(action_scores, dtype=np.float32), rollout_action_logprob_dict, full_ids_dict, label_ids_dict
+
+            logger.warning(f"⚠️ Exact mode: {valid_count}/{len(action_candidates)} valid")
+
+        except Exception as e:
+            logger.error(f"⚠️ Exact mode failed: {e}")
+
+        return None, {}, {}, {}
 
     def _action_to_logprob(
         self,
@@ -822,69 +950,39 @@ class VLPriorGenerator(PriorGenerator):
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Generate prior from image observation using VL with CoT support.
-
-        Args:
-            observation: Image observation (numpy array or PIL Image)
-            action_candidates: List of valid action strings
-            history: Optional history buffer
-            temperature: Sampling temperature
-
-        Returns:
-            Prior dictionary with action_probs, action_logits, raw_output, cot_prefix
+        Generate prior with LLM-aligned token-level data.
         """
         self.call_count += 1
 
-        # Assemble images based on vlm_image_mode
+        # Assemble images
         image_list = self._assemble_images(observation, history)
-
-        # Build prompt (unified: always use get_user_prompt, consistent with LLM side)
         prompt = self.get_user_prompt(action_candidates, history, num_images=len(image_list))
 
-        # Log prompt preview at intervals
-        if self.call_count % self.log_interval == 1:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(
-                f"[VL Prior Generation] Call #{self.call_count} | "
-                f"Actions: {len(action_candidates)} | "
-                f"Images: {len(image_list)} (mode={self.vlm_image_mode}) | "
-                f"Prompt preview: {prompt[:150]}..."
-            )
-
-        # Generate with VL (request logprobs)
+        # Step 1: Generate to get chosen action and CoT prefix
         result = self.vl_engine.generate(
             image=image_list,
             prompt=prompt,
             temperature=temperature,
             system_prompt=self.get_system_prompt(),
-            return_logprobs=True,
+            return_logprobs=False,
             **kwargs
         )
-
-        # Extract text and logprobs
-        if isinstance(result, dict):
-            raw_output = result.get('text', '')
-            vllm_logprobs = result.get('logprobs', None)
-        else:
-            raw_output = result
-            vllm_logprobs = None
-
-        # Parse output (unified: always use CoT-style parser which handles both formats)
+        raw_output = result.get('text', '') if isinstance(result, dict) else result
         chosen_action, cot_prefix = self._parse_vl_output_with_cot(raw_output, action_candidates)
 
-        # Extract action log probabilities from VLM logprobs (with fallback)
-        action_log_probs = self._extract_action_logprobs_from_vllm(
-            vllm_logprobs, raw_output, action_candidates, chosen_action, temperature
+        # Step 2: Extract logprobs with token-level data (same as LLM)
+        action_log_probs, rollout_logprob_dict, full_ids_dict, label_ids_dict = self._extract_action_logprobs_batch(
+            image_list, prompt, action_candidates, cot_prefix, temperature
         )
-        action_probs = np.exp(action_log_probs)
 
-        # Log output at intervals
-        if self.call_count % self.log_interval == 1:
-            logger.info(
-                f"[VL Prior Output] Chosen: {chosen_action} | "
-                f"CoT: {cot_prefix[:100] if cot_prefix else 'None'}..."
-            )
+        # Fallback if batch extraction failed
+        if action_log_probs is None:
+            action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
+            rollout_logprob_dict = {}
+            full_ids_dict = {}
+            label_ids_dict = {}
+
+        action_probs = np.exp(action_log_probs)
 
         return {
             'action_probs': action_probs,
@@ -892,6 +990,9 @@ class VLPriorGenerator(PriorGenerator):
             'raw_output': raw_output,
             'cot_prefix': cot_prefix,
             'chosen_action': chosen_action,
+            'rollout_action_logprob': rollout_logprob_dict,
+            'full_ids': full_ids_dict,
+            'label_ids': label_ids_dict,
         }
 
     def batch_generate_prior(
@@ -903,82 +1004,57 @@ class VLPriorGenerator(PriorGenerator):
         **kwargs
     ) -> List[Dict[str, Any]]:
         """
-        Batch generate priors from image observations.
-
-        For efficiency, this should use batched VL inference.
+        Batch generate priors with LLM-aligned token-level data.
         """
         if histories is None:
             histories = [None] * len(observations)
 
-        # Assemble image lists based on vlm_image_mode
+        # Assemble images and prompts
         image_lists = []
-        for obs, history in zip(observations, histories):
-            image_list = self._assemble_images(obs, history)
-            image_lists.append(image_list)
-
-        # Build prompts (unified: always use get_user_prompt)
         prompts = []
-        for image_list, action_candidates, history in zip(image_lists, action_candidates_list, histories):
+        for obs, history, action_candidates in zip(observations, histories, action_candidates_list):
+            image_list = self._assemble_images(obs, history)
             prompt = self.get_user_prompt(action_candidates, history, num_images=len(image_list))
+            image_lists.append(image_list)
             prompts.append(prompt)
 
-        # Increment batch call counter
-        self.batch_call_count += 1
-
-        # First-call validation logging: image shapes, dtypes, PIL sizes, prompt preview
-        if self.batch_call_count == 1:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.info(f"[VL Batch Validation] === FIRST CALL DATA FLOW CHECK ===")
-            logger.info(f"  Batch size: {len(observations)}")
-            logger.info(f"  VLM image mode: {self.vlm_image_mode}")
-            for i, obs in enumerate(observations[:3]):
-                if isinstance(obs, np.ndarray):
-                    logger.info(f"  Obs[{i}]: ndarray shape={obs.shape}, dtype={obs.dtype}, min={obs.min()}, max={obs.max()}")
-                elif isinstance(obs, Image.Image):
-                    logger.info(f"  Obs[{i}]: PIL Image size={obs.size}, mode={obs.mode}")
-            for i, img_list in enumerate(image_lists[:3]):
-                logger.info(f"  ImageList[{i}]: {len(img_list)} images, sizes={[img.size for img in img_list]}")
-            logger.info(f"  Prompt[0] preview: {prompts[0][:300]}")
-            logger.info(f"  Actions[0]: {action_candidates_list[0]}")
-            logger.info(f"[VL Batch Validation] === END FIRST CALL CHECK ===")
-
-        # Batch generate with VL
-        _batch_start = time.monotonic()
+        # Step 1: Generate to get chosen actions and CoT prefixes
         raw_outputs = self.vl_engine.batch_generate(
             images=image_lists,
             prompts=prompts,
             temperature=temperature,
             system_prompt=self.get_system_prompt(),
+            return_logprobs=False,
             **kwargs
         )
-        _batch_elapsed = time.monotonic() - _batch_start
 
-        # Parse outputs (unified: always use CoT-style parser)
-        results = []
-        for idx, (raw_output, action_candidates) in enumerate(zip(raw_outputs, action_candidates_list)):
+        # Parse outputs
+        chosen_actions = []
+        cot_prefixes = []
+        for result, action_candidates in zip(raw_outputs, action_candidates_list):
+            raw_output = result.get('text', '') if isinstance(result, dict) else result
             chosen_action, cot_prefix = self._parse_vl_output_with_cot(raw_output, action_candidates)
-            action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
+            chosen_actions.append(chosen_action)
+            cot_prefixes.append(cot_prefix)
+
+        # Step 2: Extract logprobs with token-level data for each observation
+        results = []
+        for idx, (image_list, prompt, action_candidates, raw_output, chosen_action, cot_prefix) in enumerate(
+            zip(image_lists, prompts, action_candidates_list,
+                [r.get('text', '') if isinstance(r, dict) else r for r in raw_outputs],
+                chosen_actions, cot_prefixes)
+        ):
+            action_log_probs, rollout_logprob_dict, full_ids_dict, label_ids_dict = self._extract_action_logprobs_batch(
+                image_list, prompt, action_candidates, cot_prefix, temperature
+            )
+
+            if action_log_probs is None:
+                action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
+                rollout_logprob_dict = {}
+                full_ids_dict = {}
+                label_ids_dict = {}
+
             action_probs = np.exp(action_log_probs)
-
-            # Store for logging
-            if idx < 15:  # Only store first 15 for logging
-                history = histories[idx] if idx < len(histories) else []
-                prompt = prompts[idx]
-
-                # Build action probability dict
-                action_prob_dict = {
-                    action: float(action_probs[i])
-                    for i, action in enumerate(action_candidates)
-                }
-
-                self.episode_output.append({
-                    "Instruction": prompt,
-                    "Response": raw_output,
-                    "vl_prior_per_seq": action_prob_dict,
-                    "chosen_action": chosen_action,
-                    "cot_prefix": cot_prefix,
-                })
 
             results.append({
                 'action_probs': action_probs,
@@ -986,129 +1062,103 @@ class VLPriorGenerator(PriorGenerator):
                 'raw_output': raw_output,
                 'cot_prefix': cot_prefix,
                 'chosen_action': chosen_action,
+                'rollout_action_logprob': rollout_logprob_dict,
+                'full_ids': full_ids_dict,
+                'label_ids': label_ids_dict,
             })
-
-        # Log batch info at intervals (every 10 batch calls)
-        if self.batch_call_count % 10 == 1:
-            import logging
-            logger = logging.getLogger(__name__)
-            _action_dist = {}
-            _parse_fail = 0
-            for r in results:
-                _action_dist[r['chosen_action']] = _action_dist.get(r['chosen_action'], 0) + 1
-                if 'Action:' not in r.get('raw_output', ''):
-                    _parse_fail += 1
-            logger.info(
-                f"[VL Batch] #{self.batch_call_count} | "
-                f"size={len(observations)} | "
-                f"actions={sum(len(a) for a in action_candidates_list) / len(action_candidates_list):.0f} | "
-                f"time={_batch_elapsed:.2f}s ({_batch_elapsed / max(len(observations), 1):.2f}s/obs) | "
-                f"parse_fail={_parse_fail}/{len(observations)} | "
-                f"action_dist={_action_dist}"
-            )
 
         return results
 
     def build_vl_train_samples(
         self,
-        game_segments: List,
-        advantages: np.ndarray,
-        old_action_log_probs: np.ndarray,
+        raw_obs_list: List[List[np.ndarray]],
+        history_obs_list: List[List[List]],
+        vl_prior_per_tok_list: List[List[Dict]],
+        pred_values: Optional[torch.Tensor] = None,
+        target_values: Optional[torch.Tensor] = None,
+        cot_prefix_list: Optional[List[List[str]]] = None,
+        vl_action_list: Optional[List[List[str]]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Build training samples for VL from game segments with advantages.
-
-        This is the VL equivalent of LLM's build_llm_samples in datafactory.
+        Build training samples for VL - ALIGNED with LLM's build_llm_samples.
 
         Args:
-            game_segments: List of game segments from replay buffer
-            advantages: Advantage values (target_value - pred_value) for each step
-            old_action_log_probs: Old action log probabilities from collection
+            raw_obs_list: [B, T] Raw image observations
+            history_obs_list: [B, T] History observations
+            vl_prior_per_tok_list: [B, T] VL prior per token (with rollout_logprob, full_ids, label_ids)
+            pred_values: [B, T-1] Predicted values
+            target_values: [B, T-1] Target values
+            cot_prefix_list: [B, T] CoT prefixes
+            vl_action_list: [B, T] Action names
 
         Returns:
-            List of training samples, each containing:
-            - image: PIL Image
-            - prompt: Full prompt with history and actions
-            - target_action: The action that was taken
-            - old_log_prob: Old log probability of the action
-            - advantage: Advantage value for PPO loss
-            - cot_prefix: CoT reasoning (if use_cot=True)
+            List of training samples
         """
         import logging
         logger = logging.getLogger(__name__)
 
-        train_samples = []
-        total_steps = 0
+        samples = []
+        B = len(raw_obs_list)
+        if B == 0:
+            return samples
+        T = len(raw_obs_list[0])
 
-        logger.info(f"[VL Training Samples] Building samples from {len(game_segments)} segments...")
+        for b in range(B):
+            for t in range(T - 1):
+                current_obs = raw_obs_list[b][t]
+                current_hist = history_obs_list[b][t]
 
-        for seg_idx, segment in enumerate(game_segments):
-            # Extract segment data
-            raw_obs_list = segment.raw_obs_segment  # List of image observations
-            history_list = segment.history_obs_segment  # List of history tuples
-            action_list = segment.action_segment  # List of action indices
-            llm_action_list = segment.llm_action_segment  # List of action names
-            cot_prefix_list = segment.cot_prefix_segment if hasattr(segment, 'cot_prefix_segment') else [None] * len(action_list)
-
-            # Get valid actions for this environment
-            # Assume all steps have same action space
-            if hasattr(segment, 'valid_actions'):
-                valid_actions = segment.valid_actions
-            else:
-                # Fallback: extract from first history or use generic
-                valid_actions = ['NOOP', 'FIRE', 'RIGHT', 'LEFT', 'RIGHTFIRE', 'LEFTFIRE']
-
-            # Build samples for each step in segment
-            for step_idx in range(len(action_list)):
-                # Get observation (image)
-                obs = raw_obs_list[step_idx]
-                if isinstance(obs, np.ndarray):
-                    image = self._convert_obs_to_pil_image(obs)
+                # Convert obs to PIL Image
+                if isinstance(current_obs, np.ndarray):
+                    image = self._convert_obs_to_pil_image(current_obs)
                 else:
-                    image = obs
+                    image = current_obs
 
-                # Get history
-                history = history_list[step_idx] if step_idx < len(history_list) else []
+                # Build prompt (same structure as LLM)
+                image_list = self._assemble_images(current_obs, current_hist)
+                instruction = self.get_user_prompt(
+                    action_candidates=None,  # Will be filled from vl_prior_per_tok_list
+                    history=current_hist,
+                    num_images=len(image_list)
+                )
 
-                # Get action
-                action_idx = action_list[step_idx]
-                action_name = llm_action_list[step_idx] if step_idx < len(llm_action_list) else valid_actions[action_idx]
+                # Get action and logprobs (same as LLM)
+                true_action = vl_action_list[b][t+1]
+                rollout_logprob = vl_prior_per_tok_list[b][t+1]['rollout_action_logprob'][true_action]
+                full_ids = vl_prior_per_tok_list[b][t+1]['full_ids'][true_action]
+                label_ids = vl_prior_per_tok_list[b][t+1]['label_ids'][true_action]
 
-                # Get advantage and old log prob
-                advantage = advantages[seg_idx, step_idx] if seg_idx < len(advantages) else 0.0
-                old_log_prob = old_action_log_probs[seg_idx, step_idx] if seg_idx < len(old_action_log_probs) else 0.0
+                if len(label_ids) == 0:
+                    continue
 
-                # Get CoT prefix (if available)
-                cot_prefix = cot_prefix_list[step_idx] if step_idx < len(cot_prefix_list) else None
+                # Get values (same as LLM)
+                target_value = None
+                if target_values is not None:
+                    target_value = float(target_values[b][t].item())
 
-                # Build prompt (unified)
-                prompt = self.get_user_prompt(valid_actions, history)
+                pred_value = None
+                if pred_values is not None:
+                    pred_value = float(pred_values[b][t].item())
 
-                # Create training sample
-                sample = {
-                    'image': image,
-                    'prompt': prompt,
-                    'target_action': action_name,
-                    'old_log_prob': float(old_log_prob),
-                    'advantage': float(advantage),
-                    'cot_prefix': cot_prefix,
-                    'valid_actions': valid_actions,
-                }
+                # Get CoT prefix (same as LLM)
+                prefix_cot = None
+                if self.use_cot and cot_prefix_list is not None:
+                    prefix_cot = cot_prefix_list[b][t+1]
 
-                train_samples.append(sample)
-                total_steps += 1
+                samples.append({
+                    "image": image,
+                    "image_list": image_list,
+                    "instruction": instruction,
+                    "target": true_action,
+                    "pred_value": pred_value,
+                    "target_value": target_value,
+                    "rollout_logprob": rollout_logprob,
+                    "prefix_cot": prefix_cot,
+                    "full_ids": full_ids,
+                    "label_ids": label_ids,
+                })
 
-        # Log summary
-        if len(train_samples) > 0:
-            avg_advantage = np.mean([s['advantage'] for s in train_samples])
-            avg_old_logprob = np.mean([s['old_log_prob'] for s in train_samples])
-            logger.info(
-                f"[VL Training Samples] Built {len(train_samples)} samples | "
-                f"Avg advantage: {avg_advantage:.4f} | "
-                f"Avg old_logprob: {avg_old_logprob:.4f}"
-            )
-
-        return train_samples
+        return samples
 
     def compute_action_log_prob(
         self,

@@ -68,6 +68,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 handler.setFormatter(logging.Formatter("%(message)s"))
 
         self.eval_mode = llm_config.eval_dict
+        self.eval_freq = self.eval_mode.eval_freq
         self.wm_eval_freq = self.eval_mode.wm_eval_freq
         self.llm_eval_freq = self.eval_mode.llm_eval_freq
         self.llm_prior_temperature = llm_config.llm_prior_temperature
