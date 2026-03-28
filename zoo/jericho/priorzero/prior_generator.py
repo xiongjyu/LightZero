@@ -568,10 +568,15 @@ class VLPriorGenerator(PriorGenerator):
         prompt_parts.append("\n=== INSTRUCTION ===")
         if self.use_cot:
             prompt_parts.append(
-                "Choose the best action. Respond in EXACTLY this format:\n"
+                "Choose the best action. You MUST respond in EXACTLY this format:\n"
                 "Reasoning: <Sentence 1: Describe the lander's current tilt, vertical/horizontal speed, and position. "
                 "Sentence 2: Explain why the action is optimal based on the reward structure and physics.>\n"
-                "Action: <one action from the valid actions list>\n"
+                "Action: <EXACTLY ONE word from: NOOP, LEFT_ENGINE, MAIN_ENGINE, RIGHT_ENGINE>\n"
+                "\n"
+                "CRITICAL RULES:\n"
+                "- Write ONLY the action name after 'Action:', nothing else.\n"
+                "- Do NOT add punctuation, arrows (->), or explanations after the action.\n"
+                "- Do NOT write 'NOPE' or 'NO_OP', only 'NOOP'.\n"
                 "\n"
                 "Example 1:\n"
                 "Reasoning: The lander is tilted left and drifting left of the pad; firing LEFT_ENGINE will rotate it clockwise back to horizontal and push it right toward the center at a low cost.\n"
@@ -659,6 +664,60 @@ class VLPriorGenerator(PriorGenerator):
             chosen_action = action_candidates[0] if action_candidates else "NOOP"
 
         return chosen_action, cot_prefix
+
+    def _extract_action_logprobs_from_vllm(
+        self,
+        vllm_logprobs: Optional[List],
+        raw_output: str,
+        action_candidates: List[str],
+        chosen_action: str,
+        temperature: float = 1.0
+    ) -> np.ndarray:
+        """
+        Extract action log probabilities from vLLM token logprobs.
+
+        Strategy: Find "Action:" in output, then extract logprobs for action tokens.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if vllm_logprobs is None or len(vllm_logprobs) == 0:
+            logger.warning("⚠️ No logprobs from VLM, using fallback")
+            return self._action_to_logprob(chosen_action, action_candidates, temperature)
+
+        try:
+            # Find position of "Action:" in the output
+            action_pos = raw_output.lower().find("action:")
+            if action_pos == -1:
+                logger.warning("⚠️ 'Action:' not found in output, using fallback")
+                return self._action_to_logprob(chosen_action, action_candidates, temperature)
+
+            # Collect logprobs for each candidate action
+            action_logprobs_dict = {}
+
+            for candidate in action_candidates:
+                candidate_upper = candidate.upper()
+                # Search for this action in the logprobs
+                for token_logprob_dict in vllm_logprobs:
+                    if token_logprob_dict is None:
+                        continue
+                    # vLLM logprobs format: {token_id: (token_str, logprob)}
+                    for token_id, (token_str, logprob) in token_logprob_dict.items():
+                        if candidate_upper in token_str.upper():
+                            action_logprobs_dict[candidate] = logprob
+                            break
+
+            # If we found logprobs for all actions, use them
+            if len(action_logprobs_dict) == len(action_candidates):
+                logprobs_array = np.array([action_logprobs_dict[a] for a in action_candidates], dtype=np.float32)
+                return logprobs_array
+
+            logger.warning(f"⚠️ Only found {len(action_logprobs_dict)}/{len(action_candidates)} action logprobs, using fallback")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to extract logprobs: {e}, using fallback")
+
+        return self._action_to_logprob(chosen_action, action_candidates, temperature)
 
     def _action_to_logprob(
         self,
@@ -793,20 +852,31 @@ class VLPriorGenerator(PriorGenerator):
                 f"Prompt preview: {prompt[:150]}..."
             )
 
-        # Generate with VL
-        raw_output = self.vl_engine.generate(
+        # Generate with VL (request logprobs)
+        result = self.vl_engine.generate(
             image=image_list,
             prompt=prompt,
             temperature=temperature,
             system_prompt=self.get_system_prompt(),
+            return_logprobs=True,
             **kwargs
         )
+
+        # Extract text and logprobs
+        if isinstance(result, dict):
+            raw_output = result.get('text', '')
+            vllm_logprobs = result.get('logprobs', None)
+        else:
+            raw_output = result
+            vllm_logprobs = None
 
         # Parse output (unified: always use CoT-style parser which handles both formats)
         chosen_action, cot_prefix = self._parse_vl_output_with_cot(raw_output, action_candidates)
 
-        # Convert chosen action to log probability distribution
-        action_log_probs = self._action_to_logprob(chosen_action, action_candidates, temperature)
+        # Extract action log probabilities from VLM logprobs (with fallback)
+        action_log_probs = self._extract_action_logprobs_from_vllm(
+            vllm_logprobs, raw_output, action_candidates, chosen_action, temperature
+        )
         action_probs = np.exp(action_log_probs)
 
         # Log output at intervals

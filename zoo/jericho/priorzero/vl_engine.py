@@ -219,8 +219,9 @@ class VLLMVLEngine(VLEngine):
         temperature: float = 1.0,
         max_new_tokens: int = 512,
         system_prompt: Optional[str] = None,
+        return_logprobs: bool = False,
         **kwargs
-    ) -> str:
+    ) -> Union[str, Dict[str, Any]]:
         """Generate response using vLLM. Supports single image or image list."""
         from vllm import SamplingParams
 
@@ -231,6 +232,7 @@ class VLLMVLEngine(VLEngine):
             top_p=kwargs.pop('top_p', 0.95),
             top_k=kwargs.pop('top_k', 50),
             repetition_penalty=kwargs.pop('repetition_penalty', 1.1),
+            logprobs=10 if return_logprobs else None,
             **kwargs
         )
 
@@ -242,10 +244,17 @@ class VLLMVLEngine(VLEngine):
             system_prompt=system_prompt,
         )
 
-        # Extract text from output
+        # Extract text and logprobs from output
         if outputs and len(outputs) > 0:
-            return outputs[0].outputs[0].text
-        return ""
+            output = outputs[0].outputs[0]
+            text = output.text
+            if return_logprobs:
+                return {
+                    'text': text,
+                    'logprobs': output.logprobs if hasattr(output, 'logprobs') else None
+                }
+            return text
+        return "" if not return_logprobs else {'text': "", 'logprobs': None}
 
     def batch_generate(
         self,

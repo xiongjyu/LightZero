@@ -12,15 +12,15 @@ evaluator_env_num = 3
 num_simulations = 50
 reanalyze_ratio = 0.
 update_per_collect = None
-# replay_ratio = 0.25
-replay_ratio = 0.1
+replay_ratio = 0.25
+# replay_ratio = 0.1
 max_env_step = int(5e5)
 batch_size = 256
 num_unroll_steps = 10
 infer_context_length = 4
-num_layers = 2
+num_layers = 4
 norm_type = 'LN'
-game_segment_length = 20
+game_segment_length = 200
 
 buffer_reanalyze_freq = 1/5000000000
 reanalyze_batch_size = 160
@@ -37,7 +37,7 @@ reanalyze_partition = 0.75
 # ==============================================================
 
 lunarlander_image_unizero_config = dict(
-    exp_name=f'data_unizero/lunarlander_image_unizero_ns{num_simulations}_upc{update_per_collect}-rr{replay_ratio}_rer{reanalyze_ratio}_H{num_unroll_steps}-infer{infer_context_length}_bs{batch_size}_{norm_type}_seed0',
+    exp_name=f'data_unizero_0328/lunarlander_image_unizero_ns{num_simulations}_upc{update_per_collect}-rr{replay_ratio}_rer{reanalyze_ratio}_H{num_unroll_steps}-infer{infer_context_length}_bs{batch_size}_{norm_type}_seed0',
     env=dict(
         env_id='LunarLander-v2',
         observation_shape=(3, 64, 64),
@@ -99,7 +99,8 @@ lunarlander_image_unizero_config = dict(
                 use_normal_head=True,
                 use_softmoe_head=False,
                 use_moe_head=False,
-                optim_type='AdamW_mix_lr_wdecay',
+                # optim_type='AdamW_mix_lr_wdecay',
+                optim_type='AdamW',
             ),
         ),
         model_path=None,
@@ -108,8 +109,10 @@ lunarlander_image_unizero_config = dict(
         game_segment_length=game_segment_length,
         update_per_collect=update_per_collect,
         batch_size=batch_size,
-        optim_type='AdamW_mix_lr_wdecay',
-        weight_decay=1e-2,
+        # optim_type='AdamW_mix_lr_wdecay',
+        # weight_decay=1e-2,
+        optim_type='AdamW',
+        # weight_decay=1e-2,
         learning_rate=0.0001,
         piecewise_decay_lr_scheduler=False,
         num_simulations=num_simulations,

@@ -179,8 +179,8 @@ class PriorZeroVLConfig:
 
     # MCTS root logits configuration
     mcts_root_logits_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
-        # "mode": "llm_plus_wm_logits",
-        "mode": "llm_logits",
+        "mode": "llm_plus_wm_logits",
+        # "mode": "llm_logits",
         "plus_method": "fixed",
         "wm_weight": 0.5,
         "llm_max_weight": 0.7,
@@ -212,7 +212,7 @@ class PriorZeroVLConfig:
     vlm_image_mode: str = "current_only"
 
     # Prompt style: "concise" (shorter, better for small VLMs) or "legacy" (verbose, original)
-    prompt_style: str = "concise"
+    prompt_style: str = "legacy"
 
     # Training settings
     colocate_all_models: bool = True
@@ -384,7 +384,7 @@ def get_priorzero_vl_config(
     if quick_test:
         collector_env_num = 2
         num_segments = 2
-        game_segment_length = 20
+        game_segment_length = 200
         evaluator_env_num = 2
         num_simulations = 5
         collect_num_simulations = 5
@@ -397,7 +397,7 @@ def get_priorzero_vl_config(
         # num_segments = 8
         collector_env_num = 4
         num_segments = 4
-        game_segment_length = 20
+        game_segment_length = 200
         evaluator_env_num = 3
         num_simulations = 25
         collect_num_simulations = 25
@@ -405,8 +405,8 @@ def get_priorzero_vl_config(
         # eval_num_simulations = 50
 
         batch_size = 256
-        num_layers = 2
-        replay_ratio = 0.1
+        num_layers = 4
+        replay_ratio = 0.25
 
     num_unroll_steps = 10
     infer_context_length = 4
@@ -478,8 +478,8 @@ def get_priorzero_vl_config(
                 use_normal_head=True,
                 use_softmoe_head=False,
                 use_moe_head=False,
-                optim_type='AdamW_mix_lr_wdecay',
-                # optim_type='AdamW',
+                # optim_type='AdamW_mix_lr_wdecay',
+                optim_type='AdamW',
 
                 decode_loss_mode=None,
                 latent_recon_loss_weight=0,
@@ -489,10 +489,10 @@ def get_priorzero_vl_config(
             )
         ),
         # ====== [FIX] optimizer: AdamW -> AdamW_mix_lr_wdecay (layered lr/wd for encoder/transformer/head) ======
-        optim_type='AdamW_mix_lr_wdecay',
-        # optim_type='AdamW',
+        # optim_type='AdamW_mix_lr_wdecay',
+        optim_type='AdamW',
 
-        weight_decay=1e-2,
+        # weight_decay=1e-2,
         learning_rate=1e-4,
         num_unroll_steps=num_unroll_steps,
         update_per_collect=None,
