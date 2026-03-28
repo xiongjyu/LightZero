@@ -207,11 +207,11 @@ def train_priorzero(
             break
         
         # 1.评估阶段
-        if learner.train_iter != 0 and evaluator.should_eval(learner.train_iter):
+        if learner.train_iter != 0 and evaluator.should_eval(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter, phase=current_phase):
             logger.info(f"[Evaluator][Rank {rank}: Iter {learner.train_iter}] Evaluating...")
             if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                 vllm_engine.wake_up()
-            evaluator.eval(train_iter=learner.train_iter, envstep=collector.envstep)
+            evaluator.eval(wm_train_iter=learner.train_iter, llm_train_iter=policy_model.train_iter, phase=current_phase)
             if llm_cfg.vllm_enable_sleep and vllm_engine is not None:
                 vllm_engine.sleep()
         
@@ -253,7 +253,7 @@ def train_priorzero(
                     if cfg.policy.use_priority:
                         replay_buffer.update_priority(train_data, log_vars[0]['value_priority_orig'])
             policy.recompute_pos_emb_diff_and_clear_cache()
-            if train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
+            if llm_cfg.enable_rft and train_alternate and learner.train_iter - last_wm_train_iter >= train_schedule["wm_update_iters"]:
                 current_phase = "llm"
                 last_wm_train_iter = learner.train_iter
                 replay_buffer.mark_latest_transitions_consumed()
@@ -291,11 +291,10 @@ def train_priorzero(
                 replay_buffer.mark_latest_transitions_consumed()
                 
                 torch_dist_barrier_and_cuda_sync()
-                if train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
+                if llm_cfg.enable_world_model and train_alternate and trainer.global_step - last_llm_train_iter >= train_schedule["llm_update_iters"]:
                     current_phase = "wm"
                     last_llm_train_iter = trainer.global_step
-                    if data_processor.value_normalizer is not None:
-                        data_processor.value_normalizer.clear()
+                    data_processor.clear_statis()
                     print(f"[Rank {rank}] Switching to World Model training phase at llm iter: {trainer.global_step}")
             
 def main():

@@ -68,11 +68,15 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 handler.setFormatter(logging.Formatter("%(message)s"))
 
         self.eval_mode = llm_config.eval_dict
-        self.eval_freq = self.eval_mode.eval_freq
+        self.wm_eval_freq = self.eval_mode.wm_eval_freq
+        self.llm_eval_freq = self.eval_mode.llm_eval_freq
         self.llm_prior_temperature = llm_config.llm_prior_temperature
         self.history_buffers = defaultdict(
             lambda: deque(maxlen=self.llm_cfg.history_length)
         )
+        self._last_wm_eval_iter = 0
+        self._last_llm_eval_iter = 0
+        
         self._logger.info(f"[RANK {self._rank}] ✓ PriorZeroEvaluator initialized with vLLM engine")
         self._logger.info(f"[RANK {self._rank}]  - History length: {self.llm_cfg.history_length}")
         self._logger.info(f"[RANK {self._rank}]  - Obs type: {self.obs_type}")

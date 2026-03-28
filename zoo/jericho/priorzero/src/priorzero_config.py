@@ -96,8 +96,8 @@ class PriorZeroLLMConfig:
     
     train_schedule: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
         "alternate": True, # False 两者都训练（默认配置）；True: 严格交替训练：phase=wm 时仅训练 wm；phase=llm 时仅训练 llm
-        "wm_update_iters": 1e3, # alternate=True. wm 的 train_iter 
-        "llm_update_iters": 1e2, # alternate=True. llm 的 train_iter
+        "wm_update_iters": 2e3, # alternate=True. wm 的 train_iter 
+        "llm_update_iters": 2e2, # alternate=True. llm 的 train_iter
         "start_phase": "wm",   # alternate=True. 从哪个阶段开始： "wm" 或 "llm"
         "wm_warmup_updates": 0, # alternate=True/False， 在训练初期，先单独训练 wm 一段时间（更新次数），让 wm 学习到一些基本的环境动态
     }))
@@ -115,7 +115,8 @@ class PriorZeroLLMConfig:
         "world_model": True,              # 评估模式1：完全与 unizero 的 eval 一致；mcts 的根节点仅使用 WM 的logits
         "world_model_llm_prior": True,    # 评估模式2：基于 unizero 的 eval 过程, 但是 mcts 的根节点需要利用 llm 的先验；具体怎么利用取决于mcts_root_logits_dict.mode 参数
         "llm_prior": True,                # 评估模式3：仅使用 llm prior 进行 eval, 不需要 wm 进行评估
-        "eval_freq": int(500),
+        "wm_eval_freq": 500,
+        "llm_eval_freq": 50,
     }))
     
     attn_implementation: str = "flash_attention_2" 
@@ -134,17 +135,15 @@ class PriorZeroLLMConfig:
 
     # vLLM engines 
     enable_vllm: bool = True
-    enable_prefix_caching: bool = True
+    enable_prefix_caching: bool = False
     use_cuda_ipc: bool = False
-    enable_vllm_is_correction: bool = True
+    enable_vllm_is_correction: bool = False
     vllm_is_truncated_threshold:  Tuple[float, float] = (0.5, 5.0)
-    use_mispo: bool = True
+    use_mispo: bool = False
     mispo_token_truncated_threshold: Tuple[float, float] = (0.5, 2.0)
     mispo_traj_truncated_threshold: Tuple[float, float] = (0.8, 1.2)
     
     vllm_sync_backend: str = "nccl" # vLLM 同步参数使用的后端
-    vllm_sync_with_ray: bool = False # 是否使用 ray 来同步 vLLM 参数
-
     vllm_tensor_parallel_size: int = 1 # 每个vllm engine使用几张GPU张量并行 (Fixed: 1.5B model should use 1 GPU)
 
     gpu_memory_utilization: float = 0.3
@@ -155,9 +154,6 @@ class PriorZeroLLMConfig:
     reduction: str = "mean"
     
     # 训练相关参数
-    colocate_all_models: bool = True # 是否把所有模型都放在一起训练
-    policy_model_num_gpus: int = 1 # 需要训练的 llm 使用几张卡
-    reference_model_num_gpus: int = 1
     deepspeed_enable_sleep: bool = True
     
     zero_stage: int = 2
@@ -165,7 +161,6 @@ class PriorZeroLLMConfig:
     gradient_checkpointing_use_reentrant: bool = False
     max_norm: float = 1.0     # Gradient clipping
     ds_tensor_parallel_size: int = 1
-    ring_attn_size: int = 1
     
     # 需要注意的是，buffer中取一条经验是 10个样本，因为包含10次交互； num_unroll_steps = 10
     train_batch_size: int = 128 # 总的train_size, 结果= micro_batch_size *  GPUS * gradient_accumulation_steps
@@ -186,7 +181,9 @@ class PriorZeroLLMConfig:
         ),
     }))
     # advantage = target_value - pred_value 
-    advantage_type: str = "advantage_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm"
+    # advantage_global_batch_norm：意味着 llm训练阶段，所有训练数据的 advantage
+    # advantage_batch_norm：意味着 llm 训练过程，train_batch_size之前取advantage
+    advantage_type: str = "advantage_global_batch_norm"  # "advantage", "target_reward", "advantage_batch_norm", "advantage_running_norm" "advantage_global_batch_norm"
     eps_clip_low_high: Tuple[float, float] = (0.2, 0.2)
     rft_kl_coef: float = 0.01
     entropy_loss_coef: float = 0.0
@@ -255,7 +252,7 @@ def get_priorzero_config(
     batch_size = 64
     collect_num_simulations=25
     eval_num_simulations=25
-    replay_buffer_size = int(1e5)
+    replay_buffer_size = int(3e5)
     
     env_config = dict(
         stop_value=int(1e6),
