@@ -468,7 +468,7 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 root_logits = torch.log(combined_probs + 1e-8)
                 
                 for env_id, llm_prob, wm_prob, combined_prob, valid_actions in zip(ready_env_id, llm_probs, wm_probs, combined_probs, valid_actions_list):
-                    for i in range(len(valid_actions)):
+                    for i in range(len(llm_prob)):
                         mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_prob[i].item()
                         mcts_info[env_id]["root_wm_prob"][valid_actions[i]] = wm_prob[i].item()
                         mcts_info[env_id]["root_combined_prob"][valid_actions[i]] = combined_prob[i].item()
@@ -525,8 +525,10 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 }
                 batch_action.append(action)
                 for idx, action in enumerate(valid_actions_list[i]):
-                    mcts_info[env_id]["visit_count_distributions"][action] = distributions[idx]
-
+                    if idx < len(distributions):
+                        mcts_info[env_id]["visit_count_distributions"][action] = distributions[idx]
+                    else:
+                        break
             self.last_batch_obs_eval = data
             self.last_batch_action_eval = batch_action
 
