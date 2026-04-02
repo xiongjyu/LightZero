@@ -15,6 +15,27 @@ from ding.utils import ENV_REGISTRY, set_pkg_seed, get_rank, get_world_size
 from ding.envs import BaseEnv, BaseEnvTimestep
 from jericho import FrotzEnv
 
+import threading
+def run_with_timeout(func, timeout=20):
+    result = {}
+    exception = {}
+
+    def target():
+        try:
+            result['value'] = func()
+        except Exception as e:
+            exception['error'] = e
+
+    t = threading.Thread(target=target)
+    t.start()
+    t.join(timeout)
+
+    if t.is_alive():
+        return None, True  # timeout
+    if 'error' in exception:
+        raise exception['error']
+    return result.get('value', None), False
+
 
 @ENV_REGISTRY.register('jericho')
 class JerichoEnv(BaseEnv):
@@ -144,7 +165,7 @@ class JerichoEnv(BaseEnv):
         """
         # [PRIORZERO-NEW] Store raw observation text before processing
         raw_obs_text = obs  # Save original text BEFORE any modification
-
+        timeout_flag = False
         if self._action_list is None:
             if self.use_cache:
                 cache_key = self._env.get_world_state_hash()
@@ -152,12 +173,35 @@ class JerichoEnv(BaseEnv):
                     self.cache_buffer.move_to_end(cache_key)
                     self._action_list = self.cache_buffer[cache_key]
                 else:
-                    self._action_list = self._env.get_valid_actions()
+                    if self.env_type == 'zork1':
+                        actions, timeout_flag = run_with_timeout(
+                            lambda: self._env.get_valid_actions(use_parallel=False, use_ctypes=False),
+                            timeout=20
+                        )
+                        if timeout_flag:
+                            print(f"[JerichoEnv] get_valid_actions TIMEOUT (>20s), treat as halted")
+                            self._action_list = []
+                        else:
+                            self._action_list = actions
+                    else:
+                        self._action_list = self._env.get_valid_actions()
+                        
                     self.cache_buffer[cache_key] = self._action_list
                     if len(self.cache_buffer) > self.cache_size:
                         self.cache_buffer.popitem(last=False)
             else:
-                self._action_list = self._env.get_valid_actions()
+                if self.env_type == 'zork1':
+                    actions, timeout_flag = run_with_timeout(
+                            lambda: self._env.get_valid_actions(use_parallel=False, use_ctypes=False),
+                            timeout=20
+                        )
+                    if timeout_flag:
+                        print(f"[JerichoEnv] get_valid_actions TIMEOUT (>20s), treat as halted")
+                        self._action_list = []
+                    else:
+                        self._action_list = actions
+                else:
+                    self._action_list = self._env.get_valid_actions()
 
         # Filter available actions based on whether stuck actions are removed.
         if self.remove_stuck_actions:
@@ -206,7 +250,8 @@ class JerichoEnv(BaseEnv):
                     'to_play': -1,
                     'timestep': self._timestep,
                     'valid_actions': available_actions,  # [PRIORZERO] Add valid actions list
-                    'raw_obs_text': raw_obs_text  # [PRIORZERO-NEW] Add raw text
+                    'raw_obs_text': raw_obs_text,  # [PRIORZERO-NEW] Add raw text,
+                    'timeout_flag': timeout_flag
                 }
 
             else:
@@ -214,7 +259,8 @@ class JerichoEnv(BaseEnv):
                     'observation': full_obs,
                     'action_mask': action_mask,
                     'valid_actions': available_actions,  # [PRIORZERO] Add valid actions list
-                    'raw_obs_text': raw_obs_text  # [PRIORZERO-NEW] Add raw text
+                    'raw_obs_text': raw_obs_text,  # [PRIORZERO-NEW] Add raw text
+                    'timeout_flag': timeout_flag
                 }
         else:
             if self.for_unizero:
@@ -227,7 +273,8 @@ class JerichoEnv(BaseEnv):
                         'to_play': -1,
                         'timestep': self._timestep,
                         'valid_actions': available_actions,  # [PRIORZERO] Add valid actions list
-                        'raw_obs_text': raw_obs_text  # [PRIORZERO-NEW] Add raw text
+                        'raw_obs_text': raw_obs_text,  # [PRIORZERO-NEW] Add raw text
+                        'timeout_flag': timeout_flag
                     }
                 else:
                     return {
@@ -237,7 +284,8 @@ class JerichoEnv(BaseEnv):
                         'to_play': -1,
                         'timestep': self._timestep,
                         'valid_actions': available_actions,  # [PRIORZERO] Add valid actions list
-                        'raw_obs_text': raw_obs_text  # [PRIORZERO-NEW] Add raw text
+                        'raw_obs_text': raw_obs_text,  # [PRIORZERO-NEW] Add raw text
+                        'timeout_flag': timeout_flag
                     }
             else:
                 return {
@@ -245,7 +293,8 @@ class JerichoEnv(BaseEnv):
                     'obs_attn_mask': obs_attn_mask,
                     'action_mask': action_mask,
                     'valid_actions': available_actions,  # [PRIORZERO] Add valid actions list
-                    'raw_obs_text': raw_obs_text  # [PRIORZERO-NEW] Add raw text
+                    'raw_obs_text': raw_obs_text,  # [PRIORZERO-NEW] Add raw text
+                    'timeout_flag': timeout_flag
                 }
 
     def reset(self, return_str: bool = False) -> Dict[str, Any]:
@@ -382,7 +431,7 @@ class JerichoEnv(BaseEnv):
 
         processed_obs = self.prepare_obs(observation, return_str)
 
-        if self._timestep >= self.max_steps:
+        if self._timestep >= self.max_steps or processed_obs['timeout_flag']:
             done = True
 
         if self.save_replay:
