@@ -64,7 +64,6 @@ def extract_raw_obs_text(obs_dict: Dict[str, Any]) -> str:
     # Fallback: return str representation
     return str(obs_dict)
 
-
 # ==============================================================================
 # PriorZero Collector Class
 # ==============================================================================
@@ -373,7 +372,21 @@ class PriorZeroCollector(OriginalCollector):
                     for env_id in ready_env_id
                 }
                 with self.prof.block("collect_step", rank=self._rank):
-                    timesteps = self._env.step(actions)
+                    try:
+                        timesteps = self._env.step(actions)
+                        timed_out = False
+                    except RuntimeError as e:
+                        print(f"e")
+                        timed_out = True
+                if timed_out:
+                    self._logger.error(
+                        f"[RANK {self._rank}] step TIMEOUT → break collect loop"
+                    )
+                    self._env.reset({env_id: None})
+                    self._policy.reset([env_id])
+                    self._reset_stat(env_id)
+                    self.history_buffers.clear()
+                    break
 
             interaction_duration = self._timer.value / len(timesteps)
 
