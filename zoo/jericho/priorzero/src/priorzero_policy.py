@@ -468,10 +468,13 @@ class PriorZeroPolicy(OriginalUniZeroPolicy):
                 root_logits = torch.log(combined_probs + 1e-8)
                 
                 for env_id, llm_prob, wm_prob, combined_prob, valid_actions in zip(ready_env_id, llm_probs, wm_probs, combined_probs, valid_actions_list):
-                    for i in range(len(llm_prob)):
-                        mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_prob[i].item()
-                        mcts_info[env_id]["root_wm_prob"][valid_actions[i]] = wm_prob[i].item()
-                        mcts_info[env_id]["root_combined_prob"][valid_actions[i]] = combined_prob[i].item()
+                    for i in range(len(valid_actions)):
+                        if i < len(llm_prob) and i < len(wm_prob) and i < len(combined_prob):
+                            mcts_info[env_id]["root_llm_prob"][valid_actions[i]] = llm_prob[i].item()
+                            mcts_info[env_id]["root_wm_prob"][valid_actions[i]] = wm_prob[i].item()
+                            mcts_info[env_id]["root_combined_prob"][valid_actions[i]] = combined_prob[i].item()
+                        else:
+                            break
             
             network_output.policy_logits = root_logits
 
