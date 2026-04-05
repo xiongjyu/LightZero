@@ -458,6 +458,7 @@ class PriorZeroEvaluator(OriginalEvaluator):
                 )
                 self._env.reset()
                 self.history_buffers.clear()
+                episode_return.append(0.0)
                 break
             
             timesteps = to_tensor(timesteps, dtype=torch.float32)
