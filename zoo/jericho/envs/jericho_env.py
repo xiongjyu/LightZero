@@ -2,6 +2,7 @@ import logging
 import copy
 import os
 import json
+import multiprocessing as mp
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 from collections import OrderedDict
@@ -13,28 +14,135 @@ from transformers import AutoTokenizer
 
 from ding.utils import ENV_REGISTRY, set_pkg_seed, get_rank, get_world_size
 from ding.envs import BaseEnv, BaseEnvTimestep
-from jericho import FrotzEnv
 
-import threading
-def run_with_timeout(func, timeout=20):
-    result = {}
-    exception = {}
 
-    def target():
+# ==============================================================================
+# FrotzWorker: Subprocess isolation for Jericho/Frotz C-level hang protection
+# ==============================================================================
+# Jericho's Frotz emulator can hang indefinitely in C code (e.g. get_valid_actions()
+# after certain game states). Python's signal-based timeout (SIGALRM) cannot interrupt
+# C-level blocking. The only reliable way is to run Frotz in a separate process and
+# kill it via SIGKILL when it hangs.
+# ==============================================================================
+
+def _frotz_worker_loop(conn: mp.connection.Connection, game_path: str):
+    """
+    Worker loop running in a child process. Receives commands via pipe,
+    executes them on FrotzEnv, and sends results back.
+    """
+    from jericho import FrotzEnv
+    env = FrotzEnv(game_path, 0)
+    while True:
         try:
-            result['value'] = func()
+            cmd, args, kwargs = conn.recv()
+        except (EOFError, OSError):
+            break
+        try:
+            if cmd == '__shutdown__':
+                break
+            result = getattr(env, cmd)(*args, **kwargs)
+            conn.send(('ok', result))
         except Exception as e:
-            exception['error'] = e
+            conn.send(('error', e))
+    env.close()
 
-    t = threading.Thread(target=target)
-    t.start()
-    t.join(timeout)
 
-    if t.is_alive():
-        return None, True  # timeout
-    if 'error' in exception:
-        raise exception['error']
-    return result.get('value', None), False
+class FrotzWorker:
+    """
+    Proxy that runs FrotzEnv in a child process. All method calls are forwarded
+    via a Pipe. If any call exceeds `timeout` seconds, the child process is
+    killed (SIGKILL) and respawned automatically.
+    """
+
+    def __init__(self, game_path: str, timeout: float = 30.0):
+        self._game_path = game_path
+        self._timeout = timeout
+        self._proc: Optional[mp.Process] = None
+        self._conn: Optional[mp.connection.Connection] = None
+        self._spawn()
+
+    def _spawn(self):
+        """Spawn (or respawn) the worker process."""
+        if self._proc is not None and self._proc.is_alive():
+            self._proc.kill()
+            self._proc.join(timeout=5)
+        parent_conn, child_conn = mp.Pipe()
+        self._conn = parent_conn
+        self._proc = mp.Process(
+            target=_frotz_worker_loop,
+            args=(child_conn, self._game_path),
+            daemon=True,
+        )
+        self._proc.start()
+        child_conn.close()  # parent doesn't need the child end
+
+    def call(self, method: str, *args, **kwargs):
+        """
+        Call a method on the remote FrotzEnv. Raises RuntimeError on timeout.
+        """
+        try:
+            self._conn.send((method, args, kwargs))
+        except (BrokenPipeError, OSError):
+            # Process already dead, respawn and retry once
+            self._spawn()
+            self._conn.send((method, args, kwargs))
+
+        if self._conn.poll(self._timeout):
+            status, result = self._conn.recv()
+            if status == 'ok':
+                return result
+            else:
+                raise result  # re-raise the remote exception
+        else:
+            # Timeout: kill the hung process and respawn
+            logging.warning(
+                f"[FrotzWorker] Timeout ({self._timeout}s) on '{method}', killing worker process (pid={self._proc.pid})"
+            )
+            self._proc.kill()
+            self._proc.join(timeout=5)
+            self._spawn()
+            raise RuntimeError(
+                f"FrotzWorker: '{method}' timed out after {self._timeout}s. "
+                f"Worker process killed and respawned."
+            )
+
+    # Convenience wrappers matching FrotzEnv's interface
+    def reset(self):
+        return self.call('reset')
+
+    def step(self, action: str):
+        return self.call('step', action)
+
+    def get_valid_actions(self):
+        return self.call('get_valid_actions')
+
+    def get_world_state_hash(self):
+        return self.call('get_world_state_hash')
+
+    def get_player_location(self):
+        return self.call('get_player_location')
+
+    def get_inventory(self):
+        return self.call('get_inventory')
+
+    def get_walkthrough(self):
+        return self.call('get_walkthrough')
+
+    def seed(self, seed_val):
+        return self.call('seed', seed_val)
+
+    def close(self):
+        if self._proc is not None and self._proc.is_alive():
+            try:
+                self._conn.send(('__shutdown__', (), {}))
+                self._proc.join(timeout=3)
+            except Exception:
+                pass
+            if self._proc.is_alive():
+                self._proc.kill()
+                self._proc.join(timeout=3)
+        self._proc = None
+        self._conn = None
 
 
 @ENV_REGISTRY.register('jericho')
@@ -132,9 +240,14 @@ class JerichoEnv(BaseEnv):
             if self.rank != 0:
                 JerichoEnv.tokenizer = AutoTokenizer.from_pretrained(self.cfg['tokenizer_path'])
 
-        # Initialize FrotzEnv with the given game.
-        self._env: FrotzEnv = FrotzEnv(self.game_path, 0)
+        # Subprocess timeout for Frotz operations (seconds).
+        # Jericho's C code can hang indefinitely; this is the kill threshold.
+        self._frotz_timeout: float = float(self.cfg.get('frotz_timeout', 30.0))
+
+        # Initialize FrotzEnv inside a subprocess for hang protection.
+        self._env = FrotzWorker(self.game_path, timeout=self._frotz_timeout)
         self._action_list: Optional[List[str]] = None
+        self._frotz_halted: bool = False  # Set True when Frotz subprocess was killed
         self.finished: bool = False
         self._init_flag: bool = False
         self.episode_return: float = 0.0
@@ -166,19 +279,26 @@ class JerichoEnv(BaseEnv):
         # [PRIORZERO-NEW] Store raw observation text before processing
         raw_obs_text = obs  # Save original text BEFORE any modification
         if self._action_list is None:
-            if self.use_cache:
-                cache_key = self._env.get_world_state_hash()
-                if cache_key in self.cache_buffer:
-                    self.cache_buffer.move_to_end(cache_key)
-                    self._action_list = self.cache_buffer[cache_key]
+            try:
+                if self.use_cache:
+                    cache_key = self._env.get_world_state_hash()
+                    if cache_key in self.cache_buffer:
+                        self.cache_buffer.move_to_end(cache_key)
+                        self._action_list = self.cache_buffer[cache_key]
+                    else:
+                        self._action_list = self._env.get_valid_actions()
+
+                        self.cache_buffer[cache_key] = self._action_list
+                        if len(self.cache_buffer) > self.cache_size:
+                            self.cache_buffer.popitem(last=False)
                 else:
-                    self._action_list = self._env.get_valid_actions()
-                        
-                    self.cache_buffer[cache_key] = self._action_list
-                    if len(self.cache_buffer) > self.cache_size:
-                        self.cache_buffer.popitem(last=False)
-            else:
-                self._action_list =  self._env.get_valid_actions()
+                    self._action_list =  self._env.get_valid_actions()
+            except RuntimeError as e:
+                # FrotzWorker timeout: worker was killed and respawned.
+                # Return a minimal observation that signals the episode must end.
+                logging.warning(f"[JerichoEnv] get_valid_actions timed out: {e}")
+                self._action_list = []
+                self._frotz_halted = True
 
         # Filter available actions based on whether stuck actions are removed.
         if self.remove_stuck_actions:
@@ -285,6 +405,7 @@ class JerichoEnv(BaseEnv):
         self.finished = False
         self._init_flag = True
         self._action_list = None
+        self._frotz_halted = False  # Clear halted flag on successful reset
         self.episode_return = info['score'] if 'score' in info else 0.0
         self._timestep = 0
         self.episode_history = []
@@ -331,6 +452,8 @@ class JerichoEnv(BaseEnv):
             Close the environment and release any resources.
         """
         self._init_flag = False
+        if hasattr(self, '_env') and self._env is not None:
+            self._env.close()
 
     def __repr__(self) -> str:
         """
@@ -356,6 +479,17 @@ class JerichoEnv(BaseEnv):
         """
         # Clear previously blocked actions.
         self.blocked_actions = set()
+
+        # If Frotz was previously killed (halted), force done immediately.
+        if self._frotz_halted:
+            dummy_obs = self.prepare_obs("[Frotz emulator halted]", return_str)
+            info = {
+                'action_str': 'noop',
+                'abnormal': True,
+                'frotz_timeout': True,
+                'eval_episode_return': self.episode_return,
+            }
+            return BaseEnvTimestep(dummy_obs, 0.0, True, info)
 
         # Convert numerical action to string if necessary.
         if isinstance(action, str):
@@ -383,7 +517,22 @@ class JerichoEnv(BaseEnv):
 
         previous_obs: Optional[str] = self.last_observation if (self.remove_stuck_actions and self.last_observation is not None) else None
 
-        observation, reward, done, info = self._env.step(action_str)
+        try:
+            observation, reward, done, info = self._env.step(action_str)
+        except RuntimeError as e:
+            # FrotzWorker timeout: the Frotz process was killed and respawned.
+            # Return an abnormal timestep so the caller (BaseEnvManager / Collector) can reset.
+            logging.warning(f"[JerichoEnv] step() timed out on action '{action_str}': {e}")
+            self._frotz_halted = True
+            dummy_obs = self.prepare_obs("[Frotz emulator halted]", return_str)
+            info = {
+                'action_str': action_str,
+                'abnormal': True,
+                'frotz_timeout': True,
+                'eval_episode_return': self.episode_return,
+            }
+            return BaseEnvTimestep(dummy_obs, 0.0, True, info)
+
         info['action_str'] = action_str
 
         self._timestep += 1
@@ -402,6 +551,13 @@ class JerichoEnv(BaseEnv):
             self.last_observation = observation
 
         processed_obs = self.prepare_obs(observation, return_str)
+
+        # If prepare_obs triggered a timeout (e.g. get_valid_actions hung), force done.
+        if self._frotz_halted:
+            info['abnormal'] = True
+            info['frotz_timeout'] = True
+            info['eval_episode_return'] = self.episode_return
+            return BaseEnvTimestep(processed_obs, reward, True, info)
 
         if self._timestep >= self.max_steps:
             done = True
