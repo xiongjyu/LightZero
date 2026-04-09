@@ -112,12 +112,12 @@ class PriorZeroLLMConfig:
         "world_model": True,              # 评估模式1：完全与 unizero 的 eval 一致；mcts 的根节点仅使用 WM 的logits
         "world_model_llm_prior": True,    # 评估模式2：基于 unizero 的 eval 过程, 但是 mcts 的根节点需要利用 llm 的先验；具体怎么利用取决于mcts_root_logits_dict.mode 参数
         "llm_prior": True,                # 评估模式3：仅使用 llm prior 进行 eval, 不需要 wm 进行评估
-        "wm_eval_freq": 500,
-        "llm_eval_freq": 50,
+        "wm_eval_freq": 499,
+        "llm_eval_freq": 49,
     }))
     
     attn_implementation: str = "flash_attention_2" 
-    history_length: int = 10
+    history_length: int = 25
     use_cot: bool = False
     cot_weight: float = 0.1 # 控制 cot前缀token的权重，由于重点是action:，所以前缀的token权重调低
     
@@ -268,10 +268,10 @@ def get_priorzero_config(
         n_evaluator_episode=evaluator_env_num,
         manager=dict(
             shared_memory=False,
-            step_timeout=30 if env_id in ['zork1.z5'] else None,  # zork1 需要更长的 step_timeout
         ),
         use_cache=True,
         cache_size=100000,
+        get_valid_actions_timeout=40
     )
     policy_config = dict(
         type='priorzero',

@@ -2,6 +2,9 @@ import logging
 import copy
 import os
 import json
+import signal as _signal
+import time
+import multiprocessing as _mp
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 from collections import OrderedDict
@@ -15,26 +18,136 @@ from ding.utils import ENV_REGISTRY, set_pkg_seed, get_rank, get_world_size
 from ding.envs import BaseEnv, BaseEnvTimestep
 from jericho import FrotzEnv
 
-import threading
-def run_with_timeout(func, timeout=20):
-    result = {}
-    exception = {}
 
-    def target():
+def _valid_actions_worker_loop(conn, game_path, seed):
+    """Persistent worker: receives game states, returns valid actions."""
+    os.setpgrp()  # new process group so killpg can reach pool workers
+    try:
+        from jericho import FrotzEnv as _FrotzEnv
+        env = _FrotzEnv(game_path, seed)
+        while True:
+            try:
+                state = conn.recv()
+                if state is None:  # shutdown sentinel
+                    break
+                env.set_state(state)
+                actions = env.get_valid_actions()
+                conn.send(actions)
+            except EOFError:
+                break
+            except Exception:
+                try:
+                    conn.send([])
+                except Exception:
+                    break
+    finally:
+        conn.close()
+    
+class _ValidActionsWorker:
+    """
+    Manages a long-lived child process that runs get_valid_actions().
+ 
+    * First call creates the child (which loads its own FrotzEnv + pool once).
+    * Subsequent calls just send state / receive actions via Pipe (~0 overhead).
+    * On timeout the entire process group is SIGKILL'd and a fresh child starts.
+    """
+    def __init__(self, game_path, seed=0):
+        self.game_path = game_path
+        self.seed = seed
+        self._proc: Optional[_mp.Process] = None
+        self._conn = None
+        self._start()
+        
+    def _start(self):
+        parent_conn, child_conn = _mp.Pipe()
+        self._proc = _mp.Process(
+            target=_valid_actions_worker_loop,
+            args=(child_conn, self.game_path, self.seed),
+        )
+        self._proc.start()
+        child_conn.close()  # only the worker uses this end
+        self._conn = parent_conn
+    
+    def _kill(self):
+        if self._proc is not None:
+            pid = self._proc.pid
+            # Kill entire process group (child + its pool workers)
+            try:
+                os.killpg(pid, _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            try:
+                self._proc.join(timeout=5)
+            except Exception:
+                pass
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+        self._proc = None
+        self._conn = None
+        
+    def _restart(self):
+        self._kill()
+        self._start()
+    
+    def close(self):
+        if self._proc is not None and self._proc.is_alive():
+            try:
+                self._conn.send(None)  # graceful shutdown
+                self._proc.join(timeout=5)
+            except Exception:
+                pass
+            # force-kill if still alive
+            if self._proc is not None and self._proc.is_alive():
+                self._kill()
+                return
+        self._kill()  # clean up handl
+    
+    
+    def get_valid_actions(self, state, timeout=60):
+        """
+        Send *state* to the worker, wait up to *timeout* seconds.
+        Returns (actions_list, timed_out).
+        """
+        if self._proc is None or not self._proc.is_alive():
+            self._start()
+ 
+        # Send the state to the worker
         try:
-            result['value'] = func()
-        except Exception as e:
-            exception['error'] = e
-
-    t = threading.Thread(target=target)
-    t.start()
-    t.join(timeout)
-
-    if t.is_alive():
-        return None, True  # timeout
-    if 'error' in exception:
-        raise exception['error']
-    return result.get('value', None), False
+            self._conn.send(state)
+        except (BrokenPipeError, OSError):
+            self._restart()
+            try:
+                self._conn.send(state)
+            except Exception:
+                return [], True
+ 
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = max(deadline - time.monotonic(), 0.01)
+            try:
+                if self._conn.poll(remaining):
+                    try:
+                        result = self._conn.recv()
+                        return result, False
+                    except Exception:
+                        return [], False
+            except BaseException:
+                # SIGALRM or other interruption — keep waiting until deadline
+                continue
+ 
+        # Timeout — kill the stuck worker and start a fresh one
+        logging.warning(
+            f'[TIMEOUT] get_valid_actions() worker timed out after {timeout}s. '
+            f'Killing worker process group and restarting.'
+        )
+        self._restart()
+        return None, True
 
 
 @ENV_REGISTRY.register('jericho')
@@ -78,6 +191,7 @@ class JerichoEnv(BaseEnv):
         'collect_policy_mode': "agent",
         'use_cache': True,
         'cache_size': 100000,
+        'get_valid_actions_timeout': 40,
     }
 
     def __init__(self, cfg: Dict[str, Any]) -> None:
@@ -142,7 +256,10 @@ class JerichoEnv(BaseEnv):
         self._timestep: int = 0
         self.episode_history: Optional[List[Dict[str, Any]]] = None
         self.walkthrough_actions: Optional[List[str]] = None
-
+        
+        self._get_valid_actions_timeout: bool = False
+        self._valid_actions_timeout_sec: int = self.cfg.get('get_valid_actions_timeout', 60)
+        self._valid_actions_worker: Optional[_ValidActionsWorker] = None
 
         # Define observation, action, and reward spaces.
         self.observation_space: gym.spaces.Dict = gym.spaces.Dict()
@@ -166,19 +283,48 @@ class JerichoEnv(BaseEnv):
         # [PRIORZERO-NEW] Store raw observation text before processing
         raw_obs_text = obs  # Save original text BEFORE any modification
         if self._action_list is None:
+            if self._valid_actions_worker is None:
+                self._valid_actions_worker = _ValidActionsWorker(
+                    self.game_path, getattr(self, '_seed', 0)
+                )
             if self.use_cache:
                 cache_key = self._env.get_world_state_hash()
                 if cache_key in self.cache_buffer:
                     self.cache_buffer.move_to_end(cache_key)
                     self._action_list = self.cache_buffer[cache_key]
                 else:
-                    self._action_list = self._env.get_valid_actions()
-                        
-                    self.cache_buffer[cache_key] = self._action_list
-                    if len(self.cache_buffer) > self.cache_size:
-                        self.cache_buffer.popitem(last=False)
+                    state = self._env.get_state()
+                    actions, timed_out = self._valid_actions_worker.get_valid_actions(
+                        state, timeout=self._valid_actions_timeout_sec
+                    )
+                    if timed_out:
+                        logging.error(
+                            f'[TIMEOUT] get_valid_actions() timed out after '
+                            f'{self._valid_actions_timeout_sec}s at timestep '
+                            f'{self._timestep}! Setting action_list=[] and will end episode.'
+                        )
+                        self._action_list = []
+                        self._get_valid_actions_timeout = True
+                    else:
+                        self._action_list = actions if actions is not None else []
+                        self.cache_buffer[cache_key] = self._action_list
+                        if len(self.cache_buffer) > self.cache_size:
+                            self.cache_buffer.popitem(last=False)
             else:
-                self._action_list =  self._env.get_valid_actions()
+                state = self._env.get_state()
+                actions, timed_out = self._valid_actions_worker.get_valid_actions(
+                    state, timeout=self._valid_actions_timeout_sec
+                )
+                if timed_out:
+                    logging.warning(
+                        f'[TIMEOUT] get_valid_actions() timed out after '
+                        f'{self._valid_actions_timeout_sec}s at timestep '
+                        f'{self._timestep}! Setting action_list=[] and will end episode.'
+                    )
+                    self._action_list = []
+                    self._get_valid_actions_timeout = True
+                else:
+                    self._action_list = actions if actions is not None else []
 
         # Filter available actions based on whether stuck actions are removed.
         if self.remove_stuck_actions:
@@ -281,6 +427,7 @@ class JerichoEnv(BaseEnv):
             - (:obj:`Dict[str, Any]`): The processed observation from the environment reset.
         """
         initial_observation, info = self._env.reset()
+        self._get_valid_actions_timeout = False
 
         self.finished = False
         self._init_flag = True
@@ -402,6 +549,14 @@ class JerichoEnv(BaseEnv):
             self.last_observation = observation
 
         processed_obs = self.prepare_obs(observation, return_str)
+        
+        # If get_valid_actions timed out during prepare_obs, end the episode.
+        if self._get_valid_actions_timeout:
+            done = True
+            logging.warning(
+                f'[TIMEOUT] rank {self.rank} get_valid_actions() timed out during step {self._timestep}. '
+                f'Ending episode. episode_return: {self.episode_return}'
+            )
 
         if self._timestep >= self.max_steps:
             done = True
@@ -555,13 +710,12 @@ class JerichoEnv(BaseEnv):
 if __name__ == '__main__':
     from easydict import EasyDict
 
-    env_type='detective' # zork1, acorncourt, detective, omniquest
-    # Configuration dictionary for the environment.
+    env_type = 'zork1'
     env_cfg = EasyDict(
         dict(
             max_steps=400,
-            game_path="./zoo/jericho/envs/z-machine-games-master/jericho-game-suite/" + f"{env_type}.z5",
-            max_action_num=10,
+            game_path="/mnt/afs/niuyazhe/workspace/xiongjyu/LightZero/zoo/jericho/envs/z-machine-games-master/jericho-game-suite/" + f"{env_type}.z5",
+            max_action_num=200,
             tokenizer_path="google-bert/bert-base-uncased",
             max_seq_len=512,
             remove_stuck_actions=False,
@@ -569,10 +723,11 @@ if __name__ == '__main__':
             for_unizero=False,
             collector_env_num=1,
             evaluator_env_num=1,
-            save_replay=True,
+            save_replay=False,
             save_replay_path=None,
             env_type=env_type,
-            collect_policy_mode='expert'    # random, human, expert
+            collect_policy_mode='expert',
+            get_valid_actions_timeout=20,
         )
     )
     env = JerichoEnv(env_cfg)
