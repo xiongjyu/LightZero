@@ -344,6 +344,7 @@ class PriorZeroCollector(OriginalCollector):
                     'valid_actions_list': valid_actions_list,
                     "current_env_step": self._total_envstep_count,
                     "phase": phase,
+                    "llm_collect_mode": self.llm_cfg.train_schedule['llm_collect_mode']
                 }
 
                 if self.task_id is not None:
