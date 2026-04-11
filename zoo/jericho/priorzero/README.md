@@ -1,4 +1,4 @@
-# PriorZero（Jericho）实验说明
+# PriorZero说明
 
 本文档面向 `zoo/jericho/priorzero` 分支代码，重点补充：
 1. 主要文件说明；
@@ -21,7 +21,6 @@
 
 ##### A. 基础开关与模型路径
 - `model_name_or_path`：LLM 的 HuggingFace/本地模型路径。
-- `local_rank`：分布式本地卡编号（DDP/torchrun 注入）。
 - `enable_rft`：是否开启 LLM 的 RFT（强化微调）训练。
 - `enable_world_model`：是否开启 World Model（WM）训练。
 
@@ -38,8 +37,7 @@
 - `wm_update_iters`：在交替模式下，每轮 WM 连续更新步数。
 - `llm_update_iters`：在交替模式下，每轮 LLM 连续更新步数。
 - `start_phase`：交替训练起始阶段（`wm` 或 `llm`）。
-- `wm_warmup_updates`：前期仅训练 WM 的 warmup 更新步数。
-- `llm_collect_mode`：LLM 阶段的数据采集策略（`wm_collect/wm_llm_collect/no_collect`）。
+- `llm_collect_mode`：LLM 训练阶段的数据采集策略（`wm_collect/wm_llm_collect/no_collect`）。
 
 ##### D. MCTS 根节点先验融合
 - `llm_prior_temperature`：LLM 先验分布温度（温度越高越平滑）。
@@ -161,10 +159,10 @@ bash scripts/run_priorzero_ddp.sh
 实际跑实验前，主要改两个地方：
 
 1) `src/priorzero_config.py`
-- 修改训练/融合/损失等核心配置（例如 `train_schedule`、`mcts_root_logits_dict`、`advantage_type`、`rft_kl_coef` 等）。
+- 修改训练/融合/损失等核心配置（例如 `train_schedule`、`mcts_root_logits_dict`、`advantage_type` 等）。
 - 修改模型预设（`MODEL_CONFIGS`）或 `get_priorzero_config` 中与环境相关的设置。
 
-2) `scripts/run_priorzero_ddp.sh`（你提到的 `scripts/run_priorzero_ddp`）
+2) `scripts/run_priorzero_ddp.sh`
 - 修改 `CUDA_DEVICES`、`NPROC_PER_NODE`、`MASTER_PORT`。
 - 修改 `ENV_ID`、`LLM_MODEL`、`USE_COT`。
 - 确认日志目录 `LOG_DIR`。
@@ -179,12 +177,10 @@ bash scripts/run_priorzero_ddp.sh
 ## 3. 目前实验结果（阶段性结论）
 
 当前结果可总结为：
-- 在 `detective / zork1 / acorncourt / omniquest` 四个环境中，**LLM/WM 交替训练模式**下，实验已出现收敛迹象；
+- 在 `detective / zork1 / acorncourt / omniquest` 四个环境中，**LLM/WM 交替训练模式**下，实验均出现比 Unizero更早收敛甚至性能更好的趋势；
 - 但在 **LLM 冻结**（或后期 LLM 更新不足）设置下，仍需重点讨论：
   - 如何让 PriorZero 在训练后期继续稳定收敛；
-  - 如何避免后期陷入“WM 主导但策略增益有限”的平台期。
 
-换言之：当前方案证明了“交替训练可行”，下一步关键是“后期性能继续提升”。
 
 ---
 
@@ -215,6 +211,3 @@ bash scripts/run_priorzero_ddp.sh
 - 评估在高维观测下，LLM（或多模态模型）与 WM 交替训练的稳定性与样本效率。
 
 ---
-
-## 5. 一句话实践建议
-先用 `detective.z5` + `qwen2.5-3b` 完成一轮可复现实验（固定 seed、固定脚本），确认日志曲线稳定后，再横向迁移到其余环境做 ablation。

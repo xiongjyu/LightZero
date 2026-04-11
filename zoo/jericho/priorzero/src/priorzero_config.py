@@ -71,7 +71,6 @@ def print_available_models():
 @dataclass
 class PriorZeroLLMConfig:
     model_name_or_path: str = "Qwen2.5-3B-Instruct"
-    local_rank: int = -1
     enable_rft: bool = True
     enable_world_model: bool = True
     train_mode_dict: Optional[EasyDict] = field(default_factory=lambda: EasyDict({
@@ -96,7 +95,6 @@ class PriorZeroLLMConfig:
         "wm_update_iters": 2e3, # alternate=True. wm 的 train_iter 
         "llm_update_iters": 2e2, # alternate=True. llm 的 train_iter
         "start_phase": "wm",   # alternate=True. 从哪个阶段开始： "wm" 或 "llm"
-        "wm_warmup_updates": 0, # alternate=True/False， 在训练初期，先单独训练 wm 一段时间（更新次数），让 wm 学习到一些基本的环境动态
         "llm_collect_mode": "no_collect" # wm_collect意味着llm训练过程收集数据使用 wm; wm_llm_collect意味着 llm 训练过程收集数据使用 llm 和 wm; no_collect 意味着 llm 训练过程不收集数据，直接使用 replay buffer 中的数据
     }))
 
